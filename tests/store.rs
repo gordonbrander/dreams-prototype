@@ -132,7 +132,7 @@ fn delete_tombstone_and_undelete() {
     assert!(back.rev.starts_with("3-"));
     assert_eq!(s.get("a").unwrap().body["title"], "back");
     assert_eq!(ids(&s.list(&ListQuery { tag: Some("x".into()), ..Default::default() }).unwrap()), vec!["a"]);
-    assert_eq!(s.history("a", None).unwrap().len(), 3);
+    assert_eq!(s.history("a", None).unwrap().revisions.len(), 3);
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn schema_validation_on_write() {
     let mut changed = note_schema();
     changed["required"] = json!([]);
     assert!(matches!(s.register_schema(changed), Err(StoreError::ImmutableSchema { .. })));
-    assert_eq!(s.list_schemas().unwrap().len(), 1);
+    assert_eq!(s.list_schemas().unwrap().schemas.len(), 1);
     assert_eq!(s.get_schema("note/v1").unwrap()["title"], "Note");
     assert!(matches!(s.get_schema("nope"), Err(StoreError::UnknownType { .. })));
 }

@@ -11,13 +11,13 @@ use rmcp::{
     transport::stdio,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
 use crate::schema::SchemaSummary;
-use crate::store::{Changes, ListQuery, Page, Store};
+use crate::store::{Changes, History, ListQuery, Page, SchemaList, Store};
 
 fn to_mcp(e: StoreError) -> McpError {
     let data = serde_json::to_value(&e).ok();
@@ -31,6 +31,12 @@ fn to_mcp(e: StoreError) -> McpError {
 pub struct IdParams {
     /// Document id.
     pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RevParams {
+    /// A revision id, for example `2-ab12...`.
+    pub rev: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -69,16 +75,6 @@ pub struct RegisterSchemaParams {
     pub schema: Value,
 }
 
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct SchemaList {
-    pub schemas: Vec<SchemaSummary>,
-}
-
-#[derive(Debug, Serialize, JsonSchema)]
-pub struct HistoryResult {
-    pub revisions: Vec<Doc>,
-}
-
 #[derive(Clone)]
 pub struct Vault {
     store: Arc<Mutex<Store>>,
@@ -112,6 +108,11 @@ impl Vault {
         self.lock()?.get(&p.id).map(Json).map_err(to_mcp)
     }
 
+    #[tool(description = "Get one revision by its _rev, current or historical.")]
+    fn get_rev(&self, Parameters(p): Parameters<RevParams>) -> Result<Json<Doc>, McpError> {
+        self.lock()?.get_rev(&p.rev).map(Json).map_err(to_mcp)
+    }
+
     #[tool(description = "Delete a document by writing a tombstone. parent must be its current _rev.")]
     fn delete_doc(&self, Parameters(p): Parameters<DeleteParams>) -> Result<Json<Doc>, McpError> {
         self.lock()?.delete(&p.id, &p.parent).map(Json).map_err(to_mcp)
@@ -130,11 +131,8 @@ impl Vault {
     }
 
     #[tool(description = "Revision history of a document from the current revision back to genesis.")]
-    fn doc_history(&self, Parameters(p): Parameters<HistoryParams>) -> Result<Json<HistoryResult>, McpError> {
-        self.lock()?
-            .history(&p.id, p.limit)
-            .map(|revisions| Json(HistoryResult { revisions }))
-            .map_err(to_mcp)
+    fn doc_history(&self, Parameters(p): Parameters<HistoryParams>) -> Result<Json<History>, McpError> {
+        self.lock()?.history(&p.id, p.limit).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "Change feed: every revision (including tombstones) committed after `since`, in order. \
@@ -159,10 +157,7 @@ impl Vault {
 
     #[tool(description = "List registered schemas (id, title, description).")]
     fn list_schemas(&self) -> Result<Json<SchemaList>, McpError> {
-        self.lock()?
-            .list_schemas()
-            .map(|schemas| Json(SchemaList { schemas }))
-            .map_err(to_mcp)
+        self.lock()?.list_schemas().map(Json).map_err(to_mcp)
     }
 }
 

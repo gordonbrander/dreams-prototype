@@ -50,6 +50,17 @@ pub struct Page {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct History {
+    /// Revisions from the current head back to genesis, newest first.
+    pub revisions: Vec<Doc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SchemaList {
+    pub schemas: Vec<SchemaSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Changes {
     /// Revisions in commit order, each carrying `_seq`.
     pub results: Vec<Doc>,
@@ -223,7 +234,7 @@ impl Store {
     }
 
     /// Revisions from the current head back to genesis, newest first.
-    pub fn history(&self, id: &str, limit: Option<usize>) -> Result<Vec<Doc>, StoreError> {
+    pub fn history(&self, id: &str, limit: Option<usize>) -> Result<History, StoreError> {
         let limit = limit.unwrap_or(MAX_HISTORY).clamp(1, MAX_HISTORY) as i64;
         let sql = format!(
             "WITH RECURSIVE chain(_rev, _parent, n) AS (
@@ -238,7 +249,7 @@ impl Store {
         if docs.is_empty() {
             return Err(StoreError::NotFound { id: id.to_string() });
         }
-        Ok(docs)
+        Ok(History { revisions: docs })
     }
 
     /// Current, non-deleted documents, most recently modified first.
@@ -310,8 +321,10 @@ impl Store {
         self.schemas.get(&self.conn, id)
     }
 
-    pub fn list_schemas(&self) -> Result<Vec<SchemaSummary>, StoreError> {
-        self.schemas.list(&self.conn)
+    pub fn list_schemas(&self) -> Result<SchemaList, StoreError> {
+        Ok(SchemaList {
+            schemas: self.schemas.list(&self.conn)?,
+        })
     }
 
     /// Raw connection, for tests and maintenance.
