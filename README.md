@@ -93,6 +93,7 @@ Filters take either form. `--type doc://schemas/note` matches every pinned revis
 subconscious [--db PATH] [--json] <command>
 
   init                                            create the database if needed
+  seed                                            restore the built-in documents
   serve                                           serve MCP over stdio
   mcp-json                                        print the MCP server entry for this vault
 
@@ -182,11 +183,11 @@ subconscious --db laptop.db init
 subconscious --db desktop.db init
 subconscious --db laptop.db doc put notes/plan.md
 subconscious --db laptop.db sync desktop.db
-pulled 0 revisions from /Users/me/desktop.db (6 present, 0 excluded)
-pushed 1 revision to /Users/me/desktop.db (6 present, 0 excluded)
+pulled 0 revisions from /Users/me/desktop.db (8 present, 0 excluded)
+pushed 1 revision to /Users/me/desktop.db (8 present, 0 excluded)
 ```
 
-Two vaults made by the same binary seed the same six built-in documents with identical revisions, so the first sync copies none of them.
+Two vaults made by the same binary seed the same eight built-in documents with identical revisions, so the first sync copies none of them.
 
 ### How a pull works
 
@@ -265,7 +266,7 @@ subconscious doc resolve notes/plan.md plan.md
 
 A resolve does not delete the losing revisions. It writes a tombstone on each one, and you can still read them. As in CouchDB, `doc get <id> --deleted-conflicts` lists these tombstones as `_deleted_conflicts`.
 
-Vaults seeded by different versions of this binary can have different built-in schemas or runners. A sync then makes conflicts on those documents. MCP clients cannot write them, so resolve them with the CLI.
+Vaults seeded by different versions of this binary can have different built-in schemas, runners, or skills. A sync then makes conflicts on those documents. MCP clients cannot write the schemas or runners, so resolve them with the CLI.
 
 ### Let an agent merge
 
@@ -515,6 +516,10 @@ EOF
 
 The server shows each skill as one file, `skill://<name>/SKILL.md`. The file has `name` and `description` as frontmatter, then `content`. `skills/list` and `skills/get` return it, and `resources/read` reads it. `resources/list` also lists it, for hosts that do not know the extension. When two documents have the same `name`, the most recently changed one wins. Agents can write skills with `put_doc`. The `schemas/skill` document itself is read-only over MCP.
 
+### Daily notes
+
+Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is an ordinary document. Its `_id` is the local date as `YYYY-MM-DD`, and it has the tag `daily`. The skill tells the agent how to create today's note, add to it with `_parent`, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes.
+
 ## Storage
 
 One SQLite file in WAL mode. Migrations run on open.
@@ -523,7 +528,8 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Three are seeded on first use: `schemas/task`, `schemas/run`, and `schemas/runner`, plus the three default runners.
+- Schemas are documents. Every entry point seeds the built-in documents on first use: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, the three default runners, and the `skills/daily-note` skill. A built-in document that you edit or delete stays as you left it.
+- `subconscious seed` restores the built-in documents. It writes each one whose current revision is different from the default, and it revives deleted ones. The earlier revisions stay in history. Use it after an edit goes wrong, or to get the defaults of a newer binary.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
 

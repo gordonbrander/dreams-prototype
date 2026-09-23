@@ -391,7 +391,8 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
 
 // ---- scheduled tasks ------------------------------------------------------
 
-use subconscious::runner::{self, PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
+use subconscious::runner::{PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
+use subconscious::seed;
 use subconscious::task::{self, RUN_TYPE, TASK_TYPE};
 
 fn plus_secs(s: &Store, from: &str, secs: i64) -> String {
@@ -440,7 +441,7 @@ fn put_if_writes_only_when_the_check_passes() {
 #[test]
 fn protected_types_are_read_only() {
     let mut s = store();
-    runner::seed_schemas(&mut s).unwrap();
+    seed::seed_schemas(&mut s).unwrap();
     let doc = s
         .put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]})))
         .unwrap();
@@ -481,19 +482,28 @@ fn protected_types_are_read_only() {
 #[test]
 fn seed_is_idempotent_and_respects_deletions() {
     let mut s = store();
-    let first = runner::seed(&mut s).unwrap();
+    let first = seed::seed(&mut s).unwrap();
     assert_eq!(
         first,
-        ["schemas/task", "schemas/run", "schemas/runner", "schemas/skill", "runners/claude", "runners/codex", "runners/pi"]
+        [
+            "schemas/task",
+            "schemas/run",
+            "schemas/runner",
+            "schemas/skill",
+            "runners/claude",
+            "runners/codex",
+            "runners/pi",
+            "skills/daily-note",
+        ]
     );
-    assert!(runner::seed(&mut s).unwrap().is_empty());
+    assert!(seed::seed(&mut s).unwrap().is_empty());
     let pi = s.get("runners/pi").unwrap();
     assert_eq!(pi.type_path(), Some(RUNNER_TYPE));
     let runner_schema = s.get("schemas/runner").unwrap();
     assert_eq!(pi.type_id.as_deref(), Some(pinned("schemas/runner", &runner_schema.rev).as_str()));
     assert_eq!(runner_schema.type_id, None);
     s.delete("runners/pi", &pi.rev).unwrap();
-    assert!(runner::seed(&mut s).unwrap().is_empty());
+    assert!(seed::seed(&mut s).unwrap().is_empty());
     assert!(matches!(s.get("runners/pi"), Err(StoreError::Deleted { .. })));
 
     // a vault from before doc:// types is refused
@@ -501,7 +511,29 @@ fn seed_is_idempotent_and_respects_deletions() {
     old.connection()
         .execute("INSERT INTO docs(_rev,_id,_parent,_type,_deleted,body) VALUES ('1-aa','x',NULL,'note/v1',0,'{}')", [])
         .unwrap();
-    assert!(runner::seed(&mut old).unwrap_err().to_string().contains("predates"));
+    assert!(seed::seed(&mut old).unwrap_err().to_string().contains("predates"));
+}
+
+#[test]
+fn restore_rewrites_edited_and_deleted_defaults() {
+    let mut s = store();
+    seed::seed(&mut s).unwrap();
+    let claude = s.get("runners/claude").unwrap();
+    s.put(input(json!({"_id": "runners/claude", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})))
+        .unwrap();
+    let skill = s.get("skills/daily-note").unwrap();
+    s.delete("skills/daily-note", &skill.rev).unwrap();
+
+    assert_eq!(seed::restore(&mut s).unwrap(), ["runners/claude", "skills/daily-note"]);
+    assert_eq!(s.get("runners/claude").unwrap().body, claude.body);
+    assert_eq!(s.get("skills/daily-note").unwrap().body, skill.body);
+    assert!(seed::restore(&mut s).unwrap().is_empty());
+    // the edit stays in history
+    assert_eq!(s.history("runners/claude", None).unwrap().revisions.len(), 3);
+
+    // a fresh vault is seeded and reports what it wrote
+    let mut fresh = store();
+    assert_eq!(seed::restore(&mut fresh).unwrap().len(), 8);
 }
 
 fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> subconscious::Doc {
@@ -515,7 +547,7 @@ fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> subcon
 #[test]
 fn evaluate_time_and_change_rules() {
     let mut s = store();
-    runner::seed_schemas(&mut s).unwrap(); // seqs 1..=4
+    seed::seed_schemas(&mut s).unwrap(); // seqs 1..=4
     let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
     let plain = add_task(&mut s, "tasks/plain", "1h", None);
     let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));

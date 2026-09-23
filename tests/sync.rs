@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
-use subconscious::runner::{self, RUNNER_TYPE, Runner};
+use subconscious::runner::{RUNNER_TYPE, Runner};
+use subconscious::seed;
 use subconscious::sync::{pull, sync};
 use subconscious::task::{RUN_TYPE, TASK_TYPE};
 use subconscious::{Doc, PutInput, Store, StoreError};
@@ -159,11 +160,11 @@ fn a_missing_parent_is_skipped() {
 fn tasks_and_runs_do_not_replicate_but_runners_do() {
     let mut a = store();
     let mut b = store();
-    runner::seed(&mut a).unwrap();
-    runner::seed(&mut b).unwrap();
+    seed::seed(&mut a).unwrap();
+    seed::seed(&mut b).unwrap();
     let fresh = sync(&mut a, "a", &mut b, "b").unwrap();
     for r in &fresh {
-        assert_eq!((r.written, r.present), (0, 7), "seeded documents are identical");
+        assert_eq!((r.written, r.present), (0, 8), "seeded documents are identical");
     }
 
     put(&mut b, json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}));

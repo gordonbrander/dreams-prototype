@@ -107,11 +107,11 @@ pub fn find(store: &Store, uri: &str) -> Result<Option<Skill>, StoreError> {
 mod tests {
     use super::*;
     use crate::markdown;
-    use crate::runner;
+    use crate::seed;
 
     fn store() -> Store {
         let mut store = Store::open_in_memory().unwrap();
-        runner::seed(&mut store).unwrap();
+        seed::seed(&mut store).unwrap();
         store
     }
 
@@ -127,9 +127,7 @@ mod tests {
     fn renders_skill_md_with_frontmatter() {
         let mut store = store();
         put(&mut store, "skills/a", "git-workflow", "# Steps\n");
-        let skills = list(&store).unwrap();
-        assert_eq!(skills.len(), 1);
-        let skill = &skills[0];
+        let skill = find(&store, "skill://git-workflow/SKILL.md").unwrap().unwrap();
         assert_eq!(skill.uri, "skill://git-workflow/SKILL.md");
         let parsed = markdown::parse(&skill.text).unwrap();
         assert_eq!(parsed["name"], "git-workflow");
@@ -154,9 +152,15 @@ mod tests {
         let mut store = store();
         put(&mut store, "skills/old", "same", "old");
         put(&mut store, "skills/new", "same", "new");
-        let skills = list(&store).unwrap();
+        let skills: Vec<Skill> = list(&store).unwrap().into_iter().filter(|s| s.name == "same").collect();
         assert_eq!(skills.len(), 1);
         assert!(skills[0].text.ends_with("new"), "{}", skills[0].text);
+    }
+
+    #[test]
+    fn a_seeded_vault_has_the_daily_note_skill() {
+        let skill = find(&store(), "skill://daily-note/SKILL.md").unwrap().unwrap();
+        assert!(skill.text.contains("tag `daily`"), "{}", skill.text);
     }
 
     #[test]

@@ -127,7 +127,7 @@ fn markdown_round_trip_unchanged_then_edited() {
     let again = sb.ok(&["doc", "update", "n1", "--format", "md"], &fetched);
     assert_eq!(again, fetched);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 7 + 2, "seven seeded documents, the schema, the note");
+    assert_eq!(changes.results.len(), 8 + 2, "eight seeded documents, the schema, the note");
 
     // edited: update yields gen 2 with parent = rev 1
     let edited = fetched.replace("first draft", "second draft");
@@ -204,7 +204,7 @@ fn lists_tables_and_json_shapes() {
     assert_eq!(&cells[2..], ["Alpha", "x"]);
 
     let page: Page = serde_json::from_value(sb.json(&["doc", "list"], "")).unwrap();
-    assert_eq!(page.docs.len(), 7 + 2, "seven seeded documents plus a and b");
+    assert_eq!(page.docs.len(), 8 + 2, "eight seeded documents plus a and b");
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--limit", "1"], "")).unwrap();
     assert!(page.next.is_some());
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
@@ -215,7 +215,7 @@ fn lists_tables_and_json_shapes() {
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
-    assert!(text.trim_end().ends_with("last_seq: 9"));
+    assert!(text.trim_end().ends_with("last_seq: 10"));
 
     // type filters: a path matches every pinned revision, the TYPE column shows the path
     let schema = sb.file("note.yaml", SCHEMA_YAML);
@@ -275,7 +275,7 @@ fn export_then_import_round_trip() {
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("10 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with("11 exported, 0 errors"), "{out}");
     assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
@@ -291,7 +291,7 @@ fn export_then_import_round_trip() {
     assert_eq!(statuses, ["unchanged", "unchanged"]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 7 + 5);
+    assert_eq!(changes.results.len(), 8 + 5);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
@@ -340,11 +340,26 @@ fn add_test_runners(sb: &Sandbox) {
 }
 
 #[test]
+fn seed_restores_the_built_in_documents() {
+    let sb = Sandbox::new();
+    sb.ok(&["init"], "");
+    assert_eq!(sb.ok(&["seed"], ""), "nothing to restore\n");
+    let skill = sb.file("skill.json", r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#);
+    sb.ok(&["doc", "update", "skills/daily-note", &skill], "");
+    sb.ok(&["runner", "rm", "runners/pi"], "");
+    let out = sb.ok(&["seed"], "");
+    assert_eq!(out, "restored runners/pi\nrestored skills/daily-note\n");
+    assert!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"].as_str().unwrap().contains("daily"));
+    assert_eq!(sb.json(&["seed"], "")["restored"], serde_json::json!([]));
+}
+
+#[test]
 fn runners_are_documents_seeded_once() {
     let sb = Sandbox::new();
     let out = sb.ok(&["init"], "");
     assert!(out.contains("seeded schemas/task"), "{out}");
     assert!(out.contains("seeded runners/claude"), "{out}");
+    assert!(out.contains("seeded skills/daily-note"), "{out}");
     let task_schema = sb.json(&["doc", "get", "schemas/task"], "");
     assert_eq!(task_schema["title"], "Scheduled task");
     assert!(task_schema["_type"].is_null());
@@ -547,7 +562,7 @@ fn pull_and_sync_between_two_vaults() {
     b.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "from b"}"#);
     let out = a.ok(&["pull", &b_db], "");
     assert!(out.starts_with("pulled 1 revision from "), "{out}");
-    assert!(out.contains("7 present"), "{out}");
+    assert!(out.contains("8 present"), "{out}");
     assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
 
     a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);

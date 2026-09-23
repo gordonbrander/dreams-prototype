@@ -15,7 +15,7 @@ use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
 use crate::task::{self, Evaluation, TickReport, When};
 use crate::sync::{self, PullReport};
-use crate::{daemon, markdown, mcp, resolve, rev};
+use crate::{daemon, markdown, mcp, resolve, rev, seed};
 
 /// Subconscious: a versioned document vault in SQLite, with a CLI and an MCP server.
 #[derive(Parser)]
@@ -37,8 +37,11 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the database if needed, apply migrations, and seed the built-in schemas and runners.
+    /// Create the database if needed, apply migrations, and seed the built-in schemas, runners, and skills.
     Init,
+    /// Restore the built-in schemas, runners, and skills. Writes each one whose current
+    /// revision differs from the default, and revives deleted ones. Earlier revisions stay in history.
+    Seed,
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
     Serve,
     /// Print how a host starts `serve` on this vault, as the JSON of one `mcpServers` entry.
@@ -346,7 +349,7 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
     // set so they never carry a task's id. The library never writes on open.
     let open = || -> Result<(Store, Vec<String>), StoreError> {
         let mut store = Store::open(&cli.db)?;
-        let seeded = runner::seed(&mut store)?;
+        let seeded = seed::seed(&mut store)?;
         store.set_actor(cli.actor.clone());
         Ok((store, seeded))
     };
@@ -354,10 +357,23 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
     match cli.command {
         Command::Init => {
             let mut store = Store::open(&cli.db)?;
-            let seeded = runner::seed(&mut store)?;
+            let seeded = seed::seed(&mut store)?;
             writeln!(out, "initialized {}", cli.db.display())?;
             for id in seeded {
                 writeln!(out, "seeded {id}")?;
+            }
+        }
+        Command::Seed => {
+            let mut store = Store::open(&cli.db)?;
+            let restored = seed::restore(&mut store)?;
+            if json {
+                writeln!(out, "{}", serde_json::json!({ "restored": restored }))?;
+            } else if restored.is_empty() {
+                writeln!(out, "nothing to restore")?;
+            } else {
+                for id in restored {
+                    writeln!(out, "restored {id}")?;
+                }
             }
         }
         Command::Serve => {

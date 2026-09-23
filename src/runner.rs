@@ -2,17 +2,16 @@
 //! template. A task names one by `doc://` reference. The template is
 //! spawned directly, never through a shell, with tokens replaced inside
 //! each element. Runner commands are code, so they enter only through the
-//! CLI: `serve` marks the type protected. This module also seeds the
-//! built-in schema and runner documents.
+//! CLI: `serve` marks the type protected. The default runners are seeded
+//! by `seed`.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::doc::{Doc, DocRef, PutInput};
+use crate::doc::{Doc, DocRef};
 use crate::error::StoreError;
 use crate::store::Store;
-use crate::skill;
 use crate::task::{self, parse_duration};
 
 /// The seeded schema document for runners, as a type path.
@@ -38,105 +37,6 @@ pub const RUNNER_SCHEMA: &str = r#"{
     "title": {"type": "string"}
   }
 }"#;
-
-/// The runners the binary seeds: id, title, argv.
-pub const DEFAULTS: &[(&str, &str, &[&str])] = &[
-    (
-        "runners/claude",
-        "Claude Code, headless",
-        // Not `--bare`: bare mode skips the stored login.
-        &[
-            "claude",
-            "-p",
-            "--permission-mode",
-            "dontAsk",
-            "--allowedTools",
-            "Bash(subconscious:*)",
-            "--mcp-config",
-            "{mcp}",
-            "--strict-mcp-config",
-        ],
-    ),
-    (
-        "runners/codex",
-        "Codex CLI, non-interactive",
-        // `-c approval_policy=never` works on every Codex version; `-a` does not.
-        &[
-            "codex",
-            "exec",
-            "-c",
-            "approval_policy=never",
-            "--sandbox",
-            "workspace-write",
-            "--skip-git-repo-check",
-            "--output-last-message",
-            "{out}",
-            "-",
-        ],
-    ),
-    ("runners/pi", "Pi, print mode", &["pi", "-p", "--no-extensions", "-"]),
-];
-
-/// The seeded schema documents: id and body.
-pub const SCHEMAS: &[(&str, &str)] = &[
-    ("schemas/task", task::TASK_SCHEMA),
-    ("schemas/run", task::RUN_SCHEMA),
-    ("schemas/runner", RUNNER_SCHEMA),
-    ("schemas/skill", skill::SKILL_SCHEMA),
-];
-
-/// Write the seeded schema documents, then the default runners, each only
-/// when its id has never existed. An edited or deleted default is left as
-/// the user left it. Every product entry point calls this; the library
-/// never writes on open. Returns the ids written.
-pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    let legacy: bool = store.connection().query_row(
-        "SELECT EXISTS(SELECT 1 FROM docs WHERE _type IS NOT NULL AND _type NOT LIKE 'doc://%')",
-        [],
-        |r| r.get(0),
-    )?;
-    if legacy {
-        return Err(StoreError::invalid(
-            "this vault predates doc:// types; delete it and start again",
-        ));
-    }
-    let mut written = seed_schemas(store)?;
-    written.extend(seed_runners(store)?);
-    Ok(written)
-}
-
-pub fn seed_schemas(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    let mut written = Vec::new();
-    for (id, body) in SCHEMAS {
-        if store.exists(id)? {
-            continue;
-        }
-        let mut value: Value = serde_json::from_str(body).expect("seeded schemas are valid JSON");
-        value["_id"] = json!(id);
-        store.put(serde_json::from_value(value)?)?;
-        written.push(id.to_string());
-    }
-    Ok(written)
-}
-
-pub fn seed_runners(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    let mut written = Vec::new();
-    for (id, title, argv) in DEFAULTS {
-        if store.exists(id)? {
-            continue;
-        }
-        let input: PutInput = serde_json::from_value(json!({
-            "_id": id,
-            "_type": RUNNER_TYPE,
-            "title": title,
-            "argv": argv,
-            "timeout": DEFAULT_TIMEOUT,
-        }))?;
-        store.put(input)?;
-        written.push(id.to_string());
-    }
-    Ok(written)
-}
 
 #[derive(Debug, Clone)]
 pub struct Runner {
