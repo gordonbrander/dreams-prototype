@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
-use crate::store::{Changes, History, ListQuery, Page, Store};
+use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
 
 fn to_mcp(e: StoreError) -> McpError {
     let data = serde_json::to_value(&e).ok();
@@ -26,9 +26,20 @@ fn to_mcp(e: StoreError) -> McpError {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
-pub struct IdParams {
+pub struct GetParams {
     /// Document id.
     pub id: String,
+    /// Also list tombstoned leaves other than the winner, as _deleted_conflicts.
+    #[serde(default)]
+    pub deleted_conflicts: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ConflictsParams {
+    /// Cursor: the previous page's `next`.
+    pub after: Option<String>,
+    /// Page size, 1..=1000. Default 50.
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -43,6 +54,17 @@ pub struct DeleteParams {
     pub id: String,
     /// The current revision being deleted.
     pub parent: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct ResolveParams {
+    /// Document id.
+    pub id: String,
+    /// The merged document, written on the winning revision. Omit _parent (or
+    /// set it to the winner's _rev). Omit the whole field to keep the winner as it is.
+    pub merged: Option<PutInput>,
+    /// The _conflicts you read. When given, resolve fails if they changed since.
+    pub conflicts: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -96,9 +118,21 @@ impl Vault {
         self.lock()?.put(input).map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "Get the current revision of a document by _id.")]
-    fn get_doc(&self, Parameters(p): Parameters<IdParams>) -> Result<Json<Doc>, McpError> {
-        self.lock()?.get(&p.id).map(Json).map_err(to_mcp)
+    #[tool(description = "Get the current revision of a document by _id. When sync made concurrent edits, \
+        _conflicts lists the other live revisions; read them with get_rev and settle them with resolve_doc.")]
+    fn get_doc(&self, Parameters(p): Parameters<GetParams>) -> Result<Json<Doc>, McpError> {
+        let store = self.lock()?;
+        let mut doc = store.get(&p.id).map_err(to_mcp)?;
+        if p.deleted_conflicts {
+            doc.deleted_conflicts = store.deleted_conflicts(&doc.id, &doc.rev).map_err(to_mcp)?;
+        }
+        Ok(Json(doc))
+    }
+
+    #[tool(description = "List documents with conflicts, in id order: each with its winning _rev and the \
+        other live revisions. Page with `after` = previous page's `next`.")]
+    fn list_conflicts(&self, Parameters(p): Parameters<ConflictsParams>) -> Result<Json<ConflictPage>, McpError> {
+        self.lock()?.conflicted(p.after.as_deref(), p.limit).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "Get one revision by its _rev, current or historical.")]
@@ -106,9 +140,16 @@ impl Vault {
         self.lock()?.get_rev(&p.rev).map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "Delete a document by writing a tombstone. parent must be its current _rev.")]
+    #[tool(description = "Delete a document by writing a tombstone. parent must be its current _rev, \
+        or a revision listed in _conflicts to discard only that one.")]
     fn delete_doc(&self, Parameters(p): Parameters<DeleteParams>) -> Result<Json<Doc>, McpError> {
         self.lock()?.delete(&p.id, &p.parent).map(Json).map_err(to_mcp)
+    }
+
+    #[tool(description = "Resolve a document's conflicts: optionally write `merged` on the winning revision, \
+        then tombstone every revision listed in _conflicts, in one step. Returns the new current revision.")]
+    fn resolve_doc(&self, Parameters(p): Parameters<ResolveParams>) -> Result<Json<Doc>, McpError> {
+        self.lock()?.resolve(&p.id, p.merged, p.conflicts.as_deref()).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \

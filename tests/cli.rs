@@ -527,3 +527,170 @@ fn serve_protects_runner_and_run_documents() {
     let tomb = sb.json(&["doc", "delete", "runners/x"], "");
     assert_eq!(tomb["_deleted"], true);
 }
+
+// ---- sync -----------------------------------------------------------------
+
+#[test]
+fn pull_and_sync_between_two_vaults() {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    let b_db = b.db();
+
+    let missing = a.dir.join("nope.db").to_string_lossy().into_owned();
+    let err = a.fails(&["pull", &missing], "");
+    assert!(err["message"].as_str().unwrap().contains("no vault at"), "{err}");
+    let err = a.fails(&["pull", &a.db()], "");
+    assert!(err["message"].as_str().unwrap().contains("is this vault"), "{err}");
+
+    b.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "from b"}"#);
+    let out = a.ok(&["pull", &b_db], "");
+    assert!(out.starts_with("pulled 1 revision from "), "{out}");
+    assert!(out.contains("6 present"), "{out}");
+    assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
+
+    a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);
+    let reports = a.json(&["sync", &b_db], "");
+    assert_eq!(reports[0]["written"], 0);
+    assert_eq!(reports[1]["written"], 1);
+    assert_eq!(b.json(&["doc", "get", "y"], "")["title"], "from a");
+    let out = a.ok(&["sync", &b_db], "");
+    let b_path = std::fs::canonicalize(&b_db).unwrap().to_string_lossy().into_owned();
+    assert!(out.contains(&format!("pulled 0 revisions from {b_path}")), "{out}");
+    assert!(out.contains(&format!("pushed 0 revisions to {b_path}")), "{out}");
+}
+
+#[test]
+fn conflicts_show_on_get_and_resolve() {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    let b_db = b.db();
+    a.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "base"}"#);
+    a.ok(&["sync", &b_db], "");
+    a.ok(&["doc", "update", "x", "-"], r#"{"title": "from a"}"#);
+    b.ok(&["doc", "update", "x", "-"], r#"{"title": "from b"}"#);
+    a.ok(&["sync", &b_db], "");
+
+    let got = a.json(&["doc", "get", "x"], "");
+    assert_eq!(got["_conflicts"].as_array().unwrap().len(), 1);
+    let md = a.ok(&["doc", "get", "x"], "");
+    assert!(md.contains("_conflicts:"), "{md}");
+
+    // get output is still valid input: an unchanged file is a no-op
+    let file = a.file("x.md", &md);
+    let same = a.json(&["doc", "put", &file], "");
+    assert_eq!(same["_rev"], got["_rev"]);
+
+    // resolve with the edited get output as the merge
+    let edited = a.file("x.md", &md.replace(&format!("title: {}", got["title"].as_str().unwrap()), "title: merged"));
+    let resolved = a.json(&["doc", "resolve", "x", &edited], "");
+    assert_eq!(resolved["title"], "merged");
+    assert!(resolved.get("_conflicts").is_none());
+    a.ok(&["sync", &b_db], "");
+    let on_b = b.json(&["doc", "get", "x"], "");
+    assert_eq!(on_b["title"], "merged");
+    assert!(on_b.get("_conflicts").is_none());
+}
+
+#[test]
+fn resolve_without_a_file_keeps_the_winner() {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    let b_db = b.db();
+    a.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "base"}"#);
+    a.ok(&["sync", &b_db], "");
+    a.ok(&["doc", "update", "x", "-"], r#"{"title": "from a"}"#);
+    b.ok(&["doc", "update", "x", "-"], r#"{"title": "from b"}"#);
+    a.ok(&["sync", &b_db], "");
+    let winner = a.json(&["doc", "get", "x"], "");
+    let resolved = a.json(&["doc", "resolve", "x"], "");
+    assert_eq!(resolved["_rev"], winner["_rev"]);
+    assert!(resolved.get("_conflicts").is_none());
+}
+
+/// Two initialized vaults with one conflicting document `x`. Returns (a, b).
+fn conflicted_vaults() -> (Sandbox, Sandbox) {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    a.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "base"}"#);
+    a.ok(&["sync", &b.db()], "");
+    a.ok(&["doc", "update", "x", "-"], r#"{"title": "from a"}"#);
+    b.ok(&["doc", "update", "x", "-"], r#"{"title": "from b"}"#);
+    a.ok(&["sync", &b.db()], "");
+    (a, b)
+}
+
+#[test]
+fn doc_conflicts_lists_conflicted_ids() {
+    let (a, _b) = conflicted_vaults();
+    let table = a.ok(&["doc", "conflicts"], "");
+    assert!(table.contains("WINNER") && table.lines().any(|l| l.starts_with("x ")), "{table}");
+    let page = a.json(&["doc", "conflicts"], "");
+    assert_eq!(page["docs"][0]["id"], "x");
+    assert_eq!(page["docs"][0]["conflicts"].as_array().unwrap().len(), 1);
+    a.ok(&["doc", "resolve", "x"], "");
+    assert_eq!(a.json(&["doc", "conflicts"], "")["docs"], json!([]));
+}
+
+#[test]
+fn resolve_auto_merges_with_a_runner() {
+    let (a, b) = conflicted_vaults();
+    a.ok(&["runner", "add", "runners/echo", "--", "echo", r#"```json
+{"title": "merged", "_rev": "ignored"}
+```"#], "");
+    let conflicts = a.json(&["doc", "get", "x"], "")["_conflicts"].clone();
+
+    // flags that need --auto, and --auto with a file, are usage errors
+    assert_eq!(a.run(&["doc", "resolve", "x", "--dry-run"], "").0, 2);
+    assert_eq!(a.run(&["doc", "resolve", "x", "f.md", "--auto"], "").0, 2);
+
+    let dry = a.ok(&["doc", "resolve", "x", "--auto", "--runner", "runners/echo", "--dry-run"], "");
+    assert!(dry.contains("title: merged") && dry.contains("_parent:") && !dry.contains("_rev"), "{dry}");
+    assert_eq!(a.json(&["doc", "get", "x"], "")["_conflicts"], conflicts, "a dry run writes nothing");
+
+    // the dry-run output is valid input for a manual resolve; here the agent's merge is applied as is
+    let resolved = a.json(&["doc", "resolve", "x", "--auto", "--runner", "runners/echo"], "");
+    assert_eq!(resolved["title"], "merged");
+    assert!(resolved.get("_conflicts").is_none());
+    assert!(resolved["_actor"].as_str().unwrap().starts_with("doc://runners/echo?rev="), "{resolved}");
+    let deleted = a.json(&["doc", "get", "x", "--deleted-conflicts"], "");
+    assert_eq!(deleted["_deleted_conflicts"].as_array().unwrap().len(), 1);
+    assert!(a.json(&["doc", "get", "x"], "").get("_deleted_conflicts").is_none());
+
+    a.ok(&["sync", &b.db()], "");
+    assert_eq!(b.json(&["doc", "get", "x"], "")["title"], "merged");
+}
+
+#[test]
+fn resolve_auto_fails_cleanly_on_a_bad_reply() {
+    let (a, _b) = conflicted_vaults();
+    a.ok(&["runner", "add", "runners/chatty", "--", "echo", "I could not decide."], "");
+    a.ok(&["runner", "add", "runners/broken", "--", "false"], "");
+    let before = a.json(&["doc", "history", "x"], "");
+
+    let err = a.fails(&["doc", "resolve", "x", "--auto", "--runner", "runners/chatty"], "");
+    assert_eq!(err["name"], "runner");
+    assert!(err["message"].as_str().unwrap().contains("no JSON object"), "{err}");
+    let err = a.fails(&["doc", "resolve", "x", "--auto", "--runner", "runners/broken"], "");
+    assert!(err["message"].as_str().unwrap().contains("exit code 1"), "{err}");
+
+    assert_eq!(a.json(&["doc", "history", "x"], ""), before, "nothing is written");
+    assert_eq!(a.json(&["doc", "get", "x"], "")["_conflicts"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn resolve_auto_without_conflicts_prints_the_document() {
+    let a = Sandbox::new();
+    a.ok(&["init"], "");
+    a.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "calm"}"#);
+    // no runner is started, so a missing runner does not matter
+    let doc = a.json(&["doc", "resolve", "x", "--auto", "--runner", "runners/missing"], "");
+    assert_eq!(doc["title"], "calm");
+}

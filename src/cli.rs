@@ -14,7 +14,8 @@ use crate::error::StoreError;
 use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
 use crate::task::{self, Evaluation, TickReport, When};
-use crate::{daemon, markdown, mcp, rev};
+use crate::sync::{self, PullReport};
+use crate::{daemon, markdown, mcp, resolve, rev};
 
 /// Subconscious: a versioned document vault in SQLite, with a CLI and an MCP server.
 #[derive(Parser)]
@@ -80,6 +81,12 @@ enum Command {
     /// _id that differs is ignored). Unchanged exported files are no-ops; edited files
     /// become the next revision.
     Import { dir: PathBuf },
+    /// Copy every revision of the vault at PEER that this vault does not have.
+    /// Tasks and runs never replicate. Concurrent edits become conflicts:
+    /// see `_conflicts` in `doc get` and `doc resolve`.
+    Pull { peer: PathBuf },
+    /// Pull from the vault at PEER, then push to it. Afterwards both hold the same revisions.
+    Sync { peer: PathBuf },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -133,6 +140,18 @@ enum DocCmd {
         id: String,
         #[arg(long)]
         rev: Option<String>,
+        /// Also list tombstoned leaves other than the winner, as _deleted_conflicts.
+        #[arg(long, conflicts_with = "rev")]
+        deleted_conflicts: bool,
+    },
+    /// List documents with conflicts, in id order.
+    Conflicts {
+        /// Page size (1..=1000, default 50).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Cursor: the previous page's `next`.
+        #[arg(long)]
+        after: Option<String>,
     },
     /// Write a tombstone. Parent defaults to the current revision.
     Delete {
@@ -153,6 +172,26 @@ enum DocCmd {
         query: String,
         #[command(flatten)]
         filter: Filter,
+    },
+    /// Resolve conflicts: write FILE (if given) on the winning revision, then
+    /// tombstone every other live leaf listed in `_conflicts`. Without FILE the
+    /// winner's content stays. FILE may be `doc get` output, edited.
+    /// With --auto, an agent reads every conflicting revision and writes the merge.
+    Resolve {
+        id: String,
+        /// The merged document. `-` means stdin. Absent keeps the winner.
+        file: Option<PathBuf>,
+        #[arg(long, value_enum)]
+        format: Option<Format>,
+        /// Ask an agent to merge the winner and every conflict, then write the merge.
+        #[arg(long, conflicts_with = "file")]
+        auto: bool,
+        /// The runner that merges: runners/claude or doc://runners/claude.
+        #[arg(long, requires = "auto", default_value = resolve::DEFAULT_RUNNER)]
+        runner: String,
+        /// Print the agent's merge as input for `doc resolve <id> FILE`, and write nothing.
+        #[arg(long, requires = "auto")]
+        dry_run: bool,
     },
     /// Revision history, newest first.
     History {
@@ -325,7 +364,8 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         }
         Command::Doc(cmd) => {
             let mut store = open()?;
-            doc_cmd(&mut store, cmd, json, stdin, out)?;
+            let db = absolute(&cli.db)?;
+            doc_cmd(&mut store, &db, cmd, json, stdin, out)?;
         }
         Command::Export { dir, type_id, tag } => {
             let store = open()?;
@@ -334,6 +374,20 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         Command::Import { dir } => {
             let mut store = open()?;
             import(&mut store, &dir, json, out)?;
+        }
+        Command::Pull { peer } => {
+            let mut store = open()?;
+            let (_, there) = peer_paths(&cli.db, &peer)?;
+            let source = Store::open(&peer)?;
+            let report = sync::pull(&mut store, &source, &there)?;
+            print_pulls(out, json, &[(format!("from {there}"), report)])?;
+        }
+        Command::Sync { peer } => {
+            let mut store = open()?;
+            let (here, there) = peer_paths(&cli.db, &peer)?;
+            let mut other = Store::open(&peer)?;
+            let [into_here, into_there] = sync::sync(&mut store, &here, &mut other, &there)?;
+            print_pulls(out, json, &[(format!("from {there}"), into_here), (format!("to {there}"), into_there)])?;
         }
         Command::Task(cmd) => {
             let mut store = open()?;
@@ -372,6 +426,45 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
                 }
             }
         }
+    }
+    Ok(())
+}
+
+/// Canonical paths of this vault and the peer, which must already exist and
+/// differ. The peer's path is the key of this vault's checkpoint for it.
+fn peer_paths(db: &Path, peer: &Path) -> Result<(String, String), StoreError> {
+    let canonical = |p: &Path| {
+        std::fs::canonicalize(p)
+            .map(|p| p.to_string_lossy().into_owned())
+            .map_err(|e| StoreError::invalid(format!("no vault at {}: {e}", p.display())))
+    };
+    let here = canonical(db)?;
+    let there = canonical(peer)?;
+    if here == there {
+        return Err(StoreError::invalid(format!("{there} is this vault")));
+    }
+    Ok((here, there))
+}
+
+/// Each report with its direction: `from <peer>` for a pull, `to <peer>` for a push.
+fn print_pulls(out: &mut dyn Write, json: bool, reports: &[(String, PullReport)]) -> io::Result<()> {
+    if json {
+        return match reports {
+            [(_, r)] => print_json(out, r),
+            _ => print_json(out, &reports.iter().map(|(_, r)| r).collect::<Vec<_>>()),
+        };
+    }
+    for (direction, r) in reports {
+        let verb = if direction.starts_with("to ") { "pushed" } else { "pulled" };
+        let noun = if r.written == 1 { "revision" } else { "revisions" };
+        let mut notes = vec![format!("{} present", r.present), format!("{} excluded", r.excluded)];
+        if r.missing_parent > 0 {
+            notes.push(format!("{} missing parent", r.missing_parent));
+        }
+        if r.restarted {
+            notes.push("checkpoint reset".into());
+        }
+        writeln!(out, "{verb} {} {noun} {direction} ({})", r.written, notes.join(", "))?;
     }
     Ok(())
 }
@@ -671,7 +764,7 @@ fn print_tick(out: &mut dyn Write, json: bool, report: &TickReport) -> io::Resul
     writeln!(out, "{} fired, {} skipped, {} errors", report.fired.len(), report.skipped.len(), report.errors.len())
 }
 
-fn doc_cmd(store: &mut Store, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
+fn doc_cmd(store: &mut Store, db: &Path, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
     match cmd {
         DocCmd::Put(input) => {
             let map = read_input(&input, stdin)?;
@@ -686,9 +779,15 @@ fn doc_cmd(store: &mut Store, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out
             let (doc, _) = upsert(store, &id, map, parent)?;
             print_doc(out, json, &doc)?;
         }
-        DocCmd::Get { id, rev } => {
+        DocCmd::Get { id, rev, deleted_conflicts } => {
             let doc = match rev {
-                None => store.get(&id)?,
+                None => {
+                    let mut doc = store.get(&id)?;
+                    if deleted_conflicts {
+                        doc.deleted_conflicts = store.deleted_conflicts(&doc.id, &doc.rev)?;
+                    }
+                    doc
+                }
                 Some(rev) => {
                     let doc = store.get_rev(&rev)?;
                     if doc.id != id {
@@ -715,6 +814,57 @@ fn doc_cmd(store: &mut Store, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out
         DocCmd::Search { query, filter } => {
             let page = store.search(&query, &filter.into())?;
             print_page(out, json, &page)?;
+        }
+        DocCmd::Resolve { id, auto: true, runner, dry_run, .. } => {
+            let proposal = tokio::runtime::Runtime::new()?.block_on(resolve::propose(store, db, &id, &runner))?;
+            let Some(p) = proposal else {
+                print_doc(out, json, &store.get(&id)?)?;
+                return Ok(());
+            };
+            if dry_run {
+                if json {
+                    print_json(out, &p.merged)?;
+                } else {
+                    write!(out, "{}", markdown::render_input(&p.merged))?;
+                }
+                return Ok(());
+            }
+            // The merge records which agent wrote it, unless --actor named someone.
+            let previous = store.actor().map(str::to_string);
+            if previous.is_none() {
+                store.set_actor(Some(p.runner.clone()));
+            }
+            let result = store.resolve(&id, Some(p.merged), Some(&p.conflicts));
+            store.set_actor(previous);
+            print_doc(out, json, &result?)?;
+        }
+        DocCmd::Resolve { id, file, format, .. } => {
+            let merged = match file {
+                None => None,
+                Some(file) => {
+                    let map = read_input(&Input { file: Some(file), format }, stdin)?;
+                    let prepared = prepare_write(map, WriteMode::Update)?;
+                    if prepared.unchanged { None } else { Some(prepared.input) }
+                }
+            };
+            let doc = store.resolve(&id, merged, None)?;
+            print_doc(out, json, &doc)?;
+        }
+        DocCmd::Conflicts { limit, after } => {
+            let page = store.conflicted(after.as_deref(), limit)?;
+            if json {
+                print_json(out, &page)?;
+            } else {
+                let rows: Vec<Vec<String>> = page
+                    .docs
+                    .iter()
+                    .map(|d| vec![d.id.clone(), short_rev(&d.rev), d.conflicts.len().to_string()])
+                    .collect();
+                table(out, &["ID", "WINNER", "CONFLICTS"], &rows)?;
+                if let Some(next) = &page.next {
+                    writeln!(out, "next: {next}")?;
+                }
+            }
         }
         DocCmd::History { id, limit } => {
             let history = store.history(&id, limit)?;
@@ -1040,6 +1190,8 @@ pub fn prepare_write(mut map: Map<String, Value>, mode: WriteMode) -> Result<Pre
     map.remove("_created_at");
     map.remove("_actor");
     map.remove("_seq");
+    map.remove("_conflicts");
+    map.remove("_deleted_conflicts");
     if let Some(deleted) = map.remove("_deleted")
         && deleted.as_bool() == Some(true)
         && mode == WriteMode::Put

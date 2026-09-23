@@ -15,7 +15,7 @@
 use serde_json::{Map, Value};
 use serde_yaml_ng::{Mapping, Value as Yaml};
 
-use crate::doc::Doc;
+use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
 
 /// Split into (frontmatter YAML, content). No frontmatter means the whole
@@ -99,8 +99,30 @@ pub fn render(doc: &Doc) -> String {
     if let Some(seq) = doc.seq {
         fm.insert(yaml_str("_seq"), Yaml::Number(seq.into()));
     }
+    for (key, revs) in [("_conflicts", &doc.conflicts), ("_deleted_conflicts", &doc.deleted_conflicts)] {
+        if !revs.is_empty() {
+            fm.insert(yaml_str(key), Yaml::Sequence(revs.iter().map(|r| yaml_str(r)).collect()));
+        }
+    }
+    with_body(fm, &doc.body)
+}
+
+/// Render a write that has not happened yet, as valid `put` input.
+pub fn render_input(input: &PutInput) -> String {
+    let mut fm = Mapping::new();
+    for (key, value) in [("_id", &input.id), ("_parent", &input.parent), ("_type", &input.type_id)] {
+        if let Some(v) = value {
+            fm.insert(yaml_str(key), yaml_str(v));
+        }
+    }
+    with_body(fm, &input.body)
+}
+
+/// Frontmatter, then body fields in key order. A non-empty string
+/// `content` becomes the text after the frontmatter.
+fn with_body(mut fm: Mapping, body: &Map<String, Value>) -> String {
     let mut content = "";
-    for (key, value) in &doc.body {
+    for (key, value) in body {
         if key == "content"
             && let Value::String(s) = value
             && !s.is_empty()
@@ -130,6 +152,8 @@ mod tests {
             created_at: "2026-09-22T20:14:03.512Z".into(),
             actor: None,
             seq: None,
+            conflicts: Vec::new(),
+            deleted_conflicts: Vec::new(),
             body: body.as_object().unwrap().clone(),
         }
     }

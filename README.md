@@ -48,6 +48,8 @@ A document is a JSON object. Reserved fields start with an underscore.
 | `_created_at` | When the revision was written. |
 | `_actor` | Who wrote the revision, when a writer named itself with `--actor`. A scheduled task's agent writes as the task. |
 | `_seq` | The global sequence number of the revision. |
+| `_conflicts` | Other live revisions of the document, after sync made concurrent edits. Only on `get`. See [Conflicts](#conflicts). |
+| `_deleted_conflicts` | Tombstoned revisions of the document other than the current one, such as the losers of a resolve. Only on `get --deleted-conflicts`. |
 
 Everything else is the body. Three body fields are blessed:
 
@@ -57,7 +59,7 @@ Everything else is the body. Three body fields are blessed:
 
 ### Revisions
 
-Every write creates a new revision and keeps the old one. To update, name the current revision as `_parent`. If another write got there first, the write fails with a conflict. History is linear: one document has one current revision and one chain behind it.
+Every write creates a new revision and keeps the old one. To update, name the current revision as `_parent`. If another write got there first, the write fails with a conflict. In one vault, history is linear. [Sync](#sync) can add a second branch, as in CouchDB. Then the revisions of a document form a tree, and the document has [conflicts](#conflicts) until you resolve them.
 
 Delete writes a tombstone. A later write on a tombstone revives the document. The change feed shows every revision, tombstones included, in the order they were committed.
 
@@ -95,12 +97,20 @@ subconscious [--db PATH] [--json] <command>
 
   doc put     [FILE] [--format json|yaml|md]      create, or update when the input names a revision
   doc update  <id> [FILE] [--parent REV]          replace the body
-  doc get     <id> [--rev REV]                    current revision, or one revision
+  doc get     <id> [--rev REV] [--deleted-conflicts]
+                                                  current revision, or one revision
   doc delete  <id> [--parent REV]                 write a tombstone
   doc list    [--type T] [--tag G] [--limit N] [--before SEQ]
   doc search  <query> [--type T] [--tag G] [--limit N]
+  doc conflicts [--limit N] [--after ID]          documents with conflicts
+  doc resolve <id> [FILE]                         keep FILE (or the winner) and tombstone the conflicts
+  doc resolve <id> --auto [--runner R] [--dry-run]
+                                                  an agent writes the merge
   doc history <id> [--limit N]
   doc changes [--since SEQ] [--limit N]
+
+  pull <peer.db>                                  copy the revisions this vault does not have
+  sync <peer.db>                                  pull, then push
 
   task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [PROMPT_FILE]
   task list                                       every enabled task, its last run, and whether it is due
@@ -131,7 +141,7 @@ A Markdown file is YAML frontmatter between two `---` lines, then the content. T
 
 ### Output
 
-One document prints as Markdown with frontmatter. A list prints as a table. Pass `--json` to get the same JSON structures the MCP tools return. Errors are always a JSON object on stderr, and the exit code is 1.
+One document prints as Markdown with frontmatter. A list prints as a table. Pass `--json` to get the same JSON structures the MCP tools return. Errors are always a JSON object on stderr, and the exit code is 1. The object's `name` says what failed, for example `conflict`, `validation`, or `runner`.
 
 ### Edit and write back
 
@@ -152,6 +162,138 @@ subconscious doc put hello.md
 `import` reads every `.md` file under a folder. The path relative to the folder, extension included, is the `_id`. So `notes/foo.md` becomes the document `notes/foo.md`. A frontmatter `_id` that differs from the path is ignored. Files that came from `export` and were not changed are no-ops. Edited files become the next revision. New files are created.
 
 Both commands continue past a failing file, report every file, and exit 1 if any failed.
+
+## Sync
+
+Two vaults replicate the way CouchDB databases do. A vault can pull from another vault, or sync with it in both directions:
+
+```
+subconscious --db laptop.db pull desktop.db     # desktop's changes into laptop
+subconscious --db laptop.db sync desktop.db     # pull, then push
+```
+
+The peer is another vault file on this machine. It must exist, so run `init` on it first. A vault cannot sync with itself. Pull and sync are CLI commands only. An agent cannot start them over MCP.
+
+### A session
+
+```
+subconscious --db laptop.db init
+subconscious --db desktop.db init
+subconscious --db laptop.db doc put notes/plan.md
+subconscious --db laptop.db sync desktop.db
+pulled 0 revisions from /Users/me/desktop.db (6 present, 0 excluded)
+pushed 1 revision to /Users/me/desktop.db (6 present, 0 excluded)
+```
+
+Two vaults made by the same binary seed the same six built-in documents with identical revisions, so the first sync copies none of them.
+
+### How a pull works
+
+A pull reads the peer's change feed and copies every revision that this vault does not have. It copies the full history of each document, tombstones included. Revision ids are content hashes, so a revision has the same id in every vault, and a second pull copies nothing.
+
+A copied revision keeps its `_created_at` and its `_actor` from the vault that wrote it. `--actor` does not apply to copied revisions. The pull does not validate copied revisions against their schemas again. Instead, each revision must hash to its `_rev`. If one does not, the pull fails.
+
+The pull writes in batches of up to 1000 revisions. Each batch and its checkpoint commit together, so an interrupted pull continues where it stopped. The next pull reads only the peer's new changes. The checkpoint is kept per peer, keyed by the peer's full path, and records the peer's revision at that position. If the peer file was replaced, that revision does not match, and the pull reads the whole feed again. A moved peer file also causes a full read. Both are safe, because a revision that is already present is skipped.
+
+Each line of output counts revisions:
+
+| Count | Meaning |
+|---|---|
+| `pulled N` / `pushed N` | Revisions written into the target vault. |
+| `present` | Revisions the target already had. |
+| `excluded` | Tasks and runs, which never replicate. |
+| `missing parent` | Revisions skipped because an ancestor did not replicate. Shown only when not zero. |
+| `checkpoint reset` | The peer changed, so the whole feed was read again. |
+
+`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `excluded`, `missing_parent`, `last_seq`, and `restarted`.
+
+### What replicates
+
+Every document replicates, with two exceptions:
+
+- **Tasks.** A synced task would fire in both vaults.
+- **Runs.** A run records a position in its own vault's change feed.
+
+Runners and schemas replicate like other documents. **So a peer can change the commands that your tasks run.** A task follows the current revision of its runner. Sync only with vaults that you trust.
+
+A copied revision counts as a change in this vault. So a task that waits for changes wakes for edits that came in through a sync.
+
+Do not copy a vault file with Dropbox, iCloud, or a similar service while it is in use. Use `sync` between two separate files.
+
+### Conflicts
+
+If two vaults edit the same revision, a sync keeps both edits. The document now has two leaves. Every vault picks the same winner: a live revision beats a tombstone, then the higher generation wins, then the lower hash. (CouchDB keeps the higher hash. Any fixed rule gives every vault the same winner.) `doc get` returns the winner, and `_conflicts` lists the other live leaves:
+
+```
+subconscious doc get notes/plan.md
+---
+_id: notes/plan.md
+_rev: 3-4be1…
+_conflicts:
+- 3-09ac…
+…
+```
+
+An edit made on one side wins over a delete made on the other side, so the document comes back. This is the CouchDB rule.
+
+Until you resolve, the document works as usual. Reads, lists, and search use the winner. `doc update` writes on the winner, and the conflict stays. `doc history` follows the winner's branch only. Read a losing leaf with `doc get <id> --rev <rev>`.
+
+To find every document with conflicts:
+
+```
+subconscious doc conflicts
+ID             WINNER      CONFLICTS
+notes/plan.md  3-4be1…     1
+```
+
+To resolve, keep the winner:
+
+```
+subconscious doc resolve notes/plan.md
+```
+
+or write a merge on the winner:
+
+```
+subconscious doc get notes/plan.md > plan.md
+$EDITOR plan.md
+subconscious doc resolve notes/plan.md plan.md
+```
+
+`resolve` writes the merge (if given) as a child of the winner, and a tombstone on each revision in `_conflicts`, in one transaction. A merge file must build on the winner. A file with a different `_parent` fails with a conflict. Sync the result to the other vaults. You can also do the same steps by hand: `doc update` on the winner, then `doc delete <id> --parent <rev>` for each conflict.
+
+A resolve does not delete the losing revisions. It writes a tombstone on each one, and you can still read them. As in CouchDB, `doc get <id> --deleted-conflicts` lists these tombstones as `_deleted_conflicts`.
+
+Vaults seeded by different versions of this binary can have different built-in schemas or runners. A sync then makes conflicts on those documents. MCP clients cannot write them, so resolve them with the CLI.
+
+### Let an agent merge
+
+```
+subconscious doc resolve notes/plan.md --auto --dry-run   # look first
+subconscious doc resolve notes/plan.md --auto
+```
+
+`--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
+
+The merge keeps the winner's `_type`, unpinned, so it is validated against the current schema. Its `_actor` is the pinned reference of the runner revision that wrote it, unless you give `--actor`.
+
+`--dry-run` prints the merge and writes nothing. Its output is valid input for `doc resolve <id> FILE`, so you can edit the merge before you apply it:
+
+```
+subconscious doc resolve notes/plan.md --auto --dry-run > merge.md
+$EDITOR merge.md
+subconscious doc resolve notes/plan.md merge.md
+```
+
+If a sync brings in a new conflict while the agent works, the resolve fails and writes nothing. Run it again. If the runner fails, times out, or replies without a JSON object, the command fails with an error named `runner`, and nothing is written. A merge that you do not like loses nothing: the losing revisions are still in the vault, and the merge is an ordinary revision that you can edit. A document without conflicts is printed, and no runner starts.
+
+### Conflicts over MCP
+
+An agent resolves conflicts with the same steps:
+
+1. `list_conflicts` finds the documents.
+2. `get_doc` returns the winner and its `_conflicts`. `get_rev` reads each one.
+3. `resolve_doc` with `id`, the `merged` body, and the `conflicts` it read. If new conflicts arrived since the read, the call fails, and the agent reads again.
 
 ## Scheduled tasks
 
@@ -286,13 +428,13 @@ subconscious runner add runners/claude-fast --timeout 5m -- claude -p --model cl
 subconscious runner rm runners/pi
 ```
 
-Runner commands are code. They enter only through the CLI. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted.
+Runner commands are code. They enter only through the CLI, or from a vault that you [sync](#what-replicates) with. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted. `doc resolve --auto` also uses runners.
 
 The command inherits these variables: `SUBCONSCIOUS_DB`, `SUBCONSCIOUS_TASK`, `SUBCONSCIOUS_RUN`, `SUBCONSCIOUS_ACTOR` (the task id), `SUBCONSCIOUS_MCP` (a generated MCP config for this vault), and `SUBCONSCIOUS_OUT`. `PATH` starts with the directory of this binary.
 
 ### Runs
 
-Each firing writes a document typed `doc://schemas/run` at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts and records `runner` as the pinned reference of the runner revision about to run. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
+Each firing writes a document typed `doc://schemas/run` at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts and records `runner` as the pinned reference of the runner revision about to run. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. Tasks and runs stay in their own vault. A sync does not copy them. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
 
 ### The clock
 
@@ -328,21 +470,25 @@ Each store operation is one tool:
 | Tool | Does |
 |---|---|
 | `put_doc` | Create, or update with `_parent` set to the current `_rev`. |
-| `get_doc` | Current revision by `id`. |
+| `get_doc` | Current revision by `id`. `deleted_conflicts: true` adds `_deleted_conflicts`. |
 | `get_rev` | One revision by `rev`. |
 | `delete_doc` | Tombstone with `id` and `parent`. |
+| `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
+| `resolve_doc` | Tombstone every conflict of `id`, after it writes `merged` on the winner if given. Pass the `conflicts` you read to fail if they changed. |
 | `list_docs` | Current documents, newest first, with `type`, `tag`, `before`, `limit`. |
 | `search_docs` | Full-text search with `query` and the same filters. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
 ## Storage
 
 One SQLite file in WAL mode. Migrations run on open.
 
 - `docs` holds one row per revision. Triggers refuse updates and deletes, and enforce the parent chain.
+- `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
+- The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
 - Schemas are documents. Three are seeded on first use: `schemas/task`, `schemas/run`, and `schemas/runner`, plus the three default runners.
 

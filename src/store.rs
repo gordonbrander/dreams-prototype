@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::db;
-use crate::doc::{Doc, DocRef, Draft, PutInput};
+use crate::doc::{Doc, DocRef, Draft, PutInput, check_body, check_id};
 use crate::error::StoreError;
 use crate::rev;
 use crate::schema;
@@ -81,6 +81,24 @@ pub struct Changes {
     pub last_seq: i64,
 }
 
+/// One document with conflicts: its winner and the other live leaves.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct Conflicted {
+    pub id: String,
+    /// The winning revision.
+    pub rev: String,
+    pub conflicts: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ConflictPage {
+    /// Documents with conflicts, in id order.
+    pub docs: Vec<Conflicted>,
+    /// Pass as `after` to fetch the next page. Absent on the last page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<String>,
+}
+
 /// Split a type filter into (exact, path) so one SQL string serves both:
 /// `AND (?a IS NULL OR d._type = ?a) AND (?b IS NULL OR d._type_path = ?b)`.
 pub(crate) fn type_filter(t: Option<&str>) -> (Option<&str>, Option<&str>) {
@@ -110,6 +128,8 @@ pub(crate) fn row_to_doc(row: &Row<'_>, with_seq: bool) -> rusqlite::Result<Doc>
         body,
         created_at: row.get(7)?,
         actor: row.get(8)?,
+        conflicts: Vec::new(),
+        deleted_conflicts: Vec::new(),
     })
 }
 
@@ -144,6 +164,101 @@ fn leaves_in(conn: &Connection, id: &str) -> Result<Vec<String>, StoreError> {
     )?;
     let rows = stmt.query_map([id], |r| r.get::<_, String>(0))?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+/// Leaves of `id` other than `winner`, live or tombstoned: the CouchDB
+/// `_conflicts` and `_deleted_conflicts`. Highest generation first.
+fn other_leaves_in(conn: &Connection, id: &str, winner: &str, deleted: bool) -> Result<Vec<String>, StoreError> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT d._rev FROM docs d WHERE d._id = ?1 AND d._deleted = ?3 AND d._rev <> ?2
+           AND NOT EXISTS (SELECT 1 FROM docs c WHERE c._parent = d._rev)
+         ORDER BY d._rev_gen DESC, d._rev_hash",
+    )?;
+    let rows = stmt.query_map(params![id, winner, deleted as i64], |r| r.get::<_, String>(0))?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+fn conflicts_in(conn: &Connection, id: &str, winner: &str) -> Result<Vec<String>, StoreError> {
+    other_leaves_in(conn, id, winner, false)
+}
+
+fn rev_exists_in(conn: &Connection, rev_id: &str) -> Result<bool, StoreError> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM docs WHERE _rev = ?1)", [rev_id], |r| r.get(0))?)
+}
+
+/// A tombstone draft on `parent`. It keeps the parent's pinned type.
+fn tombstone_draft(parent: &Doc) -> Result<Draft, StoreError> {
+    let type_ref = parent.type_id.as_deref().map(DocRef::parse).transpose()?;
+    Ok(Draft {
+        id: parent.id.clone(),
+        parent: Some(parent.rev.clone()),
+        type_ref,
+        deleted: true,
+        body: Map::new(),
+    })
+}
+
+/// What happened to one replicated revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Applied {
+    Written,
+    /// This vault already had the revision.
+    Present,
+    /// The revision's parent is not in this vault, because an ancestor was
+    /// not replicated. Skipped.
+    MissingParent,
+}
+
+/// Counts for one batch of replicated revisions.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, JsonSchema)]
+pub struct BatchReport {
+    pub written: usize,
+    pub present: usize,
+    pub missing_parent: usize,
+}
+
+/// Insert a revision written by another vault, as it is. The content must
+/// hash to its `_rev`. No leaf check, no pinning, no schema validation: the
+/// hash proves the content, and the pin names the exact schema bytes.
+fn insert_replica_in(tx: &Connection, doc: &Doc) -> Result<Applied, StoreError> {
+    check_id(&doc.id)?;
+    check_body(&doc.body)?;
+    if doc.deleted && !doc.body.is_empty() {
+        return Err(StoreError::invalid(format!("tombstone {} has a body", doc.rev)));
+    }
+    if let Some(t) = &doc.type_id {
+        DocRef::parse(t)?;
+    }
+    let expected = rev::rev_of(&doc.id, doc.parent.as_deref(), doc.type_id.as_deref(), doc.deleted, &doc.body)?;
+    if expected != doc.rev {
+        return Err(StoreError::invalid(format!(
+            "revision {} of {} does not match its content (it hashes to {expected})",
+            doc.rev, doc.id
+        )));
+    }
+    if rev_exists_in(tx, &doc.rev)? {
+        return Ok(Applied::Present);
+    }
+    if let Some(p) = &doc.parent
+        && !rev_exists_in(tx, p)?
+    {
+        return Ok(Applied::MissingParent);
+    }
+    tx.execute(
+        "INSERT INTO docs (_rev, _id, _parent, _type, _deleted, body, _created_at, actor)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            doc.rev,
+            doc.id,
+            doc.parent,
+            doc.type_id,
+            doc.deleted as i64,
+            serde_json::to_string(&doc.body)?,
+            doc.created_at,
+            doc.actor,
+        ],
+    )?;
+    Ok(Applied::Written)
 }
 
 /// Resolve a type reference to one schema revision, validate `body`
@@ -342,17 +457,149 @@ impl Store {
         if parent_doc.deleted {
             return Err(StoreError::Deleted { id: id.to_string(), rev: parent.to_string() });
         }
-        let type_ref = match &parent_doc.type_id {
-            Some(t) => Some(DocRef::parse(t)?),
-            None => None,
+        self.put_draft(tombstone_draft(&parent_doc)?)
+    }
+
+    /// Resolve conflicts the CouchDB way, in one transaction: optionally
+    /// write `merged` as a child of the winner, then tombstone every other
+    /// live leaf. `merged` may omit `_id` and `_parent`; a `_parent` other
+    /// than the winner is a conflict. When `expected` is given, the current
+    /// conflicts must be exactly those revisions, so a leaf that arrived after
+    /// the caller read the document is never discarded unseen. Returns the
+    /// new current revision.
+    pub fn resolve(&mut self, id: &str, merged: Option<PutInput>, expected: Option<&[String]>) -> Result<Doc, StoreError> {
+        let Store { conn, validators, actor, protected_types, protected_ids } = self;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let head = head_in(&tx, id)?.ok_or_else(|| StoreError::NotFound { id: id.to_string() })?;
+        let losers = conflicts_in(&tx, id, &head.rev)?;
+        if let Some(expected) = expected {
+            let mut want = expected.to_vec();
+            let mut have = losers.clone();
+            want.sort();
+            have.sort();
+            if want != have {
+                let mut leaves = vec![head.rev.clone()];
+                leaves.extend(losers.iter().cloned());
+                return Err(StoreError::Conflict {
+                    id: id.to_string(),
+                    parent: Some(head.rev.clone()),
+                    leaves,
+                    hint: Some("the conflicts changed since they were read; run resolve again".into()),
+                });
+            }
+        }
+        if let Some(mut input) = merged {
+            match &input.id {
+                None => input.id = Some(id.to_string()),
+                Some(other) if other != id => {
+                    return Err(StoreError::invalid(format!("merged revision is for {other}, not {id}")));
+                }
+                Some(_) => {}
+            }
+            match &input.parent {
+                None => input.parent = Some(head.rev.clone()),
+                Some(p) if *p == head.rev => {}
+                Some(_) => {
+                    let mut leaves = vec![head.rev.clone()];
+                    leaves.extend(losers.iter().cloned());
+                    return Err(StoreError::Conflict {
+                        id: id.to_string(),
+                        parent: input.parent,
+                        leaves,
+                        hint: Some(format!("a merge must be written on the winner, {}", head.rev)),
+                    });
+                }
+            }
+            put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, input.into_draft()?)?;
+        }
+        for loser in &losers {
+            let doc = get_rev_in(&tx, loser)?;
+            put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, tombstone_draft(&doc)?)?;
+        }
+        let mut current = head_in(&tx, id)?.ok_or_else(|| StoreError::NotFound { id: id.to_string() })?;
+        current.conflicts = conflicts_in(&tx, id, &current.rev)?;
+        tx.commit()?;
+        Ok(current)
+    }
+
+    /// Documents with more than one live leaf, in id order, after `after`.
+    pub fn conflicted(&self, after: Option<&str>, limit: Option<usize>) -> Result<ConflictPage, StoreError> {
+        let limit = clamp_limit(limit);
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare_cached(
+                "SELECT d._id FROM docs d
+                  WHERE d._deleted = 0 AND NOT EXISTS (SELECT 1 FROM docs c WHERE c._parent = d._rev)
+                    AND (?1 IS NULL OR d._id > ?1)
+                  GROUP BY d._id HAVING count(*) > 1 ORDER BY d._id LIMIT ?2",
+            )?;
+            let rows = stmt.query_map(params![after, limit as i64], |r| r.get(0))?;
+            rows.collect::<Result<_, _>>()?
         };
-        self.put_draft(Draft {
-            id: id.to_string(),
-            parent: Some(parent.to_string()),
-            type_ref,
-            deleted: true,
-            body: Map::new(),
-        })
+        let mut docs = Vec::with_capacity(ids.len());
+        for id in ids {
+            let head = head_in(&self.conn, &id)?.ok_or_else(|| StoreError::NotFound { id: id.clone() })?;
+            let conflicts = conflicts_in(&self.conn, &id, &head.rev)?;
+            docs.push(Conflicted { id, rev: head.rev, conflicts });
+        }
+        let next = if docs.len() == limit { docs.last().map(|d| d.id.clone()) } else { None };
+        Ok(ConflictPage { docs, next })
+    }
+
+    /// `rev` and every revision behind it, newest first.
+    pub fn ancestors(&self, rev_id: &str) -> Result<Vec<String>, StoreError> {
+        let mut stmt = self.conn.prepare_cached(
+            "WITH RECURSIVE chain(_rev, _parent, n) AS (
+               SELECT _rev, _parent, 1 FROM docs WHERE _rev = ?1
+               UNION ALL
+               SELECT d._rev, d._parent, n + 1 FROM chain JOIN docs d ON d._rev = chain._parent WHERE n < ?2)
+             SELECT _rev FROM chain ORDER BY n",
+        )?;
+        let rows = stmt.query_map(params![rev_id, MAX_HISTORY as i64], |r| r.get::<_, String>(0))?;
+        let revs = rows.collect::<Result<Vec<_>, _>>()?;
+        if revs.is_empty() {
+            return Err(StoreError::NotFound { id: rev_id.to_string() });
+        }
+        Ok(revs)
+    }
+
+    // ---- replication --------------------------------------------------
+
+    /// Insert revisions from the vault `peer` and move its checkpoint to
+    /// `(seq, rev)`, all in one transaction. A revision whose content does
+    /// not hash to its `_rev` fails the whole batch.
+    pub fn apply_replicas(&mut self, peer: &str, docs: &[Doc], seq: i64, rev: &str) -> Result<BatchReport, StoreError> {
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut report = BatchReport::default();
+        for doc in docs {
+            match insert_replica_in(&tx, doc)? {
+                Applied::Written => report.written += 1,
+                Applied::Present => report.present += 1,
+                Applied::MissingParent => report.missing_parent += 1,
+            }
+        }
+        tx.execute(
+            "INSERT INTO checkpoints(peer, seq, rev) VALUES (?1, ?2, ?3)
+             ON CONFLICT(peer) DO UPDATE SET seq = excluded.seq, rev = excluded.rev",
+            params![peer, seq, rev],
+        )?;
+        tx.commit()?;
+        Ok(report)
+    }
+
+    /// The last `(seq, rev)` of `peer` this vault applied.
+    pub fn checkpoint(&self, peer: &str) -> Result<Option<(i64, String)>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT seq, rev FROM checkpoints WHERE peer = ?1", [peer], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    }
+
+    /// The revision committed at change-feed position `seq`.
+    pub fn rev_at_seq(&self, seq: i64) -> Result<Option<String>, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT _rev FROM docs WHERE _local_seq = ?1", [seq], |r| r.get(0))
+            .optional()?)
     }
 
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
@@ -376,8 +623,16 @@ impl Store {
         match head_in(&self.conn, id)? {
             None => Err(StoreError::NotFound { id: id.to_string() }),
             Some(d) if d.deleted => Err(StoreError::Deleted { id: id.to_string(), rev: d.rev }),
-            Some(d) => Ok(d),
+            Some(mut d) => {
+                d.conflicts = conflicts_in(&self.conn, id, &d.rev)?;
+                Ok(d)
+            }
         }
+    }
+
+    /// Tombstoned leaves of `id` other than `winner`: `_deleted_conflicts`.
+    pub fn deleted_conflicts(&self, id: &str, winner: &str) -> Result<Vec<String>, StoreError> {
+        other_leaves_in(&self.conn, id, winner, true)
     }
 
     pub fn get_rev(&self, rev_id: &str) -> Result<Doc, StoreError> {

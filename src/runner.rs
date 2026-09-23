@@ -193,6 +193,34 @@ impl Runner {
     }
 }
 
+/// Run `runner` once, outside the scheduler, with `prompt` on stdin, and
+/// return its last message. `name` fills the `{task}` token and the actor
+/// of anything the agent writes. A command that does not start, times
+/// out, or exits non-zero is an error.
+pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Result<String, StoreError> {
+    let scratch = std::env::temp_dir().join(format!("subconscious-{}", crate::doc::new_id()));
+    std::fs::create_dir_all(&scratch).map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
+    let ctx = Context {
+        db: db.to_path_buf(),
+        task: name.to_string(),
+        run: String::new(),
+        mcp: scratch.join("mcp.json"),
+        out: scratch.join("last-message"),
+        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("subconscious")),
+    };
+    let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
+    let timeout = std::time::Duration::from_secs(runner.timeout_secs);
+    let outcome = task::spawn(&ctx.resolve(&runner.argv), &ctx.env(), &cwd, prompt, timeout).await;
+    let message = task::last_message(&ctx.out, &outcome.stdout);
+    let _ = std::fs::remove_dir_all(&scratch);
+    let errors = task::failures(&outcome, timeout);
+    if !errors.is_empty() {
+        return Err(StoreError::Runner { message: format!("{}: {}", runner.id, errors.join("; ")) });
+    }
+    Ok(String::from_utf8_lossy(&message).into_owned())
+}
+
 /// What one run makes available to the command, as tokens and as
 /// environment variables.
 #[derive(Debug, Clone)]
@@ -316,6 +344,8 @@ mod tests {
             created_at: "t".into(),
             actor: None,
             seq: None,
+            conflicts: Vec::new(),
+            deleted_conflicts: Vec::new(),
             body: serde_json::from_value(json!({"argv": ["cat"], "timeout": "2m"})).unwrap(),
         };
         let r = Runner::from_doc(&doc).unwrap();

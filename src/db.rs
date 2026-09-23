@@ -7,7 +7,18 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
+
+/// Replication checkpoints, one per source vault this vault pulls from.
+/// `rev` is the source's revision at `seq`; a mismatch means the source was
+/// replaced, and the next pull starts again from zero.
+const MIGRATION_4: &str = r#"
+CREATE TABLE checkpoints (
+  peer TEXT PRIMARY KEY,
+  seq  INTEGER NOT NULL,
+  rev  TEXT NOT NULL
+);
+"#;
 
 /// Who wrote the revision. Set by `serve --actor` and the CLI `--actor`
 /// flag; a scheduled task's writes carry its id so the task does not wake
@@ -191,5 +202,13 @@ mod tests {
         assert_eq!(path, "doc://s");
         let none: Option<String> = conn.query_row("SELECT _type_path FROM docs WHERE _id='y'", [], |r| r.get(0)).unwrap();
         assert_eq!(none, None);
+    }
+
+    #[test]
+    fn migration_4_adds_checkpoints() {
+        let conn = open_in_memory().unwrap();
+        conn.execute("INSERT INTO checkpoints(peer, seq, rev) VALUES ('/a.db', 3, '1-ab')", []).unwrap();
+        let seq: i64 = conn.query_row("SELECT seq FROM checkpoints WHERE peer = '/a.db'", [], |r| r.get(0)).unwrap();
+        assert_eq!(seq, 3);
     }
 }

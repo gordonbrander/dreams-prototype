@@ -97,6 +97,15 @@ pub struct Doc {
     /// Change-feed sequence. Present only in `changes` results.
     #[serde(rename = "_seq", skip_serializing_if = "Option::is_none")]
     pub seq: Option<i64>,
+    /// Other live leaves of this document, when replication made concurrent
+    /// edits. Present only on the current revision from `get`. Resolve with
+    /// `resolve`, or by tombstoning each leaf listed here.
+    #[serde(rename = "_conflicts", default, skip_serializing_if = "Vec::is_empty")]
+    pub conflicts: Vec<String>,
+    /// Tombstoned leaves other than the winner, such as losers a resolve
+    /// discarded. Present only when asked for.
+    #[serde(rename = "_deleted_conflicts", default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_conflicts: Vec<String>,
     #[serde(flatten)]
     pub body: Map<String, Value>,
 }
@@ -279,6 +288,8 @@ mod tests {
             created_at: "t".into(),
             actor: None,
             seq: None,
+            conflicts: Vec::new(),
+            deleted_conflicts: Vec::new(),
             body: serde_json::from_value(json!({"title": "T"})).unwrap(),
         };
         let v = serde_json::to_value(&d).unwrap();

@@ -14,12 +14,15 @@ pub mod doc;
 pub mod error;
 pub mod markdown;
 pub mod mcp;
+pub mod resolve;
 pub mod rev;
 pub mod runner;
 pub mod schema;
 pub mod store;
+pub mod sync;
 pub mod task;
 
 pub use doc::{Doc, DocRef, PutInput};
 pub use error::StoreError;
-pub use store::{Changes, History, ListQuery, Page, Store};
+pub use store::{BatchReport, Changes, History, ListQuery, Page, Store};
+pub use sync::PullReport;

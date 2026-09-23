@@ -48,6 +48,9 @@ pub enum StoreError {
         id: Option<String>,
     },
 
+    #[error("runner failed: {message}")]
+    Runner { message: String },
+
     #[error("invalid input: {message}")]
     InvalidInput { message: String },
 

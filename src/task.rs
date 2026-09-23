@@ -437,25 +437,24 @@ fn truncate_utf8(bytes: &[u8], max: usize) -> (String, bool) {
     (text, true)
 }
 
-/// Write run revision 2 with the result. `content` is the `{out}` file when
-/// the command wrote one, else stdout.
-pub fn finish(store: &mut Store, run: &Doc, outcome: &Outcome, out_file: &Path, timeout: Duration, now: &str) -> Result<Doc, StoreError> {
-    let mut body = run.body.clone();
-    body.insert("finished_at".into(), Value::String(now.to_string()));
-    let raw = match std::fs::read(out_file) {
+/// The command's last message: the `{out}` file when the command wrote
+/// one, else stdout.
+pub fn last_message(out_file: &Path, stdout: &[u8]) -> Vec<u8> {
+    match std::fs::read(out_file) {
         Ok(bytes) if !bytes.is_empty() => bytes,
-        _ => outcome.stdout.clone(),
-    };
-    let (content, cut) = truncate_utf8(&raw, MAX_CONTENT_BYTES);
+        _ => stdout.to_vec(),
+    }
+}
+
+/// Why a command failed: it did not start, it timed out, or it exited
+/// non-zero (with the tail of its stderr). Empty on success.
+pub fn failures(outcome: &Outcome, timeout: Duration) -> Vec<String> {
     let mut errors: Vec<String> = Vec::new();
     if let Some(e) = &outcome.spawn_error {
         errors.push(e.clone());
     }
     if outcome.timed_out {
         errors.push(format!("timeout after {}s", timeout.as_secs()));
-    }
-    if cut {
-        errors.push(format!("output truncated to {MAX_CONTENT_BYTES} bytes"));
     }
     if !outcome.timed_out && outcome.spawn_error.is_none() && outcome.exit_code != Some(0) {
         let (tail, _) = truncate_utf8(&outcome.stderr[outcome.stderr.len().saturating_sub(MAX_STDERR_BYTES)..], MAX_STDERR_BYTES);
@@ -466,6 +465,18 @@ pub fn finish(store: &mut Store, run: &Doc, outcome: &Outcome, out_file: &Path, 
             None if tail.is_empty() => "killed by signal".to_string(),
             None => format!("killed by signal: {tail}"),
         });
+    }
+    errors
+}
+
+/// Write run revision 2 with the result. `content` is the command's last message.
+pub fn finish(store: &mut Store, run: &Doc, outcome: &Outcome, out_file: &Path, timeout: Duration, now: &str) -> Result<Doc, StoreError> {
+    let mut body = run.body.clone();
+    body.insert("finished_at".into(), Value::String(now.to_string()));
+    let (content, cut) = truncate_utf8(&last_message(out_file, &outcome.stdout), MAX_CONTENT_BYTES);
+    let mut errors = failures(outcome, timeout);
+    if cut {
+        errors.push(format!("output truncated to {MAX_CONTENT_BYTES} bytes"));
     }
     body.insert("exit_code".into(), outcome.exit_code.map(Value::from).unwrap_or(Value::Null));
     if !errors.is_empty() {
@@ -595,6 +606,8 @@ mod tests {
             created_at: "t".into(),
             actor: None,
             seq: Some(4),
+            conflicts: Vec::new(),
+            deleted_conflicts: Vec::new(),
             body: serde_json::Map::new(),
         };
         Evaluation {

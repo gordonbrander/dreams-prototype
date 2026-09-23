@@ -384,7 +384,7 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.get("a").unwrap().body["title"], "persisted");
         let n: i64 = s.connection().query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 3);
+        assert_eq!(n, 4);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
