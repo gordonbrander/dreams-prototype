@@ -7,12 +7,21 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3];
 
 /// Who wrote the revision. Set by `serve --actor` and the CLI `--actor`
 /// flag; a scheduled task's writes carry its id so the task does not wake
 /// itself. Not part of the revision hash.
 const MIGRATION_2: &str = "ALTER TABLE docs ADD COLUMN actor TEXT;";
+
+/// Schemas became documents. `_type` is now a `doc://` reference, pinned
+/// to one schema revision; `_type_path` is the reference without the pin,
+/// so filters can match every revision of a schema.
+const MIGRATION_3: &str = r#"
+ALTER TABLE docs ADD COLUMN _type_path TEXT GENERATED ALWAYS AS
+  (CASE WHEN instr(_type, '?rev=') > 0 THEN substr(_type, 1, instr(_type, '?rev=') - 1) ELSE _type END) VIRTUAL;
+DROP TABLE schemas;
+"#;
 
 const MIGRATION_1: &str = r#"
 -- One row per revision. Append-only.
@@ -161,5 +170,26 @@ mod tests {
             .query_row("SELECT count(*) FROM migrations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n as usize, MIGRATIONS.len());
+    }
+
+    #[test]
+    fn migration_3_adds_type_path_and_drops_schemas() {
+        let conn = open_in_memory().unwrap();
+        let hidden: i64 = conn
+            .query_row("SELECT hidden FROM pragma_table_xinfo('docs') WHERE name = '_type_path'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hidden, 2, "virtual generated column");
+        let schemas: i64 = conn
+            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'schemas'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(schemas, 0);
+        conn.execute_batch(
+            "INSERT INTO docs(_rev,_id,_type,body) VALUES ('1-a','x','doc://s?rev=1-b','{}'), ('1-c','y',NULL,'{}')",
+        )
+        .unwrap();
+        let path: String = conn.query_row("SELECT _type_path FROM docs WHERE _id='x'", [], |r| r.get(0)).unwrap();
+        assert_eq!(path, "doc://s");
+        let none: Option<String> = conn.query_row("SELECT _type_path FROM docs WHERE _id='y'", [], |r| r.get(0)).unwrap();
+        assert_eq!(none, None);
     }
 }

@@ -1,17 +1,19 @@
 //! The document store: one write path (`put`), reads through `doc_heads`.
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use jsonschema::Validator;
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::db;
-use crate::doc::{Doc, Draft, PutInput};
+use crate::doc::{Doc, DocRef, Draft, PutInput};
 use crate::error::StoreError;
 use crate::rev;
-use crate::schema::{SchemaRegistry, SchemaSummary};
+use crate::schema;
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 1000;
@@ -23,19 +25,27 @@ pub(crate) const DOC_COLS: &str =
 /// The timestamp format every stored time uses (`_created_at`, run times).
 pub const TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%fZ";
 
+/// Compiled validators keyed by pinned schema reference. A pinned
+/// reference names immutable content, so an entry never goes stale.
+type Validators = HashMap<String, Validator>;
+const MAX_VALIDATORS: usize = 256;
+
 pub struct Store {
     conn: Connection,
-    schemas: SchemaRegistry,
+    validators: Validators,
     /// Written into `docs.actor` on every revision this store creates.
     actor: Option<String>,
-    /// `_type`s this connection may not write or delete.
-    protected: Vec<String>,
+    /// Type paths this connection may not write or delete.
+    protected_types: Vec<String>,
+    /// Ids this connection may not write or delete.
+    protected_ids: Vec<String>,
 }
 
 /// Filters shared by `list` and `search`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct ListQuery {
-    /// Only docs with this `_type`.
+    /// Only docs with this `_type`: a `doc://` reference. Without `?rev=` it
+    /// matches every pinned revision of that schema.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub type_id: Option<String>,
     /// Only docs whose current revision carries this tag.
@@ -64,16 +74,21 @@ pub struct History {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct SchemaList {
-    pub schemas: Vec<SchemaSummary>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct Changes {
     /// Revisions in commit order, each carrying `_seq`.
     pub results: Vec<Doc>,
     /// Pass as `since` to continue.
     pub last_seq: i64,
+}
+
+/// Split a type filter into (exact, path) so one SQL string serves both:
+/// `AND (?a IS NULL OR d._type = ?a) AND (?b IS NULL OR d._type_path = ?b)`.
+pub(crate) fn type_filter(t: Option<&str>) -> (Option<&str>, Option<&str>) {
+    match t {
+        None => (None, None),
+        Some(t) if t.contains("?rev=") => (Some(t), None),
+        Some(t) => (None, Some(t)),
+    }
 }
 
 fn clamp_limit(limit: Option<usize>) -> usize {
@@ -131,43 +146,82 @@ fn leaves_in(conn: &Connection, id: &str) -> Result<Vec<String>, StoreError> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// The one write path. Validates, checks the protected types, enforces the
-/// revision chain, and inserts. Idempotent by content: replaying an input
-/// that is already a leaf returns that leaf.
+/// Resolve a type reference to one schema revision, validate `body`
+/// against it, and return the pinned reference.
+fn resolve_and_validate(
+    tx: &Connection,
+    validators: &mut Validators,
+    type_ref: &DocRef,
+    body: &Map<String, Value>,
+) -> Result<String, StoreError> {
+    let schema = match &type_ref.rev {
+        None => match head_in(tx, &type_ref.id)? {
+            None => return Err(StoreError::UnknownType { type_id: type_ref.to_string() }),
+            Some(d) if d.deleted => return Err(StoreError::Deleted { id: d.id, rev: d.rev }),
+            Some(d) => d,
+        },
+        Some(rev_id) => {
+            let d = get_rev_in(tx, rev_id).map_err(|_| StoreError::UnknownType { type_id: type_ref.to_string() })?;
+            if d.id != type_ref.id {
+                return Err(StoreError::invalid(format!("{rev_id} is a revision of {}, not {}", d.id, type_ref.id)));
+            }
+            if d.deleted {
+                return Err(StoreError::Deleted { id: d.id, rev: d.rev });
+            }
+            d
+        }
+    };
+    let pinned = DocRef::pinned(&schema.id, &schema.rev).to_string();
+    if !validators.contains_key(&pinned) {
+        if validators.len() >= MAX_VALIDATORS {
+            validators.clear();
+        }
+        let validator = schema::compile(&pinned, &Value::Object(schema.body))?;
+        validators.insert(pinned.clone(), validator);
+    }
+    let errors = schema::validate(&validators[&pinned], &Value::Object(body.clone()));
+    if !errors.is_empty() {
+        return Err(StoreError::Validation { schema: pinned, errors });
+    }
+    Ok(pinned)
+}
+
+/// The one write path. Checks protection, pins and validates the type,
+/// enforces the revision chain, and inserts. Idempotent by content:
+/// replaying an input that is already a leaf returns that leaf.
 fn put_draft_in(
     tx: &Connection,
-    schemas: &mut SchemaRegistry,
+    validators: &mut Validators,
     actor: Option<&str>,
-    protected: &[String],
+    protected_types: &[String],
+    protected_ids: &[String],
     draft: Draft,
 ) -> Result<Doc, StoreError> {
-    if let Some(type_id) = &draft.type_id
-        && protected.iter().any(|p| p == type_id)
+    if protected_ids.contains(&draft.id) {
+        return Err(StoreError::protected_id(&draft.id));
+    }
+    if let Some(r) = &draft.type_ref
+        && protected_types.iter().any(|p| *p == r.path())
     {
-        return Err(StoreError::Protected { type_id: type_id.clone() });
+        return Err(StoreError::protected_type(&r.path()));
     }
     if let Some(parent) = &draft.parent
         && let Ok(parent_doc) = get_rev_in(tx, parent)
-        && let Some(type_id) = &parent_doc.type_id
-        && protected.iter().any(|p| p == type_id)
+        && let Some(path) = parent_doc.type_path()
+        && protected_types.iter().any(|p| p == path)
     {
-        return Err(StoreError::Protected { type_id: type_id.clone() });
+        return Err(StoreError::protected_type(path));
     }
 
-    if let Some(type_id) = &draft.type_id
-        && !draft.deleted
-    {
-        schemas.validate(tx, type_id, &Value::Object(draft.body.clone()))?;
-    }
+    let type_id: Option<String> = match (&draft.type_ref, draft.deleted) {
+        (None, _) => None,
+        // A tombstone keeps its parent's pinned type; a pinned revision is immutable.
+        (Some(r), true) => Some(r.to_string()),
+        (Some(r), false) => Some(resolve_and_validate(tx, validators, r, &draft.body)?),
+    };
 
     let leaves = leaves_in(tx, &draft.id)?;
-    let rev_id = rev::rev_of(
-        &draft.id,
-        draft.parent.as_deref(),
-        draft.type_id.as_deref(),
-        draft.deleted,
-        &draft.body,
-    )?;
+    let rev_id = rev::rev_of(&draft.id, draft.parent.as_deref(), type_id.as_deref(), draft.deleted, &draft.body)?;
 
     if leaves.contains(&rev_id) {
         return get_rev_in(tx, &rev_id);
@@ -177,10 +231,20 @@ fn put_draft_in(
         Some(p) => leaves.contains(p),
     };
     if !parent_ok {
+        // A create over an existing document with the same body: only the
+        // pinned type differs, so the schema moved since it was written.
+        let hint = match (&draft.parent, leaves.as_slice()) {
+            (None, [leaf]) => get_rev_in(tx, leaf)
+                .ok()
+                .filter(|d| !d.deleted && d.body == draft.body && d.type_id != type_id)
+                .map(|d| format!("same body, but the schema moved since {leaf}; update with _parent = {leaf} to re-pin it", leaf = d.rev)),
+            _ => None,
+        };
         return Err(StoreError::Conflict {
             id: draft.id,
             parent: draft.parent,
             leaves,
+            hint,
         });
     }
 
@@ -190,7 +254,7 @@ fn put_draft_in(
             rev_id,
             draft.id,
             draft.parent,
-            draft.type_id,
+            type_id,
             draft.deleted as i64,
             serde_json::to_string(&draft.body)?,
             actor,
@@ -199,27 +263,24 @@ fn put_draft_in(
     get_rev_in(tx, &rev_id)
 }
 
-/// Every schema the binary ships. Frozen: the registry is immutable, so a
-/// change here would make every existing database refuse to open. A new
-/// shape is a new `$id`.
-const BUILTIN_SCHEMAS: &[&str] = &[crate::task::TASK_SCHEMA, crate::task::RUN_SCHEMA, crate::runner::RUNNER_SCHEMA];
-
 impl Store {
+    /// Open, or create, and migrate. Never writes a document.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        Store::new(db::open(path)?)
+        Ok(Store::new(db::open(path)?))
     }
 
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        Store::new(db::open_in_memory()?)
+        Ok(Store::new(db::open_in_memory()?))
     }
 
-    fn new(conn: Connection) -> Result<Store, StoreError> {
-        let mut schemas = SchemaRegistry::default();
-        for text in BUILTIN_SCHEMAS {
-            let schema: Value = serde_json::from_str(text).expect("built-in schemas are valid JSON");
-            schemas.ensure(&conn, schema)?;
+    fn new(conn: Connection) -> Store {
+        Store {
+            conn,
+            validators: HashMap::new(),
+            actor: None,
+            protected_types: Vec::new(),
+            protected_ids: Vec::new(),
         }
-        Ok(Store { conn, schemas, actor: None, protected: Vec::new() })
     }
 
     /// Name the writer of every revision this store creates from now on.
@@ -231,9 +292,11 @@ impl Store {
         self.actor.as_deref()
     }
 
-    /// Refuse writes and deletes of documents with these `_type`s.
-    pub fn set_protected(&mut self, types: &[&str]) {
-        self.protected = types.iter().map(|t| t.to_string()).collect();
+    /// Refuse writes and deletes of documents whose type path is in
+    /// `types` (pinned or not) or whose id is in `ids`.
+    pub fn set_protected(&mut self, types: &[&str], ids: &[&str]) {
+        self.protected_types = types.iter().map(|t| t.to_string()).collect();
+        self.protected_ids = ids.iter().map(|t| t.to_string()).collect();
     }
 
     /// The current time in the store's own format.
@@ -259,12 +322,12 @@ impl Store {
         check: impl FnOnce(&Connection) -> Result<bool, StoreError>,
     ) -> Result<Option<Doc>, StoreError> {
         let draft = input.into_draft()?;
-        let Store { conn, schemas, actor, protected } = self;
+        let Store { conn, validators, actor, protected_types, protected_ids } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if !check(&tx)? {
             return Ok(None);
         }
-        let doc = put_draft_in(&tx, schemas, actor.as_deref(), protected, draft)?;
+        let doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
         tx.commit()?;
         Ok(Some(doc))
     }
@@ -279,19 +342,23 @@ impl Store {
         if parent_doc.deleted {
             return Err(StoreError::Deleted { id: id.to_string(), rev: parent.to_string() });
         }
+        let type_ref = match &parent_doc.type_id {
+            Some(t) => Some(DocRef::parse(t)?),
+            None => None,
+        };
         self.put_draft(Draft {
             id: id.to_string(),
             parent: Some(parent.to_string()),
-            type_id: parent_doc.type_id,
+            type_ref,
             deleted: true,
             body: Map::new(),
         })
     }
 
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
-        let Store { conn, schemas, actor, protected } = self;
+        let Store { conn, validators, actor, protected_types, protected_ids } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let doc = put_draft_in(&tx, schemas, actor.as_deref(), protected, draft)?;
+        let doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
         tx.commit()?;
         Ok(doc)
     }
@@ -339,23 +406,25 @@ impl Store {
     /// Current, non-deleted documents, most recently modified first.
     pub fn list(&self, q: &ListQuery) -> Result<Page, StoreError> {
         let limit = clamp_limit(q.limit);
+        let (exact, path) = type_filter(q.type_id.as_deref());
         let sql = match &q.tag {
             Some(_) => format!(
                 "SELECT {DOC_COLS} FROM doc_tags t
                    JOIN doc_heads h ON h._id = t._id
                    JOIN docs d ON d._local_seq = h.seq
-                  WHERE t.tag = ?2 AND (?1 IS NULL OR d._type = ?1) AND (?3 IS NULL OR h.seq < ?3)
-                  ORDER BY h.seq DESC LIMIT ?4"
+                  WHERE t.tag = ?3 AND (?1 IS NULL OR d._type = ?1) AND (?2 IS NULL OR d._type_path = ?2)
+                    AND (?4 IS NULL OR h.seq < ?4)
+                  ORDER BY h.seq DESC LIMIT ?5"
             ),
             None => format!(
                 "SELECT {DOC_COLS} FROM doc_heads h JOIN docs d ON d._local_seq = h.seq
-                  WHERE d._deleted = 0 AND (?1 IS NULL OR d._type = ?1) AND ?2 IS NULL
-                    AND (?3 IS NULL OR h.seq < ?3)
-                  ORDER BY h.seq DESC LIMIT ?4"
+                  WHERE d._deleted = 0 AND (?1 IS NULL OR d._type = ?1) AND (?2 IS NULL OR d._type_path = ?2)
+                    AND ?3 IS NULL AND (?4 IS NULL OR h.seq < ?4)
+                  ORDER BY h.seq DESC LIMIT ?5"
             ),
         };
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![q.type_id, q.tag, q.before, limit as i64], |r| row_to_doc(r, true))?;
+        let rows = stmt.query_map(params![exact, path, q.tag, q.before, limit as i64], |r| row_to_doc(r, true))?;
         let mut docs = rows.collect::<Result<Vec<_>, _>>()?;
         let next = if docs.len() == limit { docs.last().and_then(|d| d.seq) } else { None };
         for d in &mut docs {
@@ -371,15 +440,16 @@ impl Store {
             return self.list(q);
         };
         let limit = clamp_limit(q.limit);
+        let (exact, path) = type_filter(q.type_id.as_deref());
         let sql = format!(
             "SELECT {DOC_COLS} FROM docs_fts f JOIN docs d ON d._local_seq = f.rowid
               WHERE docs_fts MATCH ?1
-                AND (?2 IS NULL OR d._type = ?2)
-                AND (?3 IS NULL OR EXISTS (SELECT 1 FROM doc_tags t WHERE t.tag = ?3 AND t._id = d._id))
-              ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?4"
+                AND (?2 IS NULL OR d._type = ?2) AND (?3 IS NULL OR d._type_path = ?3)
+                AND (?4 IS NULL OR EXISTS (SELECT 1 FROM doc_tags t WHERE t.tag = ?4 AND t._id = d._id))
+              ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?5"
         );
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![match_expr, q.type_id, q.tag, limit as i64], |r| row_to_doc(r, false))?;
+        let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64], |r| row_to_doc(r, false))?;
         let docs = rows.collect::<Result<Vec<_>, _>>()?;
         Ok(Page { docs, next: None })
     }
@@ -393,22 +463,6 @@ impl Store {
         let results = rows.collect::<Result<Vec<_>, _>>()?;
         let last_seq = results.last().and_then(|d| d.seq).unwrap_or(since);
         Ok(Changes { results, last_seq })
-    }
-
-    // ---- schemas ------------------------------------------------------
-
-    pub fn register_schema(&mut self, schema: Value) -> Result<SchemaSummary, StoreError> {
-        self.schemas.register(&self.conn, schema)
-    }
-
-    pub fn get_schema(&self, id: &str) -> Result<Value, StoreError> {
-        self.schemas.get(&self.conn, id)
-    }
-
-    pub fn list_schemas(&self) -> Result<SchemaList, StoreError> {
-        Ok(SchemaList {
-            schemas: self.schemas.list(&self.conn)?,
-        })
     }
 
     /// Raw connection, for tests and maintenance.

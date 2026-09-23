@@ -1,6 +1,7 @@
-//! Scheduled tasks: `task/v1` documents that wake an agent every interval,
-//! optionally only when watched documents changed. Runs are `run/v1`
-//! documents and the only state: the newest run holds the cursor.
+//! Scheduled tasks: documents typed `doc://schemas/task` that wake an agent
+//! every interval, optionally only when watched documents changed. Runs are
+//! documents typed `doc://schemas/run` and the only state: the newest run
+//! holds the cursor.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -17,24 +18,24 @@ use tokio::io::AsyncWriteExt;
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
 use crate::runner::{Context, Runner};
-use crate::store::{DOC_COLS, Store, row_to_doc};
+use crate::store::{DOC_COLS, Store, row_to_doc, type_filter};
 
-pub const TASK_TYPE: &str = "task/v1";
-pub const RUN_TYPE: &str = "run/v1";
+/// Seeded schema documents, as type paths.
+pub const TASK_TYPE: &str = "doc://schemas/task";
+pub const RUN_TYPE: &str = "doc://schemas/run";
 
 /// Agent output above this is cut, and the run records the cut.
 pub const MAX_CONTENT_BYTES: usize = 512 * 1024;
 const MAX_STDERR_BYTES: usize = 4 * 1024;
 
-/// Frozen. A new shape is `task/v2`.
+/// The body of `schemas/task`.
 pub const TASK_SCHEMA: &str = r#"{
-  "$id": "task/v1",
   "title": "Scheduled task",
-  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is the _id of a runner/v1 document.",
+  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document.",
   "type": "object",
   "required": ["runner", "every", "prompt"],
   "properties": {
-    "runner": {"type": "string", "minLength": 1},
+    "runner": {"type": "string", "pattern": "^doc://"},
     "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
     "prompt": {"type": "string"},
     "enabled": {"type": "boolean"},
@@ -53,11 +54,10 @@ pub const TASK_SCHEMA: &str = r#"{
   }
 }"#;
 
-/// Frozen. A new shape is `run/v2`.
+/// The body of `schemas/run`.
 pub const RUN_SCHEMA: &str = r#"{
-  "$id": "run/v1",
   "title": "Task run",
-  "description": "One firing of a task. Revision 1 is the claim, written before the agent starts; revision 2 adds the result. `seq` is the change-feed position the run consumed.",
+  "description": "One firing of a task. Revision 1 is the claim, written before the agent starts; revision 2 adds the result. `seq` is the change-feed position the run consumed. `runner` is the pinned doc:// reference of the runner revision that ran.",
   "type": "object",
   "required": ["task", "runner", "started_at", "seq", "tags"],
   "properties": {
@@ -139,7 +139,7 @@ pub struct Task {
 
 impl Task {
     pub fn from_doc(doc: &Doc) -> Result<Task, StoreError> {
-        if doc.type_id.as_deref() != Some(TASK_TYPE) {
+        if doc.type_path() != Some(TASK_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {TASK_TYPE} document", doc.id)));
         }
         let text = |key: &str| doc.body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
@@ -186,6 +186,10 @@ pub struct Evaluation {
     pub changes: Vec<Change>,
     #[serde(skip)]
     pub parsed: Task,
+    /// The runner revision that would run, resolved once per evaluation,
+    /// or why it could not be loaded.
+    #[serde(skip)]
+    pub runner: Result<Runner, String>,
 }
 
 fn head_seq(conn: &Connection) -> Result<i64, StoreError> {
@@ -203,7 +207,7 @@ fn newest_run(conn: &Connection, task_id: &str) -> Result<Option<Doc>, StoreErro
         "SELECT {DOC_COLS} FROM doc_tags t
            JOIN doc_heads h ON h._id = t._id
            JOIN docs d ON d._local_seq = h.seq
-          WHERE t.tag = ?1 AND d._type = ?2
+          WHERE t.tag = ?1 AND d._type_path = ?2
           ORDER BY json_extract(d.body, '$.started_at') DESC LIMIT 1"
     );
     Ok(conn.query_row(&sql, params![task_id, RUN_TYPE], |r| row_to_doc(r, false)).optional()?)
@@ -214,12 +218,13 @@ fn changes_since(conn: &Connection, task_id: &str, when: &When, cursor: i64, hea
         Some(ids) => Some(serde_json::to_string(ids)?),
         None => None,
     };
+    let (exact, path) = type_filter(when.type_id.as_deref());
     let mut stmt = conn.prepare_cached(
         "SELECT d._local_seq, d._id, d._rev, d._deleted FROM docs d
           WHERE d._local_seq > ?1 AND d._local_seq <= ?2
             AND (d.actor IS NULL OR d.actor <> ?3)
             AND (?4 IS NULL OR d._id GLOB ?4)
-            AND (?5 IS NULL OR d._type = ?5)
+            AND (?5 IS NULL OR d._type = ?5) AND (?8 IS NULL OR d._type_path = ?8)
             AND (?6 IS NULL
                  OR (json_type(d.body, '$.tags') = 'array'
                      AND EXISTS (SELECT 1 FROM json_each(d.body, '$.tags') j WHERE j.type = 'text' AND j.value = ?6))
@@ -231,7 +236,7 @@ fn changes_since(conn: &Connection, task_id: &str, when: &When, cursor: i64, hea
           ORDER BY d._local_seq",
     )?;
     let rows = stmt.query_map(
-        params![cursor, head, task_id, when.glob, when.type_id, when.tag, ids_json],
+        params![cursor, head, task_id, when.glob, exact, when.tag, ids_json, path],
         |r| {
             Ok(Change {
                 seq: r.get(0)?,
@@ -251,7 +256,7 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
     let tx = conn.unchecked_transaction()?;
     let sql = format!(
         "SELECT {DOC_COLS} FROM doc_heads h JOIN docs d ON d._local_seq = h.seq
-          WHERE d._type = ?1 AND d._deleted = 0 AND (?2 IS NULL OR d._id = ?2)
+          WHERE d._type_path = ?1 AND d._deleted = 0 AND (?2 IS NULL OR d._id = ?2)
           ORDER BY d._id"
     );
     let mut stmt = tx.prepare(&sql)?;
@@ -274,13 +279,15 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
         if only.is_none() && !parsed.enabled {
             continue;
         }
+        let runner = Runner::get(store, &parsed.runner).map_err(|e| e.to_string());
         let newest = newest_run(&tx, &doc.id)?;
         let (last_run_at, cursor, last_run, running) = match &newest {
             Some(run) => {
                 let started = run.body.get("started_at").and_then(Value::as_str).unwrap_or_default().to_string();
                 let seq = run.body.get("seq").and_then(Value::as_i64).unwrap_or(0);
                 let unfinished = run.body.get("finished_at").is_none();
-                let timeout = Runner::get(store, &parsed.runner)
+                let timeout = runner
+                    .as_ref()
                     .map(|r| r.timeout_secs)
                     .unwrap_or_else(|_| parse_duration(crate::runner::DEFAULT_TIMEOUT).unwrap_or(600));
                 let young = elapsed_secs(&tx, &started, now)? < timeout as i64 + 60;
@@ -306,6 +313,7 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
             due,
             changes,
             parsed,
+            runner,
         });
     }
     tx.commit()?;
@@ -347,11 +355,16 @@ fn run_id(task_id: &str, now: &str, head: i64) -> String {
 pub fn claim(store: &mut Store, eval: &Evaluation, now: &str) -> Result<Option<Doc>, StoreError> {
     let task_id = eval.task.id.clone();
     let expected = eval.last_run.clone();
+    // The pinned runner revision when it loaded; the task's own reference when it did not.
+    let runner = match &eval.runner {
+        Ok(r) => r.pinned(),
+        Err(_) => eval.parsed.runner.clone(),
+    };
     let input: PutInput = serde_json::from_value(json!({
         "_id": run_id(&task_id, now, eval.head),
         "_type": RUN_TYPE,
         "task": task_id,
-        "runner": eval.parsed.runner,
+        "runner": runner,
         "started_at": now,
         "seq": eval.head,
         "tags": [task_id],
@@ -464,7 +477,8 @@ pub fn finish(store: &mut Store, run: &Doc, outcome: &Outcome, out_file: &Path, 
     store.put(PutInput {
         id: Some(run.id.clone()),
         parent: Some(run.rev.clone()),
-        type_id: Some(RUN_TYPE.into()),
+        // The claim's pinned type, so both revisions name the same schema revision.
+        type_id: run.type_id.clone(),
         body,
     })
 }
@@ -505,7 +519,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
     };
     let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 
-    let outcome = match Runner::get(store, &eval.parsed.runner) {
+    let outcome = match &eval.runner {
         Ok(runner) => {
             let timeout = Duration::from_secs(runner.timeout_secs);
             let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
@@ -513,7 +527,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
             (spawn(&argv, &ctx.env(), &cwd, &prompt_text(eval), timeout).await, timeout)
         }
         Err(e) => (
-            Outcome { spawn_error: Some(e.to_string()), ..Default::default() },
+            Outcome { spawn_error: Some(e.clone()), ..Default::default() },
             Duration::from_secs(0),
         ),
     };
@@ -576,7 +590,7 @@ mod tests {
             id: "tasks/t".into(),
             rev: "1-a".into(),
             parent: None,
-            type_id: Some(TASK_TYPE.into()),
+            type_id: Some(format!("{TASK_TYPE}?rev=1-a")),
             deleted: false,
             created_at: "t".into(),
             actor: None,
@@ -595,12 +609,13 @@ mod tests {
             changes,
             parsed: Task {
                 id: "tasks/t".into(),
-                runner: "runners/cat".into(),
+                runner: "doc://runners/cat".into(),
                 every_secs: 60,
                 when,
                 prompt: prompt.into(),
                 enabled: true,
             },
+            runner: Err("not loaded".into()),
         }
     }
 

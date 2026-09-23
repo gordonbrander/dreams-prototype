@@ -6,9 +6,73 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use crate::error::StoreError;
+use crate::rev;
 
 pub const MAX_ID_BYTES: usize = 512;
 pub const MAX_BODY_BYTES: usize = 1 << 20;
+
+/// A reference to a document: `doc://<id>`, or `doc://<id>?rev=<rev>` for
+/// one exact revision. Revision ids are content hashes, so a pinned
+/// reference names the same bytes in every vault.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocRef {
+    pub id: String,
+    pub rev: Option<String>,
+}
+
+impl DocRef {
+    pub const SCHEME: &'static str = "doc://";
+    const REV: &'static str = "?rev=";
+
+    /// Strict: the text must start with `doc://`.
+    pub fn parse(text: &str) -> Result<DocRef, StoreError> {
+        let rest = text
+            .strip_prefix(Self::SCHEME)
+            .ok_or_else(|| StoreError::invalid(format!("{text:?} is not a doc:// reference")))?;
+        let (id, rev) = match rest.split_once(Self::REV) {
+            Some((id, rev)) => {
+                rev::parse(rev)?;
+                (id, Some(rev.to_string()))
+            }
+            None => (rest, None),
+        };
+        check_id(id)?;
+        Ok(DocRef { id: id.to_string(), rev })
+    }
+
+    /// Lenient, for command-line flags: a bare id gets the scheme.
+    pub fn from_cli(text: &str) -> Result<DocRef, StoreError> {
+        if text.starts_with(Self::SCHEME) {
+            Self::parse(text)
+        } else {
+            Self::parse(&format!("{}{text}", Self::SCHEME))
+        }
+    }
+
+    pub fn pinned(id: &str, rev: &str) -> DocRef {
+        DocRef { id: id.to_string(), rev: Some(rev.to_string()) }
+    }
+
+    /// `doc://<id>`, without the revision.
+    pub fn path(&self) -> String {
+        format!("{}{}", Self::SCHEME, self.id)
+    }
+
+    /// The part of a reference before `?rev=`.
+    pub fn path_of(text: &str) -> &str {
+        text.split_once(Self::REV).map_or(text, |(p, _)| p)
+    }
+}
+
+impl std::fmt::Display for DocRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}{}", Self::SCHEME, self.id)?;
+        if let Some(rev) = &self.rev {
+            write!(f, "{}{rev}", Self::REV)?;
+        }
+        Ok(())
+    }
+}
 
 /// A stored revision as returned to clients. Body fields are flattened
 /// alongside the reserved `_*` fields.
@@ -37,6 +101,13 @@ pub struct Doc {
     pub body: Map<String, Value>,
 }
 
+impl Doc {
+    /// `_type` without its `?rev=` pin: the schema's `doc://` path.
+    pub fn type_path(&self) -> Option<&str> {
+        self.type_id.as_deref().map(DocRef::path_of)
+    }
+}
+
 /// What a client sends to `put`. `_id` may be omitted (a UUID v7 is
 /// generated). `_parent` is the revision being updated; omit for a genesis
 /// create. Everything else is the body.
@@ -48,7 +119,8 @@ pub struct PutInput {
     /// The current `_rev` of the document being updated. Omit for a create.
     #[serde(rename = "_parent", default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    /// Registered schema id (for example `note/v1`). The body is validated against it.
+    /// `doc://<id>` or `doc://<id>?rev=<rev>` of a schema document. The body is validated
+    /// against it. An unpinned reference is pinned to the schema's current revision at write.
     #[serde(rename = "_type", default, skip_serializing_if = "Option::is_none")]
     pub type_id: Option<String>,
     /// Body fields. Blessed: `title` (string), `content` (string), `tags` (array of strings).
@@ -62,7 +134,8 @@ pub struct PutInput {
 pub struct Draft {
     pub id: String,
     pub parent: Option<String>,
-    pub type_id: Option<String>,
+    /// Pinned or not. The store pins it before hashing.
+    pub type_ref: Option<DocRef>,
     pub deleted: bool,
     pub body: Map<String, Value>,
 }
@@ -83,6 +156,9 @@ pub fn check_id(id: &str) -> Result<(), StoreError> {
     }
     if id.chars().any(char::is_control) {
         return Err(StoreError::invalid("_id must not contain control characters"));
+    }
+    if id.contains("?rev=") {
+        return Err(StoreError::invalid("_id must not contain `?rev=`"));
     }
     Ok(())
 }
@@ -124,19 +200,18 @@ impl PutInput {
             }
             None => new_id(),
         };
-        if let Some(t) = &self.type_id
-            && t.is_empty()
-        {
-            return Err(StoreError::invalid("_type must not be empty"));
-        }
+        let type_ref = match &self.type_id {
+            Some(t) => Some(DocRef::parse(t).map_err(|e| StoreError::invalid(format!("_type: {e}")))?),
+            None => None,
+        };
         if let Some(p) = &self.parent {
-            crate::rev::parse(p)?;
+            rev::parse(p)?;
         }
         check_body(&self.body)?;
         Ok(Draft {
             id,
             parent: self.parent,
-            type_id: self.type_id,
+            type_ref,
             deleted: false,
             body: self.body,
         })
@@ -168,7 +243,29 @@ mod tests {
         assert!(input(json!({"tags": ["x", 1]})).into_draft().is_err());
         assert!(input(json!({"_id": "_design"})).into_draft().is_err());
         assert!(input(json!({"_id": ""})).into_draft().is_err());
+        assert!(input(json!({"_id": "a?rev=1-x"})).into_draft().is_err());
+        assert!(input(json!({"_type": "note/v1"})).into_draft().is_err());
         assert!(input(json!({"title": "ok", "tags": ["a"]})).into_draft().is_ok());
+        let d = input(json!({"_type": "doc://schemas/note"})).into_draft().unwrap();
+        assert_eq!(d.type_ref.unwrap().rev, None);
+    }
+
+    #[test]
+    fn doc_refs_parse_and_print() {
+        let r = DocRef::parse("doc://a/b.md").unwrap();
+        assert_eq!((r.id.as_str(), r.rev.as_deref()), ("a/b.md", None));
+        assert_eq!(r.to_string(), "doc://a/b.md");
+        let r = DocRef::parse("doc://a/b.md?rev=1-ab").unwrap();
+        assert_eq!((r.id.as_str(), r.rev.as_deref()), ("a/b.md", Some("1-ab")));
+        assert_eq!(r.to_string(), "doc://a/b.md?rev=1-ab");
+        assert_eq!(r.path(), "doc://a/b.md");
+        for bad in ["a/b", "doc://", "doc://a?rev=bad", "doc://a?rev=1-x?rev=1-y", "doc://?rev=1-a", "doc://_x"] {
+            assert!(DocRef::parse(bad).is_err(), "{bad}");
+        }
+        assert_eq!(DocRef::from_cli("runners/claude").unwrap().to_string(), "doc://runners/claude");
+        assert_eq!(DocRef::from_cli("doc://runners/claude?rev=2-ff").unwrap().rev.as_deref(), Some("2-ff"));
+        assert_eq!(DocRef::path_of("doc://x?rev=1-a"), "doc://x");
+        assert_eq!(DocRef::path_of("doc://x"), "doc://x");
     }
 
     #[test]
@@ -188,5 +285,8 @@ mod tests {
         assert_eq!(v["_id"], "a");
         assert_eq!(v["title"], "T");
         assert!(v.get("_seq").is_none());
+        assert_eq!(d.type_path(), None);
+        let typed = Doc { type_id: Some("doc://schemas/note?rev=1-aa".into()), ..d };
+        assert_eq!(typed.type_path(), Some("doc://schemas/note"));
     }
 }

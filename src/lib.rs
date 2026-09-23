@@ -3,8 +3,9 @@
 //! - `docs` holds one immutable row per revision.
 //! - `doc_heads`, `doc_tags`, `docs_fts` are projections of the current
 //!   winner per `_id`, maintained by one trigger.
-//! - Schemas are JSON Schema documents keyed by `_type`, immutable once
-//!   registered, validated on write.
+//! - A schema is a document whose body is a JSON Schema. `_type` is a
+//!   `doc://` reference to one, pinned to a revision at write, and the
+//!   body is validated against that revision.
 
 pub mod cli;
 pub mod daemon;
@@ -19,6 +20,6 @@ pub mod schema;
 pub mod store;
 pub mod task;
 
-pub use doc::{Doc, PutInput};
+pub use doc::{Doc, DocRef, PutInput};
 pub use error::StoreError;
-pub use store::{Changes, History, ListQuery, Page, SchemaList, Store};
+pub use store::{Changes, History, ListQuery, Page, Store};

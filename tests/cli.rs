@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use subconscious::{Changes, History, Page, SchemaList, cli};
+use subconscious::{Changes, History, Page, cli};
 
 struct Sandbox {
     dir: PathBuf,
@@ -61,7 +61,7 @@ impl Drop for Sandbox {
 }
 
 const SCHEMA_YAML: &str = "\
-$id: note/v1
+_id: schemas/note
 title: Note
 description: A note
 type: object
@@ -75,7 +75,7 @@ properties:
 const NOTE_MD: &str = "\
 ---
 _id: n1
-_type: note/v1
+_type: doc://schemas/note
 title: Hello
 tags: [demo, blue]
 ---
@@ -93,15 +93,18 @@ fn frontmatter(md: &str) -> Value {
 fn register_and_put_from_files() {
     let sb = Sandbox::new();
     let schema = sb.file("note.yaml", SCHEMA_YAML);
-    let out = sb.ok(&["schema", "register", &schema], "");
-    assert_eq!(out, "registered note/v1: Note\n");
+    let out = sb.ok(&["doc", "put", &schema], "");
+    let fm = frontmatter(&out);
+    assert_eq!(fm["_id"], "schemas/note");
+    assert!(fm.get("_type").is_none());
+    let schema_rev = fm["_rev"].as_str().unwrap().to_string();
 
     let note = sb.file("note.md", NOTE_MD);
     let out = sb.ok(&["doc", "put", &note], "");
     let fm = frontmatter(&out);
     assert_eq!(fm["_id"], "n1");
     assert!(fm["_rev"].as_str().unwrap().starts_with("1-"));
-    assert_eq!(fm["_type"], "note/v1");
+    assert_eq!(fm["_type"], format!("doc://schemas/note?rev={schema_rev}"));
     assert_eq!(fm["tags"], json!(["demo", "blue"]));
     assert!(fm.get("_parent").is_none());
     assert!(out.ends_with("---\nfirst draft\n"), "{out}");
@@ -111,7 +114,7 @@ fn register_and_put_from_files() {
 fn markdown_round_trip_unchanged_then_edited() {
     let sb = Sandbox::new();
     let schema = sb.file("note.yaml", SCHEMA_YAML);
-    sb.ok(&["schema", "register", &schema], "");
+    sb.ok(&["doc", "put", &schema], "");
     let note = sb.file("note.md", NOTE_MD);
     sb.ok(&["doc", "put", &note], "");
 
@@ -124,7 +127,7 @@ fn markdown_round_trip_unchanged_then_edited() {
     let again = sb.ok(&["doc", "update", "n1", "--format", "md"], &fetched);
     assert_eq!(again, fetched);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 1);
+    assert_eq!(changes.results.len(), 6 + 2, "six seeded documents, the schema, the note");
 
     // edited: update yields gen 2 with parent = rev 1
     let edited = fetched.replace("first draft", "second draft");
@@ -201,7 +204,7 @@ fn lists_tables_and_json_shapes() {
     assert_eq!(&cells[2..], ["Alpha", "x"]);
 
     let page: Page = serde_json::from_value(sb.json(&["doc", "list"], "")).unwrap();
-    assert_eq!(page.docs.len(), 2);
+    assert_eq!(page.docs.len(), 6 + 2, "six seeded documents plus a and b");
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--limit", "1"], "")).unwrap();
     assert!(page.next.is_some());
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
@@ -212,16 +215,20 @@ fn lists_tables_and_json_shapes() {
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
-    assert!(text.trim_end().ends_with("last_seq: 2"));
+    assert!(text.trim_end().ends_with("last_seq: 8"));
 
+    // type filters: a path matches every pinned revision, the TYPE column shows the path
     let schema = sb.file("note.yaml", SCHEMA_YAML);
-    sb.ok(&["schema", "register", &schema], "");
-    let list: SchemaList = serde_json::from_value(sb.json(&["schema", "list"], "")).unwrap();
-    assert_eq!(list.schemas[0].id, "note/v1");
-    let text = sb.ok(&["schema", "list"], "");
+    sb.ok(&["doc", "put", &schema], "");
+    let typed = sb.json(&["doc", "put"], r#"{"_id":"c","_type":"doc://schemas/note","title":"Typed"}"#);
+    let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--type", "doc://schemas/note"], "")).unwrap();
+    assert_eq!(page.docs.len(), 1);
+    let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--type", typed["_type"].as_str().unwrap()], "")).unwrap();
+    assert_eq!(page.docs[0].id, "c");
+    let text = sb.ok(&["doc", "list", "--type", "doc://schemas/note"], "");
     let row: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
-    assert_eq!(row, ["note/v1", "Note", "A", "note"], "{text}");
-    let schema: Value = sb.json(&["schema", "get", "note/v1"], "");
+    assert_eq!(row, ["c", row[1], "doc://schemas/note", "Typed"], "{text}");
+    let schema: Value = sb.json(&["doc", "get", "schemas/note"], "");
     assert_eq!(schema["title"], "Note");
 }
 
@@ -268,7 +275,8 @@ fn export_then_import_round_trip() {
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("3 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with("9 exported, 0 errors"), "{out}");
+    assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
     assert!(out_dir.join("plain").exists());
@@ -283,7 +291,7 @@ fn export_then_import_round_trip() {
     assert_eq!(statuses, ["unchanged", "unchanged"]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 5);
+    assert_eq!(changes.results.len(), 6 + 5);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
@@ -335,7 +343,11 @@ fn add_test_runners(sb: &Sandbox) {
 fn runners_are_documents_seeded_once() {
     let sb = Sandbox::new();
     let out = sb.ok(&["init"], "");
+    assert!(out.contains("seeded schemas/task"), "{out}");
     assert!(out.contains("seeded runners/claude"), "{out}");
+    let task_schema = sb.json(&["doc", "get", "schemas/task"], "");
+    assert_eq!(task_schema["title"], "Scheduled task");
+    assert!(task_schema["_type"].is_null());
     let text = sb.ok(&["runner", "list"], "");
     let ids: Vec<&str> = text.lines().skip(1).map(|l| l.split_whitespace().next().unwrap()).collect();
     assert_eq!(ids, ["runners/claude", "runners/codex", "runners/pi"]);
@@ -347,7 +359,7 @@ fn runners_are_documents_seeded_once() {
     assert!(!text.contains("runners/pi"), "{text}");
     assert_eq!(text.lines().count(), 1 + 6, "{text}");
     let doc = sb.json(&["doc", "get", "runners/slow"], "");
-    assert_eq!(doc["_type"], "runner/v1");
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner?rev=1-"), "{doc}");
     assert_eq!(doc["argv"], json!(["sleep", "30"]));
     assert_eq!(doc["timeout"], "1s");
     let err = sb.fails(&["runner", "add", "runners/bad", "--timeout", "soon", "--", "cat"], "");
@@ -370,9 +382,13 @@ fn task_lifecycle_with_change_trigger() {
     let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
     assert!(out.starts_with("created t1 1-"), "{out}");
     let task = sb.json(&["doc", "get", "t1"], "");
-    assert_eq!(task["_type"], "task/v1");
+    assert!(task["_type"].as_str().unwrap().starts_with("doc://schemas/task?rev=1-"), "{task}");
+    assert_eq!(task["runner"], "doc://runners/cat");
     assert_eq!(task["when"], json!({"tag": "inbox"}));
     assert_eq!(task["prompt"], "Triage these.\n");
+    // the doc:// form of --runner is accepted too, and an identical re-add writes nothing
+    let out = sb.ok(&["task", "add", "t1", "--runner", "doc://runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
+    assert!(out.starts_with("unchanged t1 1-"), "{out}");
 
     let list: Value = sb.json(&["task", "list"], "");
     assert_eq!(list.as_array().unwrap().len(), 1);
@@ -385,7 +401,8 @@ fn task_lifecycle_with_change_trigger() {
 
     // fire now: the runner echoes the prompt back, and the run records it
     let run = sb.json(&["task", "run", "t1"], "");
-    assert_eq!(run["_type"], "run/v1");
+    assert!(run["_type"].as_str().unwrap().starts_with("doc://schemas/run?rev=1-"), "{run}");
+    assert!(run["runner"].as_str().unwrap().starts_with("doc://runners/cat?rev=1-"), "{run}");
     assert_eq!(run["_actor"], "t1");
     assert_eq!(run["task"], "t1");
     assert_eq!(run["exit_code"], 0);
@@ -489,7 +506,7 @@ fn run_refuses_while_a_claim_is_open_unless_forced() {
     sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", &prompt], "");
     // the CLI is trusted: it can write a claim by hand
     let claim = format!(
-        r#"{{"_id":"runs/t1/manual","_type":"run/v1","task":"t1","runner":"runners/cat","started_at":"{FUTURE}","seq":1,"tags":["t1"]}}"#
+        r#"{{"_id":"runs/t1/manual","_type":"doc://schemas/run","task":"t1","runner":"doc://runners/cat","started_at":"{FUTURE}","seq":1,"tags":["t1"]}}"#
     );
     sb.json(&["doc", "put"], &claim);
     let check = sb.json(&["task", "check", "t1"], "");
@@ -505,8 +522,8 @@ fn run_refuses_while_a_claim_is_open_unless_forced() {
 fn serve_protects_runner_and_run_documents() {
     // the boundary itself is covered in tests/store.rs; here: the CLI never sets it
     let sb = Sandbox::new();
-    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"runner/v1","argv":["cat"]}"#);
-    assert_eq!(doc["_type"], "runner/v1");
+    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"doc://schemas/runner","argv":["cat"]}"#);
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner?rev="), "{doc}");
     let tomb = sb.json(&["doc", "delete", "runners/x"], "");
     assert_eq!(tomb["_deleted"], true);
 }

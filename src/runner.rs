@@ -1,27 +1,32 @@
-//! Runners: `runner/v1` documents that hold an argv template. A task names
-//! one by `_id`. The template is spawned directly, never through a shell,
-//! with tokens replaced inside each element. Runner commands are code, so
-//! they enter only through the CLI: `serve` marks the type protected.
+//! Runners: documents typed `doc://schemas/runner` that hold an argv
+//! template. A task names one by `doc://` reference. The template is
+//! spawned directly, never through a shell, with tokens replaced inside
+//! each element. Runner commands are code, so they enter only through the
+//! CLI: `serve` marks the type protected. This module also seeds the
+//! built-in schema and runner documents.
 
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
 
-use crate::doc::{Doc, PutInput};
+use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::store::Store;
-use crate::task::parse_duration;
+use crate::task::{self, parse_duration};
 
-pub const RUNNER_TYPE: &str = "runner/v1";
+/// The seeded schema document for runners, as a type path.
+pub const RUNNER_TYPE: &str = "doc://schemas/runner";
 
-/// Types that MCP clients may read but not write or delete.
-pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, crate::task::RUN_TYPE];
+/// Type paths that MCP clients may read but not write or delete.
+pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
+
+/// Seeded schema documents that MCP clients may not change.
+pub const PROTECTED_IDS: &[&str] = &["schemas/task", "schemas/run", "schemas/runner"];
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
 
-/// Frozen. A new shape is `runner/v2`.
+/// The body of `schemas/runner`.
 pub const RUNNER_SCHEMA: &str = r#"{
-  "$id": "runner/v1",
   "title": "Runner",
   "description": "A command that runs an agent: argv with {db} {task} {run} {mcp} {out} {exe} tokens. The prompt arrives on stdin; the last message is read from stdout, or from {out} when the command wrote it.",
   "type": "object",
@@ -71,9 +76,48 @@ pub const DEFAULTS: &[(&str, &str, &[&str])] = &[
     ("runners/pi", "Pi, print mode", &["pi", "-p", "--no-extensions", "-"]),
 ];
 
-/// Write each default runner whose id has never existed. An edited or
-/// deleted default is left as the user left it. Returns the ids written.
-pub fn seed_defaults(store: &mut Store) -> Result<Vec<String>, StoreError> {
+/// The seeded schema documents: id and body.
+pub const SCHEMAS: &[(&str, &str)] = &[
+    ("schemas/task", task::TASK_SCHEMA),
+    ("schemas/run", task::RUN_SCHEMA),
+    ("schemas/runner", RUNNER_SCHEMA),
+];
+
+/// Write the seeded schema documents, then the default runners, each only
+/// when its id has never existed. An edited or deleted default is left as
+/// the user left it. Every product entry point calls this; the library
+/// never writes on open. Returns the ids written.
+pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
+    let legacy: bool = store.connection().query_row(
+        "SELECT EXISTS(SELECT 1 FROM docs WHERE _type IS NOT NULL AND _type NOT LIKE 'doc://%')",
+        [],
+        |r| r.get(0),
+    )?;
+    if legacy {
+        return Err(StoreError::invalid(
+            "this vault predates doc:// types; delete it and start again",
+        ));
+    }
+    let mut written = seed_schemas(store)?;
+    written.extend(seed_runners(store)?);
+    Ok(written)
+}
+
+pub fn seed_schemas(store: &mut Store) -> Result<Vec<String>, StoreError> {
+    let mut written = Vec::new();
+    for (id, body) in SCHEMAS {
+        if store.exists(id)? {
+            continue;
+        }
+        let mut value: Value = serde_json::from_str(body).expect("seeded schemas are valid JSON");
+        value["_id"] = json!(id);
+        store.put(serde_json::from_value(value)?)?;
+        written.push(id.to_string());
+    }
+    Ok(written)
+}
+
+pub fn seed_runners(store: &mut Store) -> Result<Vec<String>, StoreError> {
     let mut written = Vec::new();
     for (id, title, argv) in DEFAULTS {
         if store.exists(id)? {
@@ -95,13 +139,20 @@ pub fn seed_defaults(store: &mut Store) -> Result<Vec<String>, StoreError> {
 #[derive(Debug, Clone)]
 pub struct Runner {
     pub id: String,
+    /// The revision that was read, so a run can record exactly what ran.
+    pub rev: String,
     pub argv: Vec<String>,
     pub timeout_secs: u64,
 }
 
 impl Runner {
+    /// `doc://<id>?rev=<rev>` of this runner revision.
+    pub fn pinned(&self) -> String {
+        DocRef::pinned(&self.id, &self.rev).to_string()
+    }
+
     pub fn from_doc(doc: &Doc) -> Result<Runner, StoreError> {
-        if doc.type_id.as_deref() != Some(RUNNER_TYPE) {
+        if doc.type_path() != Some(RUNNER_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {RUNNER_TYPE} document", doc.id)));
         }
         let argv: Vec<String> = doc
@@ -116,13 +167,29 @@ impl Runner {
         let timeout = doc.body.get("timeout").and_then(Value::as_str).unwrap_or(DEFAULT_TIMEOUT);
         Ok(Runner {
             id: doc.id.clone(),
+            rev: doc.rev.clone(),
             argv,
             timeout_secs: parse_duration(timeout)?,
         })
     }
 
-    pub fn get(store: &Store, id: &str) -> Result<Runner, StoreError> {
-        Runner::from_doc(&store.get(id)?)
+    /// Load by `doc://` reference: the head, or one pinned revision.
+    pub fn get(store: &Store, reference: &str) -> Result<Runner, StoreError> {
+        let r = DocRef::parse(reference)?;
+        let doc = match &r.rev {
+            None => store.get(&r.id)?,
+            Some(rev) => {
+                let d = store.get_rev(rev)?;
+                if d.id != r.id {
+                    return Err(StoreError::invalid(format!("{rev} is a revision of {}, not {}", d.id, r.id)));
+                }
+                if d.deleted {
+                    return Err(StoreError::Deleted { id: d.id, rev: d.rev });
+                }
+                d
+            }
+        };
+        Runner::from_doc(&doc)
     }
 }
 
@@ -244,7 +311,7 @@ mod tests {
             id: "runners/x".into(),
             rev: "1-a".into(),
             parent: None,
-            type_id: Some(RUNNER_TYPE.into()),
+            type_id: Some(format!("{RUNNER_TYPE}?rev=1-a")),
             deleted: false,
             created_at: "t".into(),
             actor: None,
@@ -254,7 +321,8 @@ mod tests {
         let r = Runner::from_doc(&doc).unwrap();
         assert_eq!(r.argv, ["cat"]);
         assert_eq!(r.timeout_secs, 120);
-        doc.type_id = Some("note/v1".into());
+        assert_eq!(r.pinned(), "doc://runners/x?rev=1-a");
+        doc.type_id = Some("doc://schemas/note?rev=1-a".into());
         assert!(Runner::from_doc(&doc).is_err());
     }
 }

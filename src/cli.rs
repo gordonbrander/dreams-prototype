@@ -9,7 +9,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
-use crate::doc::{Doc, PutInput};
+use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
@@ -36,20 +36,17 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the database if needed, apply migrations, and seed the default runners.
+    /// Create the database if needed, apply migrations, and seed the built-in schemas and runners.
     Init,
-    /// Serve MCP (2026-07-28, stateless) over stdio. Runner and run documents are read-only.
+    /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
     Serve,
-    /// Documents.
+    /// Documents. A schema is a document too: put one, then reference it as `_type: doc://<id>`.
     #[command(subcommand)]
     Doc(DocCmd),
-    /// JSON Schemas that validate typed documents.
-    #[command(subcommand)]
-    Schema(SchemaCmd),
-    /// Scheduled agent tasks (task/v1 documents).
+    /// Scheduled agent tasks (documents typed doc://schemas/task).
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Agent commands that tasks run (runner/v1 documents). Never writable over MCP.
+    /// Agent commands that tasks run (documents typed doc://schemas/runner). Never writable over MCP.
     #[command(subcommand)]
     Runner(RunnerCmd),
     /// One scheduler pass: fire every due task, then exit.
@@ -72,7 +69,7 @@ enum Command {
     /// Write current documents as Markdown files at <dir>/<_id>.
     Export {
         dir: PathBuf,
-        /// Only documents with this _type.
+        /// Only documents of this type: a doc:// reference, matching every pinned revision unless it has ?rev=.
         #[arg(long = "type")]
         type_id: Option<String>,
         /// Only documents whose current revision has this tag.
@@ -104,7 +101,7 @@ struct Input {
 
 #[derive(Args, Default)]
 struct Filter {
-    /// Only documents with this _type.
+    /// Only documents of this type: a doc:// reference, matching every pinned revision unless it has ?rev=.
     #[arg(long = "type")]
     type_id: Option<String>,
     /// Only documents whose current revision has this tag.
@@ -173,22 +170,12 @@ enum DocCmd {
 }
 
 #[derive(Subcommand)]
-enum SchemaCmd {
-    /// Register a JSON Schema (needs $id, title, description). Immutable once registered.
-    Register(Input),
-    /// Print a registered schema as JSON.
-    Get { id: String },
-    /// List registered schemas.
-    List,
-}
-
-#[derive(Subcommand)]
 enum TaskCmd {
     /// Create or replace a task. The prompt comes from PROMPT_FILE, `-`, or stdin.
     Add {
         /// Task id, for example tasks/triage-inbox.
         task_id: String,
-        /// The _id of a runner/v1 document, for example runners/claude.
+        /// The runner document: runners/claude or doc://runners/claude. Pin a revision with ?rev=.
         #[arg(long)]
         runner: String,
         /// Interval between runs: 30s, 15m, 2h, 1d, 1w.
@@ -200,7 +187,7 @@ enum TaskCmd {
         /// Only fire when a document with this tag changed.
         #[arg(long)]
         tag: Option<String>,
-        /// Only fire when a document with this _type changed.
+        /// Only fire when a document of this type changed (a doc:// reference).
         #[arg(long = "type")]
         type_id: Option<String>,
         /// Only fire when this document changed. Repeatable.
@@ -313,15 +300,19 @@ where
 
 fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
     let json = cli.json;
-    let open = || -> Result<Store, StoreError> {
+    // Every entry point seeds the built-in documents, before the actor is
+    // set so they never carry a task's id. The library never writes on open.
+    let open = || -> Result<(Store, Vec<String>), StoreError> {
         let mut store = Store::open(&cli.db)?;
+        let seeded = runner::seed(&mut store)?;
         store.set_actor(cli.actor.clone());
-        Ok(store)
+        Ok((store, seeded))
     };
+    let open = || open().map(|(store, _)| store);
     match cli.command {
         Command::Init => {
-            let mut store = open()?;
-            let seeded = runner::seed_defaults(&mut store)?;
+            let mut store = Store::open(&cli.db)?;
+            let seeded = runner::seed(&mut store)?;
             writeln!(out, "initialized {}", cli.db.display())?;
             for id in seeded {
                 writeln!(out, "seeded {id}")?;
@@ -329,16 +320,12 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         }
         Command::Serve => {
             let mut store = open()?;
-            store.set_protected(runner::PROTECTED_TYPES);
+            store.set_protected(runner::PROTECTED_TYPES, runner::PROTECTED_IDS);
             tokio::runtime::Runtime::new()?.block_on(mcp::serve(store))?;
         }
         Command::Doc(cmd) => {
             let mut store = open()?;
             doc_cmd(&mut store, cmd, json, stdin, out)?;
-        }
-        Command::Schema(cmd) => {
-            let mut store = open()?;
-            schema_cmd(&mut store, cmd, json, stdin, out)?;
         }
         Command::Export { dir, type_id, tag } => {
             let store = open()?;
@@ -350,18 +337,15 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         }
         Command::Task(cmd) => {
             let mut store = open()?;
-            runner::seed_defaults(&mut store)?;
             let db = absolute(&cli.db)?;
             task_cmd(&mut store, &db, cmd, json, stdin, out)?;
         }
         Command::Runner(cmd) => {
             let mut store = open()?;
-            runner::seed_defaults(&mut store)?;
             runner_cmd(&mut store, cmd, json, out)?;
         }
         Command::Tick { now } => {
             let mut store = open()?;
-            runner::seed_defaults(&mut store)?;
             let db = absolute(&cli.db)?;
             let now = match now {
                 Some(n) => n,
@@ -381,7 +365,6 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
                 Some(DaemonCmd::Uninstall) => daemon::uninstall(&db, out)?,
                 None => {
                     let mut store = open()?;
-                    runner::seed_defaults(&mut store)?;
                     let interval = std::time::Duration::from_secs(task::parse_duration(&interval)?);
                     let poll = std::time::Duration::from_secs(task::parse_duration(&poll)?);
                     install_tracing("info");
@@ -423,6 +406,7 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
         TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, disabled, prompt_file } => {
             id_to_relpath(&task_id)?;
             task::parse_duration(&every)?;
+            let runner = DocRef::from_cli(&runner)?.to_string();
             Runner::get(store, &runner)?;
             let prompt = read_text(prompt_file.as_deref(), stdin)?;
             let when = When { glob, tag, type_id, ids: if ids.is_empty() { None } else { Some(ids) } };
@@ -472,7 +456,7 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
         TaskCmd::Rm { task_id } => {
             let parent = head_rev(store, &task_id)?;
             let doc = store.get_rev(&parent)?;
-            if doc.type_id.as_deref() != Some(task::TASK_TYPE) {
+            if doc.type_path() != Some(task::TASK_TYPE) {
                 return Err(StoreError::invalid(format!("{task_id} is not a {} document", task::TASK_TYPE)).into());
             }
             let tomb = store.delete(&task_id, &parent)?;
@@ -488,8 +472,8 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
                 None => store.now()?,
             };
             let eval = task::evaluate(store, &now, Some(&task_id))?.remove(0);
-            let argv = match Runner::get(store, &eval.parsed.runner) {
-                Ok(r) => r.argv,
+            let argv = match &eval.runner {
+                Ok(r) => r.argv.clone(),
                 Err(e) => vec![format!("(runner error: {e})")],
             };
             if json {
@@ -577,7 +561,7 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
 /// Built for `task add` and `runner add`, whose inputs never carry `_rev`.
 fn upsert_unless_same(store: &mut Store, id: &str, map: Map<String, Value>) -> Result<(Doc, WriteStatus), StoreError> {
     if let Ok(head) = store.get(id) {
-        let same_type = head.type_id.as_deref() == map.get("_type").and_then(Value::as_str);
+        let same_type = head.type_path() == map.get("_type").and_then(Value::as_str).map(DocRef::path_of);
         let body: Map<String, Value> = map.iter().filter(|(k, _)| !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect();
         if same_type && body == head.body {
             return Ok((head, WriteStatus::Unchanged));
@@ -654,7 +638,7 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
         RunnerCmd::Rm { runner_id } => {
             let parent = head_rev(store, &runner_id)?;
             let doc = store.get_rev(&parent)?;
-            if doc.type_id.as_deref() != Some(runner::RUNNER_TYPE) {
+            if doc.type_path() != Some(runner::RUNNER_TYPE) {
                 return Err(StoreError::invalid(format!("{runner_id} is not a {} document", runner::RUNNER_TYPE)).into());
             }
             let tomb = store.delete(&runner_id, &parent)?;
@@ -739,35 +723,6 @@ fn doc_cmd(store: &mut Store, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out
         DocCmd::Changes { since, limit } => {
             let changes = store.changes(since, limit)?;
             print_changes(out, json, &changes)?;
-        }
-    }
-    Ok(())
-}
-
-fn schema_cmd(store: &mut Store, cmd: SchemaCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
-    match cmd {
-        SchemaCmd::Register(input) => {
-            let map = read_input(&input, stdin)?;
-            let summary = store.register_schema(Value::Object(map))?;
-            if json {
-                print_json(out, &summary)?;
-            } else {
-                writeln!(out, "registered {}: {}", summary.id, summary.title)?;
-            }
-        }
-        SchemaCmd::Get { id } => print_json(out, &store.get_schema(&id)?)?,
-        SchemaCmd::List => {
-            let list = store.list_schemas()?;
-            if json {
-                print_json(out, &list)?;
-            } else {
-                let rows: Vec<Vec<String>> = list
-                    .schemas
-                    .iter()
-                    .map(|s| vec![s.id.clone(), s.title.clone(), clip(&s.description, 60)])
-                    .collect();
-                table(out, &["ID", "TITLE", "DESCRIPTION"], &rows)?;
-            }
         }
     }
     Ok(())
@@ -1175,7 +1130,7 @@ fn print_page(out: &mut dyn Write, json: bool, page: &Page) -> io::Result<()> {
             vec![
                 d.id.clone(),
                 short_rev(&d.rev),
-                d.type_id.clone().unwrap_or_default(),
+                d.type_path().unwrap_or_default().to_string(),
                 title_of(d),
                 tags_of(d),
             ]

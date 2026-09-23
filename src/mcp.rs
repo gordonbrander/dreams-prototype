@@ -1,4 +1,4 @@
-//! MCP server: one tool per store operation. Stateless 2026-07-28 only.
+//! MCP server: one tool per document operation. Stateless 2026-07-28 only.
 
 use std::borrow::Cow;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -12,12 +12,10 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::Value;
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
-use crate::schema::SchemaSummary;
-use crate::store::{Changes, History, ListQuery, Page, SchemaList, Store};
+use crate::store::{Changes, History, ListQuery, Page, Store};
 
 fn to_mcp(e: StoreError) -> McpError {
     let data = serde_json::to_value(&e).ok();
@@ -69,12 +67,6 @@ pub struct ChangesParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct RegisterSchemaParams {
-    /// A JSON Schema document with `$id`, `title` and `description`.
-    pub schema: Value,
-}
-
 #[derive(Clone)]
 pub struct Vault {
     store: Arc<Mutex<Store>>,
@@ -97,7 +89,8 @@ impl Vault {
     }
 
     #[tool(description = "Create or update a document. Omit _id to create with a generated id. \
-        To update, pass _parent = the current _rev. Set _type to a registered schema id to validate the body. \
+        To update, pass _parent = the current _rev. Set _type to doc://<id> of a schema document to validate \
+        the body; it is pinned to doc://<id>?rev=<rev> at write. \
         Blessed fields: title (string), content (string), tags (array of strings).")]
     fn put_doc(&self, Parameters(input): Parameters<PutInput>) -> Result<Json<Doc>, McpError> {
         self.lock()?.put(input).map(Json).map_err(to_mcp)
@@ -118,7 +111,8 @@ impl Vault {
         self.lock()?.delete(&p.id, &p.parent).map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "List current documents, most recently modified first. Filter by type and/or tag. \
+    #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \
+        reference; without ?rev= it matches every pinned revision of that schema) and/or tag. \
         Page with `before` = previous page's `next`.")]
     fn list_docs(&self, Parameters(q): Parameters<ListQuery>) -> Result<Json<Page>, McpError> {
         self.lock()?.list(&q).map(Json).map_err(to_mcp)
@@ -143,22 +137,6 @@ impl Vault {
             .map(Json)
             .map_err(to_mcp)
     }
-
-    #[tool(description = "Register a JSON Schema. Its $id becomes a _type. Schemas are immutable: \
-        re-registering the same body is a no-op, a different body at the same $id is an error.")]
-    fn register_schema(&self, Parameters(p): Parameters<RegisterSchemaParams>) -> Result<Json<SchemaSummary>, McpError> {
-        self.lock()?.register_schema(p.schema).map(Json).map_err(to_mcp)
-    }
-
-    #[tool(description = "Get a registered JSON Schema by id.")]
-    fn get_schema(&self, Parameters(p): Parameters<IdParams>) -> Result<Json<Value>, McpError> {
-        self.lock()?.get_schema(&p.id).map(Json).map_err(to_mcp)
-    }
-
-    #[tool(description = "List registered schemas (id, title, description).")]
-    fn list_schemas(&self) -> Result<Json<SchemaList>, McpError> {
-        self.lock()?.list_schemas().map(Json).map_err(to_mcp)
-    }
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -168,13 +146,15 @@ impl ServerHandler for Vault {
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
-                "Subconscious: a versioned document vault. Documents have _id, _rev, optional _type (a registered \
-                 JSON Schema id), and free-form bodies with blessed fields title, content, tags. Updates must name \
-                 the current _rev as _parent. Scheduled agent tasks are task/v1 documents: `runner` is the _id of \
-                 a runner/v1 document (list them with list_docs and type=runner/v1), `every` is an interval like \
-                 15m, optional `when` {glob, tag, type, ids} fires only on matching changes, `prompt` is the text \
-                 the agent receives. Each firing writes a run/v1 document. Runner and run documents are read-only \
-                 over MCP.",
+                "Subconscious: a versioned document vault. Documents have _id, _rev, optional _type, and free-form \
+                 bodies with blessed fields title, content, tags. Updates must name the current _rev as _parent. \
+                 A schema is a document whose body is a JSON Schema, by convention under schemas/. _type is \
+                 doc://<id> of a schema and is pinned to doc://<id>?rev=<rev> at write; list_docs with \
+                 type=doc://<id> matches every pinned revision. Scheduled agent tasks are documents typed \
+                 doc://schemas/task: `runner` is a doc:// reference to a runner document (list them with \
+                 type=doc://schemas/runner), `every` is an interval like 15m, optional `when` {glob, tag, type, \
+                 ids} fires only on matching changes, `prompt` is the text the agent receives. Each firing writes a \
+                 document typed doc://schemas/run. Runner, run, and seeded schema documents are read-only over MCP.",
             )
     }
 

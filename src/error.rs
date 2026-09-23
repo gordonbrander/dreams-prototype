@@ -19,11 +19,13 @@ pub enum StoreError {
     #[error("document {id} is deleted (tombstone {rev})")]
     Deleted { id: String, rev: String },
 
-    #[error("conflict: _parent {parent:?} is not a current leaf of {id}; current leaves: {leaves:?}")]
+    #[error("conflict: _parent {parent:?} is not a current leaf of {id}; current leaves: {leaves:?}{}", hint.as_deref().map(|h| format!("; {h}")).unwrap_or_default())]
     Conflict {
         id: String,
         parent: Option<String>,
         leaves: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
     },
 
     #[error("schema validation failed against {schema}: {}", summarize(errors))]
@@ -32,19 +34,18 @@ pub enum StoreError {
         errors: Vec<FieldError>,
     },
 
-    #[error("unknown _type {type_id}; register its schema first")]
+    #[error("schema not found: {type_id}")]
     UnknownType {
         #[serde(rename = "type")]
         type_id: String,
     },
 
-    #[error("schema {id} is already registered with a different body; schemas are immutable, register a new version")]
-    ImmutableSchema { id: String },
-
-    #[error("documents of type {type_id} are read-only over this connection")]
+    #[error("{} is read-only over this connection", describe_protected(type_id, id))]
     Protected {
-        #[serde(rename = "type")]
-        type_id: String,
+        #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+        type_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        id: Option<String>,
     },
 
     #[error("invalid input: {message}")]
@@ -62,7 +63,23 @@ fn summarize(errors: &[FieldError]) -> String {
         .join("; ")
 }
 
+fn describe_protected(type_id: &Option<String>, id: &Option<String>) -> String {
+    match (type_id, id) {
+        (_, Some(id)) => format!("document {id}"),
+        (Some(t), None) => format!("every document of type {t}"),
+        (None, None) => "this document".to_string(),
+    }
+}
+
 impl StoreError {
+    pub fn protected_type(type_id: &str) -> Self {
+        StoreError::Protected { type_id: Some(type_id.to_string()), id: None }
+    }
+
+    pub fn protected_id(id: &str) -> Self {
+        StoreError::Protected { type_id: None, id: Some(id.to_string()) }
+    }
+
     pub fn invalid(message: impl Into<String>) -> Self {
         StoreError::InvalidInput {
             message: message.into(),

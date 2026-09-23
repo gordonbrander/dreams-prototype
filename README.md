@@ -43,7 +43,7 @@ A document is a JSON object. Reserved fields start with an underscore.
 | `_id` | The document id. Any string up to 512 bytes. Generated as a UUID v7 when omitted. |
 | `_rev` | The revision id, `<generation>-<sha256>`. Computed from the content. |
 | `_parent` | The revision this one replaced. Absent on the first revision. |
-| `_type` | The id of a registered schema. Optional. |
+| `_type` | A `doc://` reference to a schema document, pinned to one revision: `doc://schemas/note?rev=3-9f2a…`. Optional. |
 | `_deleted` | `true` on a tombstone. |
 | `_created_at` | When the revision was written. |
 | `_actor` | Who wrote the revision, when a writer named itself with `--actor`. A scheduled task's agent writes as the task. |
@@ -63,12 +63,27 @@ Delete writes a tombstone. A later write on a tombstone revives the document. Th
 
 ### Schemas
 
-A schema is a JSON Schema document with `$id`, `title`, and `description`. Register it once. Its `$id` becomes a `_type`. A document with that `_type` is validated on every write. Schemas are immutable: registering the same body again is a no-op, and a different body at the same id is an error.
+A schema is a document whose body is a JSON Schema. Put it like any other document, by convention under `schemas/`:
 
 ```
-subconscious schema register note.schema.yaml
-subconscious schema list
+cat > note.yaml <<'EOF'
+_id: schemas/note
+title: Note
+description: A note with a required title
+type: object
+required: [title]
+properties:
+  title: {type: string, minLength: 1}
+  tags: {type: array, items: {type: string}}
+EOF
+subconscious doc put note.yaml
 ```
+
+A document names its schema with a `doc://` reference: `_type: doc://schemas/note`. On write, the store pins the reference to the schema's current revision, `doc://schemas/note?rev=1-c04d…`, validates the body against that revision, and only then computes the document's `_rev`. So the pinned type is part of the revision, and an unchanged document written again is a no-op until its schema moves.
+
+Revision ids are content hashes, so a pinned reference names the same schema bytes in every vault, forever. Edit a schema and new writes pin the new revision. Old documents keep their pin and still validate against what they were written with. To re-pin an old document, update it with the unpinned `_type`: `subconscious doc update n1 n1.md`, or `put_doc` with `_parent` set. A fetched document carries its pin, so an edit cycle keeps it.
+
+Filters take either form. `--type doc://schemas/note` matches every pinned revision of that schema. `--type doc://schemas/note?rev=1-c04d…` matches one.
 
 ## Command line
 
@@ -86,10 +101,6 @@ subconscious [--db PATH] [--json] <command>
   doc search  <query> [--type T] [--tag G] [--limit N]
   doc history <id> [--limit N]
   doc changes [--since SEQ] [--limit N]
-
-  schema register [FILE] [--format json|yaml]
-  schema get      <id>
-  schema list
 
   task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [PROMPT_FILE]
   task list                                       every enabled task, its last run, and whether it is due
@@ -179,7 +190,7 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
    subconscious task add tasks/digest --runner runners/claude --every 1d digest.md
    ```
 
-   The id is any document id. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
+   The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude` and follows later edits to that runner. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
 
 4. Look before it runs.
 
@@ -234,8 +245,8 @@ An agent that uses the MCP server creates a task by writing a document. It does 
 ```json
 {
   "_id": "tasks/triage",
-  "_type": "task/v1",
-  "runner": "runners/claude",
+  "_type": "doc://schemas/task",
+  "runner": "doc://runners/claude",
   "every": "15m",
   "when": { "tag": "inbox" },
   "prompt": "Triage the documents listed below.",
@@ -243,7 +254,7 @@ An agent that uses the MCP server creates a task by writing a document. It does 
 }
 ```
 
-It finds runner ids with `list_docs` and `type: runner/v1`, and reads past runs with `list_docs`, `type: run/v1`, and `tag: <task id>`. It cannot write runner or run documents. Those types are read-only over MCP.
+It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It cannot write runner or run documents, or the seeded schemas. Those are read-only over MCP.
 
 ### Managing tasks
 
@@ -266,7 +277,7 @@ A disabled task leaves `task list`; `task check` still shows it. `task add` on a
 
 ### Runners
 
-A runner is a `runner/v1` document with the command that starts an agent. The command is an argument list, spawned without a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`, after which the command is killed and the run records the timeout.
+A runner is a document typed `doc://schemas/runner` with the command that starts an agent. The command is an argument list, spawned without a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`, after which the command is killed and the run records the timeout.
 
 Add your own, for example a cheaper model for frequent tasks:
 
@@ -281,7 +292,7 @@ The command inherits these variables: `SUBCONSCIOUS_DB`, `SUBCONSCIOUS_TASK`, `S
 
 ### Runs
 
-Each firing writes a `run/v1` document at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
+Each firing writes a document typed `doc://schemas/run` at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts and records `runner` as the pinned reference of the runner revision about to run. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
 
 ### The clock
 
@@ -324,11 +335,8 @@ Each store operation is one tool:
 | `search_docs` | Full-text search with `query` and the same filters. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
-| `register_schema` | Register a JSON Schema. |
-| `get_schema` | One schema by `id`. |
-| `list_schemas` | Id, title, and description of each schema. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Scheduled tasks need no extra tools: an agent writes a `task/v1` document with `put_doc`, finds runners with `list_docs` and `type: runner/v1`, and reads runs the same way. Writes to `runner/v1` and `run/v1` documents are refused.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused.
 
 ## Storage
 
@@ -336,7 +344,7 @@ One SQLite file in WAL mode. Migrations run on open.
 
 - `docs` holds one row per revision. Triggers refuse updates and deletes, and enforce the parent chain.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- `schemas` holds registered schemas. Three are built in: `task/v1`, `run/v1`, and `runner/v1`.
+- Schemas are documents. Three are seeded on first use: `schemas/task`, `schemas/run`, and `schemas/runner`, plus the three default runners.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
 
