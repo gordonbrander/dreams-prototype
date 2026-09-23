@@ -457,13 +457,27 @@ subconscious daemon install | uninstall  start it at login (launchd on macOS, sy
 
 `subconscious serve` speaks the stateless MCP protocol, version 2026-07-28, over stdio. Older protocol versions are refused. The host starts the binary as a child process and talks to it through its stdin and stdout. Logs go to stderr, controlled by `RUST_LOG`.
 
-To register it with Claude Code:
+### Use with Claude Code
+
+Register the server. Use absolute paths, because the host does not start the server in your project directory.
 
 ```
-claude mcp add subconscious -- /path/to/subconscious --db /path/to/vault.db serve
+claude mcp add -s user subconscious -- /path/to/subconscious --db /path/to/vault.db serve
 ```
 
-Use absolute paths. The host does not start the server in your project directory.
+`-s user` makes the server available in all your projects. Leave it out to add the server to the current project only. To record writes under an agent name, add `-e SUBCONSCIOUS_ACTOR=claude` before the `--`.
+
+Then turn on protocol negotiation in Claude Code. Without it, Claude Code does not connect to stdio servers that speak 2026-07-28, and reports "Unsupported protocol version". Claude Code itself must have the variable, so `-e` does not work here. Add it to `~/.claude/settings.json`:
+
+```json
+{ "env": { "MCP_PROTOCOL_NEGOTIATION": "auto" } }
+```
+
+Or export `MCP_PROTOCOL_NEGOTIATION=auto` in your shell profile.
+
+To check, start Claude Code and run `/mcp`. `subconscious` shows as connected, and its tools have names like `mcp__subconscious__list_docs`.
+
+### Tools
 
 Each store operation is one tool:
 
