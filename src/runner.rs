@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::store::Store;
+use crate::skill;
 use crate::task::{self, parse_duration};
 
 /// The seeded schema document for runners, as a type path.
@@ -21,7 +22,7 @@ pub const RUNNER_TYPE: &str = "doc://schemas/runner";
 pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
 
 /// Seeded schema documents that MCP clients may not change.
-pub const PROTECTED_IDS: &[&str] = &["schemas/task", "schemas/run", "schemas/runner"];
+pub const PROTECTED_IDS: &[&str] = &["schemas/task", "schemas/run", "schemas/runner", "schemas/skill"];
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
 
@@ -81,6 +82,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("schemas/task", task::TASK_SCHEMA),
     ("schemas/run", task::RUN_SCHEMA),
     ("schemas/runner", RUNNER_SCHEMA),
+    ("schemas/skill", skill::SKILL_SCHEMA),
 ];
 
 /// Write the seeded schema documents, then the default runners, each only

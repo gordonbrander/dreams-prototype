@@ -163,7 +163,7 @@ fn tasks_and_runs_do_not_replicate_but_runners_do() {
     runner::seed(&mut b).unwrap();
     let fresh = sync(&mut a, "a", &mut b, "b").unwrap();
     for r in &fresh {
-        assert_eq!((r.written, r.present), (0, 6), "seeded documents are identical");
+        assert_eq!((r.written, r.present), (0, 7), "seeded documents are identical");
     }
 
     put(&mut b, json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}));

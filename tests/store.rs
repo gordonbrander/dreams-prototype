@@ -484,7 +484,7 @@ fn seed_is_idempotent_and_respects_deletions() {
     let first = runner::seed(&mut s).unwrap();
     assert_eq!(
         first,
-        ["schemas/task", "schemas/run", "schemas/runner", "runners/claude", "runners/codex", "runners/pi"]
+        ["schemas/task", "schemas/run", "schemas/runner", "schemas/skill", "runners/claude", "runners/codex", "runners/pi"]
     );
     assert!(runner::seed(&mut s).unwrap().is_empty());
     let pi = s.get("runners/pi").unwrap();
@@ -515,7 +515,7 @@ fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> subcon
 #[test]
 fn evaluate_time_and_change_rules() {
     let mut s = store();
-    runner::seed_schemas(&mut s).unwrap(); // seqs 1..=3
+    runner::seed_schemas(&mut s).unwrap(); // seqs 1..=4
     let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
     let plain = add_task(&mut s, "tasks/plain", "1h", None);
     let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));
@@ -527,8 +527,8 @@ fn evaluate_time_and_change_rules() {
     let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
     let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
     assert!(!e_plain.time_due && !e_plain.due);
-    assert_eq!(e_watch.cursor, 6);
-    assert_eq!(e_watch.head, 6);
+    assert_eq!(e_watch.cursor, 7);
+    assert_eq!(e_watch.head, 7);
     assert!(e_watch.changes.is_empty());
     assert_eq!(e_watch.runner.as_ref().unwrap().rev, cat.rev);
 
@@ -550,7 +550,7 @@ fn evaluate_time_and_change_rules() {
     let ids: Vec<&str> = e_watch.changes.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["n1"]);
     assert!(e_watch.due);
-    assert_eq!(e_watch.head, 9);
+    assert_eq!(e_watch.head, 10);
 
     // a tombstone of a tagged document counts as a change to that tag
     s.delete("n1", &note.rev).unwrap();
@@ -560,13 +560,13 @@ fn evaluate_time_and_change_rules() {
 
     // a claim marks the task running until its timeout, then it is stale
     let run = task::claim(&mut s, &e_watch, &later).unwrap().unwrap();
-    assert_eq!(run.body["seq"], 10);
+    assert_eq!(run.body["seq"], 11);
     assert_eq!(run.body["tags"], json!(["tasks/watch"]));
     assert_eq!(run.body["runner"], pinned("runners/cat", &cat.rev));
     assert_eq!(run.type_path(), Some(RUN_TYPE));
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
     assert!(e_watch.running && !e_watch.due);
-    assert_eq!(e_watch.cursor, 10);
+    assert_eq!(e_watch.cursor, 11);
     assert_eq!(e_watch.last_run.as_deref(), Some(run.id.as_str()));
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 3600), Some("tasks/watch")).unwrap().remove(0);
     assert!(!e_watch.running);

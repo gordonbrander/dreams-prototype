@@ -497,6 +497,24 @@ Each store operation is one tool:
 
 Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
+### Skills
+
+A document typed `doc://schemas/skill` is a skill. The server gives skills to the host through the [MCP Skills Extension](https://modelcontextprotocol.io/extensions/skills/overview) (`io.modelcontextprotocol/skills`). The body needs three fields:
+
+- `name`: lowercase letters, digits, and single hyphens, 64 characters or less.
+- `description`: what the skill does and when to use it, 1024 characters or less.
+- `content`: the instructions, in Markdown.
+
+```
+subconscious doc put - <<'EOF'
+{"_id": "skills/git-workflow", "_type": "doc://schemas/skill",
+ "name": "git-workflow", "description": "Branch, commit, and open a PR.",
+ "content": "# Steps\n1. Make a branch first.\n"}
+EOF
+```
+
+The server shows each skill as one file, `skill://<name>/SKILL.md`. The file has `name` and `description` as frontmatter, then `content`. `skills/list` and `skills/get` return it, and `resources/read` reads it. `resources/list` also lists it, for hosts that do not know the extension. When two documents have the same `name`, the most recently changed one wins. Agents can write skills with `put_doc`. The `schemas/skill` document itself is read-only over MCP.
+
 ## Storage
 
 One SQLite file in WAL mode. Migrations run on open.

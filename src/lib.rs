@@ -18,6 +18,7 @@ pub mod resolve;
 pub mod rev;
 pub mod runner;
 pub mod schema;
+pub mod skill;
 pub mod store;
 pub mod sync;
 pub mod task;

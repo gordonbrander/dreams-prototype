@@ -1,4 +1,5 @@
-//! MCP server: one tool per document operation. Stateless 2026-07-28 only.
+//! MCP server: one tool per document operation, and skill documents
+//! through the Skills Extension. Stateless 2026-07-28 only.
 
 use std::borrow::Cow;
 use std::path::Path;
@@ -7,8 +8,13 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use rmcp::{
     ErrorData as McpError, Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{Implementation, ProtocolVersion, ServerCapabilities, ServerConfig},
-    tool, tool_handler, tool_router,
+    model::{
+        CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, Implementation, ListResourcesResult,
+        PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
+        ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerConfig,
+    },
+    service::RequestContext,
+    tool, tool_handler, tool_router, RoleServer,
     transport::stdio,
 };
 use schemars::JsonSchema;
@@ -17,6 +23,7 @@ use serde_json::{Map, Value, json};
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
+use crate::skill::{self, Skill};
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
 
 /// How a host starts this server on the vault at `db`: the `command` and
@@ -150,6 +157,34 @@ impl Vault {
             .map_err(|e| McpError::internal_error(format!("store lock poisoned: {e}"), None))
     }
 
+    fn skill(&self, uri: &str) -> Result<Skill, McpError> {
+        skill::find(&*self.lock()?, uri)
+            .map_err(to_mcp)?
+            .ok_or_else(|| McpError::resource_not_found(format!("no skill at {uri}"), None))
+    }
+
+    /// `skills/list` and `skills/get`. Documents change at any time, so
+    /// results are never fresh for longer than the call.
+    fn skills_request(&self, method: &str, params: Option<Value>) -> Result<Value, McpError> {
+        let cache = json!({"resultType": "complete", "ttlMs": 0, "cacheScope": "private"});
+        let mut result = match method {
+            "skills/list" => {
+                let skills = skill::list(&*self.lock()?).map_err(to_mcp)?;
+                json!({"skills": skills.iter().map(Skill::entry).collect::<Vec<_>>()})
+            }
+            "skills/get" => {
+                let uri = params
+                    .as_ref()
+                    .and_then(|p| p["uri"].as_str())
+                    .ok_or_else(|| McpError::invalid_params("skills/get needs params.uri", None))?;
+                json!({"skill": self.skill(uri)?.entry()})
+            }
+            _ => return Err(McpError::new(ErrorCode::METHOD_NOT_FOUND, method.to_string(), None)),
+        };
+        result.as_object_mut().expect("an object").extend(cache.as_object().expect("an object").clone());
+        Ok(result)
+    }
+
     #[tool(description = "Create or update a document. Put the fields in `body`, a JSON object. \
         Omit _id to create with a generated id. To update, pass _parent = the current _rev. \
         Set _type to doc://<id> of a schema document to validate the body; it is pinned to \
@@ -224,7 +259,13 @@ impl Vault {
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for Vault {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        let extensions = ExtensionCapabilities::from([(skill::EXTENSION_ID.to_string(), Default::default())]);
+        let capabilities = ServerCapabilities::builder()
+            .enable_extensions_with(extensions)
+            .enable_resources()
+            .enable_tools()
+            .build();
+        ServerConfig::new(capabilities)
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
@@ -236,8 +277,47 @@ impl ServerHandler for Vault {
                  doc://schemas/task: `runner` is a doc:// reference to a runner document (list them with \
                  type=doc://schemas/runner), `every` is an interval like 15m, optional `when` {glob, tag, type, \
                  ids} fires only on matching changes, `prompt` is the text the agent receives. Each firing writes a \
-                 document typed doc://schemas/run. Runner, run, and seeded schema documents are read-only over MCP.",
+                 document typed doc://schemas/run. Runner, run, and seeded schema documents are read-only over MCP. \
+                 Skills are documents typed doc://schemas/skill with `name` (lowercase-hyphenated), \
+                 `description`, and `content`; each is served as skill://<name>/SKILL.md.",
             )
+    }
+
+    async fn on_custom_request(
+        &self,
+        request: CustomRequest,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<CustomResult, McpError> {
+        self.skills_request(&request.method, request.params).map(CustomResult)
+    }
+
+    /// Each skill's SKILL.md, for hosts without the Skills Extension.
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let skills = skill::list(&*self.lock()?).map_err(to_mcp)?;
+        let resources = skills
+            .into_iter()
+            .map(|s| {
+                Resource::new(s.uri, s.name)
+                    .with_description(s.description)
+                    .with_mime_type("text/markdown")
+                    .with_size(s.text.len() as u64)
+            })
+            .collect();
+        Ok(ListResourcesResult::with_all_items(resources))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
+        let skill = self.skill(&request.uri)?;
+        let contents = ResourceContents::text(skill.text, skill.uri).with_mime_type("text/markdown");
+        Ok(ReadResourceResult::new(vec![contents]).into())
     }
 
     /// Accept only the stateless 2026-07-28 protocol.

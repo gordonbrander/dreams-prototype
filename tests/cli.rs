@@ -127,7 +127,7 @@ fn markdown_round_trip_unchanged_then_edited() {
     let again = sb.ok(&["doc", "update", "n1", "--format", "md"], &fetched);
     assert_eq!(again, fetched);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 6 + 2, "six seeded documents, the schema, the note");
+    assert_eq!(changes.results.len(), 7 + 2, "seven seeded documents, the schema, the note");
 
     // edited: update yields gen 2 with parent = rev 1
     let edited = fetched.replace("first draft", "second draft");
@@ -204,7 +204,7 @@ fn lists_tables_and_json_shapes() {
     assert_eq!(&cells[2..], ["Alpha", "x"]);
 
     let page: Page = serde_json::from_value(sb.json(&["doc", "list"], "")).unwrap();
-    assert_eq!(page.docs.len(), 6 + 2, "six seeded documents plus a and b");
+    assert_eq!(page.docs.len(), 7 + 2, "seven seeded documents plus a and b");
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--limit", "1"], "")).unwrap();
     assert!(page.next.is_some());
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
@@ -215,7 +215,7 @@ fn lists_tables_and_json_shapes() {
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
-    assert!(text.trim_end().ends_with("last_seq: 8"));
+    assert!(text.trim_end().ends_with("last_seq: 9"));
 
     // type filters: a path matches every pinned revision, the TYPE column shows the path
     let schema = sb.file("note.yaml", SCHEMA_YAML);
@@ -275,7 +275,7 @@ fn export_then_import_round_trip() {
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("9 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with("10 exported, 0 errors"), "{out}");
     assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
@@ -291,7 +291,7 @@ fn export_then_import_round_trip() {
     assert_eq!(statuses, ["unchanged", "unchanged"]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 6 + 5);
+    assert_eq!(changes.results.len(), 7 + 5);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
@@ -547,7 +547,7 @@ fn pull_and_sync_between_two_vaults() {
     b.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "from b"}"#);
     let out = a.ok(&["pull", &b_db], "");
     assert!(out.starts_with("pulled 1 revision from "), "{out}");
-    assert!(out.contains("6 present"), "{out}");
+    assert!(out.contains("7 present"), "{out}");
     assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
 
     a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);
