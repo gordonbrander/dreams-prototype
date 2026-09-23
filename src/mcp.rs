@@ -13,7 +13,7 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
@@ -35,6 +35,33 @@ fn to_mcp(e: StoreError) -> McpError {
     match e {
         StoreError::Sqlite { .. } => McpError::internal_error(e.to_string(), data),
         _ => McpError::invalid_params(e.to_string(), data),
+    }
+}
+
+/// What an agent sends to write a document. The body is one declared JSON
+/// object, not flattened fields: a client sends only declared parameters as
+/// typed JSON, so flattened arrays and objects arrive as strings.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DocInput {
+    /// Document id. Omit to create a new document with a generated UUID v7.
+    #[serde(rename = "_id")]
+    pub id: Option<String>,
+    /// The current `_rev` of the document being updated. Omit for a create.
+    #[serde(rename = "_parent")]
+    pub parent: Option<String>,
+    /// `doc://<id>` or `doc://<id>?rev=<rev>` of a schema document. The body is validated
+    /// against it. An unpinned reference is pinned to the schema's current revision at write.
+    #[serde(rename = "_type")]
+    pub type_id: Option<String>,
+    /// The document body, a JSON object. Blessed fields: `title` (string), `content` (string),
+    /// `tags` (array of strings). Keys starting with `_` are rejected.
+    #[serde(default)]
+    pub body: Map<String, Value>,
+}
+
+impl From<DocInput> for PutInput {
+    fn from(d: DocInput) -> Self {
+        PutInput { id: d.id, parent: d.parent, type_id: d.type_id, body: d.body }
     }
 }
 
@@ -73,9 +100,9 @@ pub struct DeleteParams {
 pub struct ResolveParams {
     /// Document id.
     pub id: String,
-    /// The merged document, written on the winning revision. Omit _parent (or
-    /// set it to the winner's _rev). Omit the whole field to keep the winner as it is.
-    pub merged: Option<PutInput>,
+    /// The merged document, written on the winning revision, with its fields in
+    /// `body`. Omit _parent (or set it to the winner's _rev). Omit the whole field to keep the winner as it is.
+    pub merged: Option<DocInput>,
     /// The _conflicts you read. When given, resolve fails if they changed since.
     pub conflicts: Option<Vec<String>>,
 }
@@ -123,12 +150,13 @@ impl Vault {
             .map_err(|e| McpError::internal_error(format!("store lock poisoned: {e}"), None))
     }
 
-    #[tool(description = "Create or update a document. Omit _id to create with a generated id. \
-        To update, pass _parent = the current _rev. Set _type to doc://<id> of a schema document to validate \
-        the body; it is pinned to doc://<id>?rev=<rev> at write. \
-        Blessed fields: title (string), content (string), tags (array of strings).")]
-    fn put_doc(&self, Parameters(input): Parameters<PutInput>) -> Result<Json<Doc>, McpError> {
-        self.lock()?.put(input).map(Json).map_err(to_mcp)
+    #[tool(description = "Create or update a document. Put the fields in `body`, a JSON object. \
+        Omit _id to create with a generated id. To update, pass _parent = the current _rev. \
+        Set _type to doc://<id> of a schema document to validate the body; it is pinned to \
+        doc://<id>?rev=<rev> at write. Blessed body fields: title (string), content (string), \
+        tags (array of strings).")]
+    fn put_doc(&self, Parameters(input): Parameters<DocInput>) -> Result<Json<Doc>, McpError> {
+        self.lock()?.put(input.into()).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "Get the current revision of a document by _id. When sync made concurrent edits, \
@@ -162,7 +190,7 @@ impl Vault {
     #[tool(description = "Resolve a document's conflicts: optionally write `merged` on the winning revision, \
         then tombstone every revision listed in _conflicts, in one step. Returns the new current revision.")]
     fn resolve_doc(&self, Parameters(p): Parameters<ResolveParams>) -> Result<Json<Doc>, McpError> {
-        self.lock()?.resolve(&p.id, p.merged, p.conflicts.as_deref()).map(Json).map_err(to_mcp)
+        self.lock()?.resolve(&p.id, p.merged.map(Into::into), p.conflicts.as_deref()).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \
@@ -225,4 +253,28 @@ pub async fn serve(store: Store) -> anyhow::Result<()> {
     let service = Vault::new(store).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn doc_input_declares_body_as_an_object() {
+        let schema = serde_json::to_value(schemars::schema_for!(DocInput)).unwrap();
+        assert_eq!(schema["properties"]["body"]["type"], "object");
+    }
+
+    #[test]
+    fn doc_input_keeps_json_values_in_the_body() {
+        let d: DocInput = serde_json::from_value(json!({
+            "_id": "b1",
+            "body": {"tags": ["a", "b"], "properties": {"url": {"type": "string"}}}
+        }))
+        .unwrap();
+        let input = PutInput::from(d);
+        assert_eq!(input.id.as_deref(), Some("b1"));
+        assert_eq!(input.body["tags"], json!(["a", "b"]));
+        assert_eq!(input.body["properties"]["url"]["type"], "string");
+    }
 }

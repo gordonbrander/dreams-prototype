@@ -294,7 +294,7 @@ An agent resolves conflicts with the same steps:
 
 1. `list_conflicts` finds the documents.
 2. `get_doc` returns the winner and its `_conflicts`. `get_rev` reads each one.
-3. `resolve_doc` with `id`, the `merged` body, and the `conflicts` it read. If new conflicts arrived since the read, the call fails, and the agent reads again.
+3. `resolve_doc` with `id`, the `merged` document (in the same shape as `put_doc`), and the `conflicts` it read. If new conflicts arrived since the read, the call fails, and the agent reads again.
 
 ## Scheduled tasks
 
@@ -484,7 +484,7 @@ Each store operation is one tool:
 
 | Tool | Does |
 |---|---|
-| `put_doc` | Create, or update with `_parent` set to the current `_rev`. |
+| `put_doc` | Create, or update with `_parent` set to the current `_rev`. Takes `_id`, `_parent`, `_type`, and the fields in `body`, a JSON object. |
 | `get_doc` | Current revision by `id`. `deleted_conflicts: true` adds `_deleted_conflicts`. |
 | `get_rev` | One revision by `rev`. |
 | `delete_doc` | Tombstone with `id` and `parent`. |
