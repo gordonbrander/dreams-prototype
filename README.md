@@ -144,32 +144,77 @@ Both commands continue past a failing file, report every file, and exit 1 if any
 
 ## Scheduled tasks
 
-A task wakes an agent every interval with a prompt. With a `when` filter, it wakes the agent only if a matching document changed since the last run. Tasks are documents of type `task/v1`, so an agent can create one over MCP with `put_doc`.
+A task wakes an agent on a schedule with a prompt. There are two kinds:
 
-```yaml
-_id: tasks/triage-inbox
-_type: task/v1
-runner: runners/claude       # the _id of a runner document
-every: 15m                   # 30s, 15m, 2h, 1d, 1w
-when:                        # optional; the fields are AND-ed
-  tag: inbox
-  glob: "inbox/*"            # SQLite GLOB on _id
-  type: note/v1
-  ids: [notes/a.md]
-prompt: |
-  Triage the documents listed below.
-enabled: true
+- **Periodic.** Every interval, run the prompt.
+- **On change.** Every interval, run the prompt only if a watched document changed since the last run.
+
+Tasks, runners, and runs are all documents in the vault. There is no other configuration.
+
+### Your first task
+
+1. Seed the default runners and look at them.
+
+   ```
+   subconscious init
+   subconscious runner list
+   ```
+
+   You get `runners/claude`, `runners/codex`, and `runners/pi`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in.
+
+2. Write the prompt in a file.
+
+   ```
+   cat > digest.md <<'EOF'
+   Read every document tagged `inbox` with `subconscious doc list --tag inbox --json`.
+   Write a short digest as a new document with the tag `digest`.
+   EOF
+   ```
+
+   The agent has the `subconscious` binary on its `PATH`, and `SUBCONSCIOUS_DB` already points at this vault. It can read and write with the shell commands in this README.
+
+3. Add the task.
+
+   ```
+   subconscious task add tasks/digest --runner runners/claude --every 1d digest.md
+   ```
+
+   The id is any document id. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
+
+4. Look before it runs.
+
+   ```
+   subconscious task check tasks/digest
+   ```
+
+   This prints the schedule, the last run, whether the task is due, and the exact command it will spawn. Nothing runs.
+
+5. Run it once by hand.
+
+   ```
+   subconscious task run tasks/digest
+   subconscious task runs tasks/digest
+   ```
+
+   `task run` fires at once and prints the run document. `task runs` lists past runs with their exit code and error. The agent's last message is in the run's `content`.
+
+6. Start the clock.
+
+   ```
+   subconscious daemon install
+   ```
+
+   From now on the daemon starts at login and fires each task when it is due. `subconscious task list` shows every enabled task, its last run, and whether it is due right now.
+
+### A task that waits for changes
+
+Add a `when` filter and the task fires only if a matching document changed since its last run:
+
+```
+subconscious task add tasks/triage --runner runners/claude --every 15m --tag inbox triage.md
 ```
 
-The same task from the shell:
-
-```
-subconscious task add tasks/triage-inbox --runner runners/claude --every 15m --tag inbox prompt.md
-```
-
-At each tick the scheduler reads the change feed since the task's last run, keeps the revisions that match `when`, and fires when the interval has passed and at least one matched. Changes keep collecting until a run consumes them, so a task fires at most once per interval and never misses a change. A task with no `when` fires every interval. The first run comes one interval after the task was written. `task run` fires at once.
-
-The agent receives the prompt on stdin. For a task with `when`, a section lists the changed documents:
+The filters are `--tag`, `--type`, `--glob` (a SQLite GLOB on `_id`, for example `inbox/*`), and `--id` (repeatable). They are AND-ed. The agent gets the prompt, then a section that lists what changed:
 
 ```
 Triage the documents listed below.
@@ -180,34 +225,80 @@ Changed since last run (seq 4120 to 4133):
 - inbox/quote.md  rev 1-c04d77b2  (deleted)
 ```
 
-The agent reads and writes the vault through the `subconscious` binary, which is on its `PATH` with `SUBCONSCIOUS_DB` and `SUBCONSCIOUS_ACTOR` set, and through the MCP config named by `SUBCONSCIOUS_MCP` where the host speaks the protocol. Its writes carry the task id as `_actor`, and the change filter skips them, so a task does not wake itself.
+Changes collect until a run consumes them. So the task fires at most once per interval, and never misses a change. `task check` shows the pending changes at any time. A task's own writes do not count: the agent writes with the task id as `_actor`, and the filter skips them.
 
-### Runs
+### From an agent
 
-Each firing writes a `run/v1` document at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. `task runs <id>` lists them. A run with no `finished_at` is in progress, or was cut off by a crash, and is left alone until its runner's timeout has passed.
+An agent that uses the MCP server creates a task by writing a document. It does not need new tools.
+
+```json
+{
+  "_id": "tasks/triage",
+  "_type": "task/v1",
+  "runner": "runners/claude",
+  "every": "15m",
+  "when": { "tag": "inbox" },
+  "prompt": "Triage the documents listed below.",
+  "enabled": true
+}
+```
+
+It finds runner ids with `list_docs` and `type: runner/v1`, and reads past runs with `list_docs`, `type: run/v1`, and `tag: <task id>`. It cannot write runner or run documents. Those types are read-only over MCP.
+
+### Managing tasks
+
+```
+subconscious task list                 every enabled task, last run, due or not
+subconscious task check <id>           one task in detail, plus the command it would run
+subconscious task run <id> [--force]   fire now; --force also when the last run has not finished
+subconscious task runs <id>            past runs, newest first
+subconscious task rm <id>              delete the task; its runs stay
+```
+
+To pause a task, edit it with `enabled: false`:
+
+```
+subconscious doc get tasks/digest > t.md   # edit enabled: false
+subconscious doc put t.md
+```
+
+A disabled task leaves `task list`; `task check` still shows it. `task add` on an existing id replaces it. An identical re-add writes nothing.
 
 ### Runners
 
-A runner is a `runner/v1` document with the command that starts an agent. The command is spawned as an argument list, never through a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`.
+A runner is a `runner/v1` document with the command that starts an agent. The command is an argument list, spawned without a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`, after which the command is killed and the run records the timeout.
 
-Three runners are seeded on first use: `runners/claude`, `runners/codex`, and `runners/pi`. Edit them, or add your own:
+Add your own, for example a cheaper model for frequent tasks:
 
 ```
 subconscious runner add runners/claude-fast --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
-subconscious runner list
+subconscious runner rm runners/pi
 ```
 
-Runner commands are code, so they enter only through the CLI. Over MCP, runner and run documents can be read but not written or deleted. An agent can choose a runner for a task. It cannot define one.
+Runner commands are code. They enter only through the CLI. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted.
+
+The command inherits these variables: `SUBCONSCIOUS_DB`, `SUBCONSCIOUS_TASK`, `SUBCONSCIOUS_RUN`, `SUBCONSCIOUS_ACTOR` (the task id), `SUBCONSCIOUS_MCP` (a generated MCP config for this vault), and `SUBCONSCIOUS_OUT`. `PATH` starts with the directory of this binary.
+
+### Runs
+
+Each firing writes a `run/v1` document at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
 
 ### The clock
 
 ```
-subconscious tick              one pass, then exit
-subconscious daemon            tick every minute, and sooner when the database changes
-subconscious daemon install    start the daemon at login and keep it running
+subconscious tick                        one pass, then exit
+subconscious daemon                      keep ticking; every --interval (60s) and sooner when the database changes
+subconscious daemon install | uninstall  start it at login (launchd on macOS, systemd on Linux)
 ```
 
-`daemon install` writes a launchd agent on macOS or a systemd user service on Linux, with your current `PATH`. Logs go to `~/Library/Logs/subconscious/<name>.log` on macOS and to the journal on Linux. Agents use their own stored logins; nothing else is copied. `daemon uninstall` removes it. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
+`daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. Logs go to `~/Library/Logs/subconscious/<name>.log` on macOS and to `journalctl --user -u subconscious-<name>` on Linux. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
+
+### When something goes wrong
+
+- `task check <id>` shows the command. Copy it and run it by hand with the prompt on stdin.
+- `task run <id>` exits 1 and prints the run when the agent fails. The run's `error` holds the exit code and the last lines of stderr.
+- An agent that answers "not logged in" needs its own login: `claude`, `codex login`, or `pi`. The daemon has no terminal to ask you.
+- A run with empty `content` and exit 0 from Codex means Codex could not reach its API. It exits 0 either way.
 
 ## MCP
 
