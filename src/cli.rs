@@ -41,6 +41,9 @@ enum Command {
     Init,
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
     Serve,
+    /// Print how a host starts `serve` on this vault, as the JSON of one `mcpServers` entry.
+    /// Paths are absolute. For example: claude mcp add-json subconscious "$(subconscious mcp-json)"
+    McpJson,
     /// Documents. A schema is a document too: put one, then reference it as `_type: doc://<id>`.
     #[command(subcommand)]
     Doc(DocCmd),
@@ -361,6 +364,11 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
             let mut store = open()?;
             store.set_protected(runner::PROTECTED_TYPES, runner::PROTECTED_IDS);
             tokio::runtime::Runtime::new()?.block_on(mcp::serve(store))?;
+        }
+        Command::McpJson => {
+            let exe = std::env::current_exe()?;
+            let db = absolute(&cli.db)?;
+            writeln!(out, "{}", mcp::server_entry(&exe, &db, cli.actor.as_deref()))?;
         }
         Command::Doc(cmd) => {
             let mut store = open()?;

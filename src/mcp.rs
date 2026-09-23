@@ -1,6 +1,7 @@
 //! MCP server: one tool per document operation. Stateless 2026-07-28 only.
 
 use std::borrow::Cow;
+use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rmcp::{
@@ -12,10 +13,22 @@ use rmcp::{
 };
 use schemars::JsonSchema;
 use serde::Deserialize;
+use serde_json::{Value, json};
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
+
+/// How a host starts this server on the vault at `db`: the `command` and
+/// `args` of one entry in an MCP config's `mcpServers`.
+pub fn server_entry(exe: &Path, db: &Path, actor: Option<&str>) -> Value {
+    let mut args = vec![json!("--db"), json!(db)];
+    if let Some(actor) = actor {
+        args.extend([json!("--actor"), json!(actor)]);
+    }
+    args.push(json!("serve"));
+    json!({ "command": exe, "args": args })
+}
 
 fn to_mcp(e: StoreError) -> McpError {
     let data = serde_json::to_value(&e).ok();

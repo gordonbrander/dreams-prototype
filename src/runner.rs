@@ -281,15 +281,7 @@ impl Context {
 
     /// An MCP config file body for hosts that take one.
     pub fn mcp_config(&self) -> String {
-        json!({
-            "mcpServers": {
-                "subconscious": {
-                    "command": self.exe,
-                    "args": ["--db", self.db, "--actor", self.task, "serve"],
-                }
-            }
-        })
-        .to_string()
+        json!({ "mcpServers": { "subconscious": crate::mcp::server_entry(&self.exe, &self.db, Some(&self.task)) } }).to_string()
     }
 }
 

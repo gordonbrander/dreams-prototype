@@ -94,6 +94,7 @@ subconscious [--db PATH] [--json] <command>
 
   init                                            create the database if needed
   serve                                           serve MCP over stdio
+  mcp-json                                        print the MCP server entry for this vault
 
   doc put     [FILE] [--format json|yaml|md]      create, or update when the input names a revision
   doc update  <id> [FILE] [--parent REV]          replace the body
@@ -459,13 +460,13 @@ subconscious daemon install | uninstall  start it at login (launchd on macOS, sy
 
 ### Use with Claude Code
 
-Register the server. Use absolute paths, because the host does not start the server in your project directory.
+Register the server. `mcp-json` prints the server entry for the vault that `--db` names, with absolute paths, because the host does not start the server in your project directory.
 
 ```
-claude mcp add -s user subconscious -- /path/to/subconscious --db /path/to/vault.db serve
+claude mcp add-json -s user subconscious "$(subconscious --db ~/.subconscious/vault.db mcp-json)"
 ```
 
-`-s user` makes the server available in all your projects. Leave it out to add the server to the current project only. To record writes under an agent name, add `-e SUBCONSCIOUS_ACTOR=claude` before the `--`.
+`-s user` makes the server available in all your projects. Leave it out to add the server to the current project only. To record writes under an agent name, add `--actor claude` before `mcp-json`. Other hosts take the same entry under `mcpServers` in their config file.
 
 Then turn on protocol negotiation in Claude Code. Without it, Claude Code does not connect to stdio servers that speak 2026-07-28, and reports "Unsupported protocol version". Claude Code itself must have the variable, so `-e` does not work here. Add it to `~/.claude/settings.json`:
 

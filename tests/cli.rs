@@ -694,3 +694,15 @@ fn resolve_auto_without_conflicts_prints_the_document() {
     let doc = a.json(&["doc", "resolve", "x", "--auto", "--runner", "runners/missing"], "");
     assert_eq!(doc["title"], "calm");
 }
+
+#[test]
+fn mcp_json_prints_a_server_entry_with_absolute_paths() {
+    let sb = Sandbox::new();
+    let entry: Value = serde_json::from_str(&sb.ok(&["mcp-json"], "")).unwrap();
+    assert!(Path::new(entry["command"].as_str().unwrap()).is_absolute());
+    assert_eq!(entry["args"], json!(["--db", sb.db(), "serve"]));
+    assert!(!Path::new(&sb.db()).exists(), "mcp-json must not create the vault");
+
+    let entry: Value = serde_json::from_str(&sb.ok(&["--actor", "claude", "mcp-json"], "")).unwrap();
+    assert_eq!(entry["args"], json!(["--db", sb.db(), "--actor", "claude", "serve"]));
+}
