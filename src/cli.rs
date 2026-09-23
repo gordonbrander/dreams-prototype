@@ -11,28 +11,34 @@ use serde_json::{Map, Value};
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
+use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
-use crate::{markdown, mcp, rev};
+use crate::task::{self, Evaluation, TickReport, When};
+use crate::{daemon, markdown, mcp, rev};
 
 /// Subconscious: a versioned document vault in SQLite, with a CLI and an MCP server.
 #[derive(Parser)]
 #[command(name = "subconscious", version, about)]
 pub struct Cli {
     /// Path to the SQLite database file.
-    #[arg(long, global = true, default_value = "vault.db")]
+    #[arg(long, global = true, default_value = "vault.db", env = "SUBCONSCIOUS_DB")]
     db: PathBuf,
     /// Print JSON (the same structures the MCP tools return) instead of human output.
     #[arg(long, global = true)]
     json: bool,
+    /// Record this name as the writer of every revision. A scheduled task's
+    /// agent runs with its task id here, so the task does not wake itself.
+    #[arg(long, global = true, env = "SUBCONSCIOUS_ACTOR")]
+    actor: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the database if needed and apply migrations.
+    /// Create the database if needed, apply migrations, and seed the default runners.
     Init,
-    /// Serve MCP (2026-07-28, stateless) over stdio.
+    /// Serve MCP (2026-07-28, stateless) over stdio. Runner and run documents are read-only.
     Serve,
     /// Documents.
     #[command(subcommand)]
@@ -40,6 +46,29 @@ enum Command {
     /// JSON Schemas that validate typed documents.
     #[command(subcommand)]
     Schema(SchemaCmd),
+    /// Scheduled agent tasks (task/v1 documents).
+    #[command(subcommand)]
+    Task(TaskCmd),
+    /// Agent commands that tasks run (runner/v1 documents). Never writable over MCP.
+    #[command(subcommand)]
+    Runner(RunnerCmd),
+    /// One scheduler pass: fire every due task, then exit.
+    Tick {
+        /// Evaluate as if it were this time (store format, for example 2026-09-23T10:00:00.000Z).
+        #[arg(long, hide = true)]
+        now: Option<String>,
+    },
+    /// Run the scheduler until stopped. Ticks every --interval, and sooner when the database changes.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<DaemonCmd>,
+        /// Longest wait between ticks.
+        #[arg(long, default_value = "60s")]
+        interval: String,
+        /// How often to look for changes between ticks.
+        #[arg(long, default_value = "2s")]
+        poll: String,
+    },
     /// Write current documents as Markdown files at <dir>/<_id>.
     Export {
         dir: PathBuf,
@@ -153,6 +182,93 @@ enum SchemaCmd {
     List,
 }
 
+#[derive(Subcommand)]
+enum TaskCmd {
+    /// Create or replace a task. The prompt comes from PROMPT_FILE, `-`, or stdin.
+    Add {
+        /// Task id, for example tasks/triage-inbox.
+        task_id: String,
+        /// The _id of a runner/v1 document, for example runners/claude.
+        #[arg(long)]
+        runner: String,
+        /// Interval between runs: 30s, 15m, 2h, 1d, 1w.
+        #[arg(long)]
+        every: String,
+        /// Only fire when a document whose _id matches this GLOB changed.
+        #[arg(long)]
+        glob: Option<String>,
+        /// Only fire when a document with this tag changed.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Only fire when a document with this _type changed.
+        #[arg(long = "type")]
+        type_id: Option<String>,
+        /// Only fire when this document changed. Repeatable.
+        #[arg(long = "id", value_name = "DOC_ID")]
+        ids: Vec<String>,
+        #[arg(long)]
+        title: Option<String>,
+        /// Create the task disabled.
+        #[arg(long)]
+        disabled: bool,
+        /// Prompt text file. `-` or absent means stdin.
+        prompt_file: Option<PathBuf>,
+    },
+    /// Every enabled task with its last run and whether it is due.
+    List,
+    /// Delete a task (a tombstone; its runs stay).
+    Rm { task_id: String },
+    /// Evaluate one task: due or not, matched changes, the command it would run. Nothing runs.
+    Check {
+        task_id: String,
+        #[arg(long, hide = true)]
+        now: Option<String>,
+    },
+    /// Fire one task now, whatever its schedule says.
+    Run {
+        task_id: String,
+        /// Fire even if the newest run has not finished.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Past runs of a task, newest first.
+    Runs {
+        task_id: String,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RunnerCmd {
+    /// Create or replace a runner. The command follows `--` and is spawned without a shell.
+    /// Tokens {db} {task} {run} {mcp} {out} {exe} are replaced inside each argument.
+    Add {
+        /// Runner id, for example runners/claude.
+        runner_id: String,
+        #[arg(long)]
+        title: Option<String>,
+        /// Kill the command after this long. Default 10m.
+        #[arg(long)]
+        timeout: Option<String>,
+        /// The command and its arguments.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
+        argv: Vec<String>,
+    },
+    /// Every runner.
+    List,
+    /// Delete a runner.
+    Rm { runner_id: String },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Start the daemon at login and keep it running (launchd on macOS, systemd on Linux).
+    Install,
+    /// Stop the daemon and remove its service.
+    Uninstall,
+}
+
 // ---- entry point --------------------------------------------------------
 
 /// Parse `args` (including argv[0]) and run. Returns the exit code. All
@@ -197,33 +313,378 @@ where
 
 fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
     let json = cli.json;
+    let open = || -> Result<Store, StoreError> {
+        let mut store = Store::open(&cli.db)?;
+        store.set_actor(cli.actor.clone());
+        Ok(store)
+    };
     match cli.command {
         Command::Init => {
-            Store::open(&cli.db)?;
+            let mut store = open()?;
+            let seeded = runner::seed_defaults(&mut store)?;
             writeln!(out, "initialized {}", cli.db.display())?;
+            for id in seeded {
+                writeln!(out, "seeded {id}")?;
+            }
         }
         Command::Serve => {
-            let store = Store::open(&cli.db)?;
+            let mut store = open()?;
+            store.set_protected(runner::PROTECTED_TYPES);
             tokio::runtime::Runtime::new()?.block_on(mcp::serve(store))?;
         }
         Command::Doc(cmd) => {
-            let mut store = Store::open(&cli.db)?;
+            let mut store = open()?;
             doc_cmd(&mut store, cmd, json, stdin, out)?;
         }
         Command::Schema(cmd) => {
-            let mut store = Store::open(&cli.db)?;
+            let mut store = open()?;
             schema_cmd(&mut store, cmd, json, stdin, out)?;
         }
         Command::Export { dir, type_id, tag } => {
-            let store = Store::open(&cli.db)?;
+            let store = open()?;
             export(&store, &dir, ListQuery { type_id, tag, ..Default::default() }, json, out)?;
         }
         Command::Import { dir } => {
-            let mut store = Store::open(&cli.db)?;
+            let mut store = open()?;
             import(&mut store, &dir, json, out)?;
+        }
+        Command::Task(cmd) => {
+            let mut store = open()?;
+            runner::seed_defaults(&mut store)?;
+            let db = absolute(&cli.db)?;
+            task_cmd(&mut store, &db, cmd, json, stdin, out)?;
+        }
+        Command::Runner(cmd) => {
+            let mut store = open()?;
+            runner::seed_defaults(&mut store)?;
+            runner_cmd(&mut store, cmd, json, out)?;
+        }
+        Command::Tick { now } => {
+            let mut store = open()?;
+            runner::seed_defaults(&mut store)?;
+            let db = absolute(&cli.db)?;
+            let now = match now {
+                Some(n) => n,
+                None => store.now()?,
+            };
+            let report = tokio::runtime::Runtime::new()?.block_on(task::tick(&mut store, &db, &now))?;
+            print_tick(out, json, &report)?;
+        }
+        Command::Daemon { action, interval, poll } => {
+            let db = absolute(&cli.db)?;
+            match action {
+                Some(DaemonCmd::Install) => {
+                    open()?; // create and migrate first, so the daemon finds a database
+                    let exe = std::env::current_exe()?;
+                    daemon::install(&db, &exe, out)?;
+                }
+                Some(DaemonCmd::Uninstall) => daemon::uninstall(&db, out)?,
+                None => {
+                    let mut store = open()?;
+                    runner::seed_defaults(&mut store)?;
+                    let interval = std::time::Duration::from_secs(task::parse_duration(&interval)?);
+                    let poll = std::time::Duration::from_secs(task::parse_duration(&poll)?);
+                    install_tracing("info");
+                    tokio::runtime::Runtime::new()?.block_on(daemon::run(&mut store, &db, interval, poll))?;
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// Logs to stderr, filtered by `RUST_LOG`, or by `default` when it is unset.
+/// Shared by `serve` and `daemon`.
+pub fn install_tracing(default: &str) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).with_writer(std::io::stderr).with_ansi(false).try_init();
+}
+
+fn absolute(path: &Path) -> Result<PathBuf, StoreError> {
+    std::path::absolute(path).map_err(|e| StoreError::invalid(format!("{}: {e}", path.display())))
+}
+
+// ---- tasks and runners ----------------------------------------------------
+
+fn read_text(file: Option<&Path>, stdin: &mut dyn Read) -> Result<String, StoreError> {
+    match file.filter(|p| *p != Path::new("-")) {
+        Some(path) => std::fs::read_to_string(path).map_err(|e| StoreError::invalid(format!("reading {}: {e}", path.display()))),
+        None => {
+            let mut text = String::new();
+            stdin.read_to_string(&mut text).map_err(|e| StoreError::invalid(format!("reading stdin: {e}")))?;
+            Ok(text)
+        }
+    }
+}
+
+fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
+    match cmd {
+        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, disabled, prompt_file } => {
+            id_to_relpath(&task_id)?;
+            task::parse_duration(&every)?;
+            Runner::get(store, &runner)?;
+            let prompt = read_text(prompt_file.as_deref(), stdin)?;
+            let when = When { glob, tag, type_id, ids: if ids.is_empty() { None } else { Some(ids) } };
+            let mut map = Map::new();
+            map.insert("_type".into(), Value::String(task::TASK_TYPE.into()));
+            map.insert("runner".into(), Value::String(runner));
+            map.insert("every".into(), Value::String(every));
+            map.insert("prompt".into(), Value::String(prompt));
+            if when != When::default() {
+                map.insert("when".into(), serde_json::to_value(&when)?);
+            }
+            if let Some(t) = title {
+                map.insert("title".into(), Value::String(t));
+            }
+            if disabled {
+                map.insert("enabled".into(), Value::Bool(false));
+            }
+            let (doc, status) = upsert_unless_same(store, &task_id, map)?;
+            if json {
+                print_json(out, &doc)?;
+            } else {
+                writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+            }
+        }
+        TaskCmd::List => {
+            let now = store.now()?;
+            let evals = task::evaluate(store, &now, None)?;
+            if json {
+                print_json(out, &evals)?;
+            } else {
+                let rows: Vec<Vec<String>> = evals
+                    .iter()
+                    .map(|e| {
+                        vec![
+                            e.task.id.clone(),
+                            e.parsed.runner.clone(),
+                            e.task.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            e.parsed.when.as_ref().map(When::summary).unwrap_or_default(),
+                            e.last_run_at.clone().unwrap_or_default(),
+                            due_word(e).to_string(),
+                        ]
+                    })
+                    .collect();
+                table(out, &["ID", "RUNNER", "EVERY", "WHEN", "LAST RUN", "DUE"], &rows)?;
+            }
+        }
+        TaskCmd::Rm { task_id } => {
+            let parent = head_rev(store, &task_id)?;
+            let doc = store.get_rev(&parent)?;
+            if doc.type_id.as_deref() != Some(task::TASK_TYPE) {
+                return Err(StoreError::invalid(format!("{task_id} is not a {} document", task::TASK_TYPE)).into());
+            }
+            let tomb = store.delete(&task_id, &parent)?;
+            if json {
+                print_json(out, &tomb)?;
+            } else {
+                writeln!(out, "removed {task_id}")?;
+            }
+        }
+        TaskCmd::Check { task_id, now } => {
+            let now = match now {
+                Some(n) => n,
+                None => store.now()?,
+            };
+            let eval = task::evaluate(store, &now, Some(&task_id))?.remove(0);
+            let argv = match Runner::get(store, &eval.parsed.runner) {
+                Ok(r) => r.argv,
+                Err(e) => vec![format!("(runner error: {e})")],
+            };
+            if json {
+                let mut v = serde_json::to_value(&eval)?;
+                v["argv"] = json_array(&argv);
+                v["prompt"] = Value::String(task::prompt_text(&eval));
+                print_json(out, &v)?;
+            } else {
+                writeln!(out, "task:      {}", eval.task.id)?;
+                writeln!(out, "runner:    {}", eval.parsed.runner)?;
+                writeln!(out, "every:     {}", eval.task.body.get("every").and_then(Value::as_str).unwrap_or_default())?;
+                if let Some(w) = &eval.parsed.when {
+                    writeln!(out, "when:      {}", w.summary())?;
+                }
+                writeln!(out, "enabled:   {}", eval.parsed.enabled)?;
+                writeln!(out, "last run:  {}", eval.last_run_at.as_deref().unwrap_or("never"))?;
+                writeln!(out, "cursor:    {} (head {})", eval.cursor, eval.head)?;
+                writeln!(out, "status:    {}", due_word(&eval))?;
+                if !eval.changes.is_empty() {
+                    writeln!(out, "\nchanges since cursor:")?;
+                    let rows: Vec<Vec<String>> = eval
+                        .changes
+                        .iter()
+                        .map(|c| vec![c.seq.to_string(), c.id.clone(), short_rev(&c.rev), if c.deleted { "yes".into() } else { String::new() }])
+                        .collect();
+                    table(out, &["SEQ", "ID", "REV", "DELETED"], &rows)?;
+                }
+                writeln!(out, "\ncommand:   {}", argv.join(" "))?;
+            }
+        }
+        TaskCmd::Run { task_id, force } => {
+            let now = store.now()?;
+            let eval = task::evaluate(store, &now, Some(&task_id))?.remove(0);
+            if eval.running && !force {
+                return Err(StoreError::invalid(format!(
+                    "{task_id} is running ({}); pass --force to fire anyway",
+                    eval.last_run.as_deref().unwrap_or("?")
+                ))
+                .into());
+            }
+            let fired = tokio::runtime::Runtime::new()?
+                .block_on(task::fire(store, db, &eval, &now))?
+                .ok_or_else(|| StoreError::invalid(format!("{task_id} was fired by another process; try again")))?;
+            let run = store.get(&fired.run)?;
+            if json {
+                print_json(out, &run)?;
+            } else {
+                write!(out, "{}", markdown::render(&run))?;
+            }
+            if fired.error.is_some() {
+                return Err(StoreError::invalid(format!("run {} failed: {}", fired.run, fired.error.unwrap_or_default())).into());
+            }
+        }
+        TaskCmd::Runs { task_id, limit } => {
+            let q = ListQuery { type_id: Some(task::RUN_TYPE.into()), tag: Some(task_id), limit, before: None };
+            let page = store.list(&q)?;
+            if json {
+                print_json(out, &page)?;
+            } else {
+                let field = |d: &Doc, k: &str| d.body.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                let rows: Vec<Vec<String>> = page
+                    .docs
+                    .iter()
+                    .map(|d| {
+                        vec![
+                            field(d, "started_at"),
+                            field(d, "finished_at"),
+                            d.body.get("exit_code").and_then(Value::as_i64).map(|c| c.to_string()).unwrap_or_default(),
+                            d.body.get("seq").and_then(Value::as_i64).map(|s| s.to_string()).unwrap_or_default(),
+                            clip(&field(d, "error"), 60),
+                        ]
+                    })
+                    .collect();
+                table(out, &["STARTED", "FINISHED", "EXIT", "SEQ", "ERROR"], &rows)?;
+                if let Some(next) = page.next {
+                    writeln!(out, "next: {next}")?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `upsert`, but a map identical to the current revision writes nothing.
+/// Built for `task add` and `runner add`, whose inputs never carry `_rev`.
+fn upsert_unless_same(store: &mut Store, id: &str, map: Map<String, Value>) -> Result<(Doc, WriteStatus), StoreError> {
+    if let Ok(head) = store.get(id) {
+        let same_type = head.type_id.as_deref() == map.get("_type").and_then(Value::as_str);
+        let body: Map<String, Value> = map.iter().filter(|(k, _)| !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect();
+        if same_type && body == head.body {
+            return Ok((head, WriteStatus::Unchanged));
+        }
+    }
+    upsert(store, id, map, None)
+}
+
+fn due_word(e: &Evaluation) -> &'static str {
+    if !e.parsed.enabled {
+        "disabled"
+    } else if e.running {
+        "running"
+    } else if e.due {
+        "due"
+    } else if e.time_due {
+        "waiting for changes"
+    } else {
+        ""
+    }
+}
+
+fn json_array(items: &[String]) -> Value {
+    Value::Array(items.iter().map(|s| Value::String(s.clone())).collect())
+}
+
+fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    match cmd {
+        RunnerCmd::Add { runner_id, title, timeout, argv } => {
+            let mut map = Map::new();
+            map.insert("_type".into(), Value::String(runner::RUNNER_TYPE.into()));
+            map.insert("argv".into(), json_array(&argv));
+            if let Some(t) = title {
+                map.insert("title".into(), Value::String(t));
+            }
+            if let Some(t) = timeout {
+                task::parse_duration(&t)?;
+                map.insert("timeout".into(), Value::String(t));
+            }
+            let (doc, status) = upsert_unless_same(store, &runner_id, map)?;
+            if json {
+                print_json(out, &doc)?;
+            } else {
+                writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+            }
+        }
+        RunnerCmd::List => {
+            let page = store.list(&ListQuery { type_id: Some(runner::RUNNER_TYPE.into()), limit: Some(1000), ..Default::default() })?;
+            if json {
+                print_json(out, &page)?;
+            } else {
+                let mut docs = page.docs;
+                docs.sort_by(|a, b| a.id.cmp(&b.id));
+                let rows: Vec<Vec<String>> = docs
+                    .iter()
+                    .map(|d| {
+                        let argv = d
+                            .body
+                            .get("argv")
+                            .and_then(Value::as_array)
+                            .map(|a| a.iter().filter_map(Value::as_str).collect::<Vec<_>>().join(" "))
+                            .unwrap_or_default();
+                        vec![
+                            d.id.clone(),
+                            title_of(d),
+                            d.body.get("timeout").and_then(Value::as_str).unwrap_or(runner::DEFAULT_TIMEOUT).to_string(),
+                            clip(&argv, 80),
+                        ]
+                    })
+                    .collect();
+                table(out, &["ID", "TITLE", "TIMEOUT", "ARGV"], &rows)?;
+            }
+        }
+        RunnerCmd::Rm { runner_id } => {
+            let parent = head_rev(store, &runner_id)?;
+            let doc = store.get_rev(&parent)?;
+            if doc.type_id.as_deref() != Some(runner::RUNNER_TYPE) {
+                return Err(StoreError::invalid(format!("{runner_id} is not a {} document", runner::RUNNER_TYPE)).into());
+            }
+            let tomb = store.delete(&runner_id, &parent)?;
+            if json {
+                print_json(out, &tomb)?;
+            } else {
+                writeln!(out, "removed {runner_id}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn print_tick(out: &mut dyn Write, json: bool, report: &TickReport) -> io::Result<()> {
+    if json {
+        return print_json(out, report);
+    }
+    for f in &report.fired {
+        match &f.error {
+            Some(e) => writeln!(out, "fired  {} -> {} error: {e}", f.task, f.run)?,
+            None => writeln!(out, "fired  {} -> {} exit {}", f.task, f.run, f.exit_code.unwrap_or(-1))?,
+        }
+    }
+    for id in &report.skipped {
+        writeln!(out, "skipped {id} (claimed elsewhere)")?;
+    }
+    for (id, e) in &report.errors {
+        writeln!(out, "error  {id}: {e}")?;
+    }
+    writeln!(out, "{} fired, {} skipped, {} errors", report.fired.len(), report.skipped.len(), report.errors.len())
 }
 
 fn doc_cmd(store: &mut Store, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
@@ -622,6 +1083,7 @@ pub fn prepare_write(mut map: Map<String, Value>, mode: WriteMode) -> Result<Pre
         }
     }
     map.remove("_created_at");
+    map.remove("_actor");
     map.remove("_seq");
     if let Some(deleted) = map.remove("_deleted")
         && deleted.as_bool() == Some(true)

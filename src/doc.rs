@@ -26,6 +26,10 @@ pub struct Doc {
     pub deleted: bool,
     #[serde(rename = "_created_at")]
     pub created_at: String,
+    /// Who wrote the revision, when known (a scheduled task's id, or whatever
+    /// `--actor` named). Absent for ordinary writes.
+    #[serde(rename = "_actor", skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
     /// Change-feed sequence. Present only in `changes` results.
     #[serde(rename = "_seq", skip_serializing_if = "Option::is_none")]
     pub seq: Option<i64>,
@@ -176,6 +180,7 @@ mod tests {
             type_id: None,
             deleted: false,
             created_at: "t".into(),
+            actor: None,
             seq: None,
             body: serde_json::from_value(json!({"title": "T"})).unwrap(),
         };

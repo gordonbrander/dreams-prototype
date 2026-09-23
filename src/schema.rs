@@ -68,6 +68,17 @@ impl SchemaRegistry {
         Ok(SchemaSummary { id, title, description })
     }
 
+    /// Register `schema` unless its `$id` is already registered. Used for
+    /// the built-in schemas on every open, so it reads before it writes.
+    pub fn ensure(&mut self, conn: &Connection, schema: Value) -> Result<(), StoreError> {
+        let id = required_string(&schema, "$id")?;
+        let present: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM schemas WHERE id = ?1)", [id], |r| r.get(0))?;
+        if !present {
+            self.register(conn, schema)?;
+        }
+        Ok(())
+    }
+
     pub fn get(&self, conn: &Connection, id: &str) -> Result<Value, StoreError> {
         let text: Option<String> = conn
             .query_row("SELECT schema FROM schemas WHERE id = ?1", [id], |r| r.get(0))

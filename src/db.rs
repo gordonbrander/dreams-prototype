@@ -7,7 +7,12 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2];
+
+/// Who wrote the revision. Set by `serve --actor` and the CLI `--actor`
+/// flag; a scheduled task's writes carry its id so the task does not wake
+/// itself. Not part of the revision hash.
+const MIGRATION_2: &str = "ALTER TABLE docs ADD COLUMN actor TEXT;";
 
 const MIGRATION_1: &str = r#"
 -- One row per revision. Append-only.

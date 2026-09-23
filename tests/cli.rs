@@ -316,3 +316,197 @@ fn export_then_import_round_trip() {
     assert!(filtered.join("a.md").exists());
     assert!(!filtered.join("notes").exists());
 }
+
+// ---- scheduled tasks ------------------------------------------------------
+
+const FUTURE: &str = "2099-01-01T00:00:00.000Z";
+
+fn add_test_runners(sb: &Sandbox) {
+    sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "");
+    sb.ok(&["runner", "add", "runners/fail", "--", "false"], "");
+    sb.ok(&["runner", "add", "runners/slow", "--timeout", "1s", "--", "sleep", "30"], "");
+    sb.ok(
+        &["runner", "add", "runners/env", "--", "sh", "-c", "cat >/dev/null; echo $SUBCONSCIOUS_TASK $SUBCONSCIOUS_ACTOR $SUBCONSCIOUS_DB"],
+        "",
+    );
+}
+
+#[test]
+fn runners_are_documents_seeded_once() {
+    let sb = Sandbox::new();
+    let out = sb.ok(&["init"], "");
+    assert!(out.contains("seeded runners/claude"), "{out}");
+    let text = sb.ok(&["runner", "list"], "");
+    let ids: Vec<&str> = text.lines().skip(1).map(|l| l.split_whitespace().next().unwrap()).collect();
+    assert_eq!(ids, ["runners/claude", "runners/codex", "runners/pi"]);
+    add_test_runners(&sb);
+    let out = sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "");
+    assert!(out.starts_with("unchanged runners/cat"), "{out}");
+    sb.ok(&["runner", "rm", "runners/pi"], "");
+    let text = sb.ok(&["runner", "list"], "");
+    assert!(!text.contains("runners/pi"), "{text}");
+    assert_eq!(text.lines().count(), 1 + 6, "{text}");
+    let doc = sb.json(&["doc", "get", "runners/slow"], "");
+    assert_eq!(doc["_type"], "runner/v1");
+    assert_eq!(doc["argv"], json!(["sleep", "30"]));
+    assert_eq!(doc["timeout"], "1s");
+    let err = sb.fails(&["runner", "add", "runners/bad", "--timeout", "soon", "--", "cat"], "");
+    assert_eq!(err["name"], "invalid_input");
+    let err = sb.fails(&["runner", "rm", "nope"], "");
+    assert_eq!(err["name"], "not_found");
+}
+
+#[test]
+fn task_lifecycle_with_change_trigger() {
+    let sb = Sandbox::new();
+    add_test_runners(&sb);
+    let prompt = sb.file("prompt.md", "Triage these.\n");
+
+    let err = sb.fails(&["task", "add", "t1", "--runner", "runners/nope", "--every", "1h", &prompt], "");
+    assert_eq!(err["name"], "not_found");
+    let err = sb.fails(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1x", &prompt], "");
+    assert_eq!(err["name"], "invalid_input");
+
+    let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
+    assert!(out.starts_with("created t1 1-"), "{out}");
+    let task = sb.json(&["doc", "get", "t1"], "");
+    assert_eq!(task["_type"], "task/v1");
+    assert_eq!(task["when"], json!({"tag": "inbox"}));
+    assert_eq!(task["prompt"], "Triage these.\n");
+
+    let list: Value = sb.json(&["task", "list"], "");
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["task"]["_id"], "t1");
+    assert_eq!(list[0]["due"], false);
+    assert!(list[0]["last_run_at"].is_null());
+    let text = sb.ok(&["task", "list"], "");
+    assert!(text.lines().next().unwrap().starts_with("ID"), "{text}");
+    assert!(text.contains("tag=inbox"), "{text}");
+
+    // fire now: the runner echoes the prompt back, and the run records it
+    let run = sb.json(&["task", "run", "t1"], "");
+    assert_eq!(run["_type"], "run/v1");
+    assert_eq!(run["_actor"], "t1");
+    assert_eq!(run["task"], "t1");
+    assert_eq!(run["exit_code"], 0);
+    assert!(run["_rev"].as_str().unwrap().starts_with("2-"));
+    let content = run["content"].as_str().unwrap();
+    assert!(content.starts_with("Triage these.\n\n---\nChanged since last run (seq"), "{content}");
+    assert!(run.get("error").is_none(), "{run}");
+    let runs: Page = serde_json::from_value(sb.json(&["task", "runs", "t1"], "")).unwrap();
+    assert_eq!(runs.docs.len(), 1);
+    assert_eq!(runs.docs[0].id, run["_id"]);
+    let text = sb.ok(&["task", "runs", "t1"], "");
+    assert!(text.starts_with("STARTED"), "{text}");
+
+    // changes: a tagged doc shows, a doc written as the task itself does not
+    let check = sb.json(&["task", "check", "t1"], "");
+    assert_eq!(check["changes"].as_array().unwrap().len(), 0);
+    sb.json(&["doc", "put"], r#"{"_id":"in1","title":"one","tags":["inbox"]}"#);
+    sb.json(&["--actor", "t1", "doc", "put"], r#"{"_id":"in2","title":"self","tags":["inbox"]}"#);
+    sb.json(&["doc", "put"], r#"{"_id":"other","title":"untagged"}"#);
+    let check = sb.json(&["task", "check", "t1"], "");
+    let changed: Vec<&str> = check["changes"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+    assert_eq!(changed, ["in1"]);
+    assert_eq!(check["due"], false);
+    assert_eq!(check["argv"], json!(["cat"]));
+    assert!(check["prompt"].as_str().unwrap().contains("- in1  rev 1-"), "{check}");
+    let text = sb.ok(&["task", "check", "t1"], "");
+    assert!(text.contains("status:    "), "{text}");
+    assert!(text.contains("command:   cat"), "{text}");
+
+    // a tick well after the interval fires it, and the prompt lists the change
+    let out = sb.ok(&["tick", "--now", FUTURE], "");
+    assert!(out.starts_with("fired  t1 -> runs/t1/"), "{out}");
+    assert!(out.trim_end().ends_with("1 fired, 0 skipped, 0 errors"), "{out}");
+    let runs: Page = serde_json::from_value(sb.json(&["task", "runs", "t1"], "")).unwrap();
+    assert_eq!(runs.docs.len(), 2);
+    let newest = runs.docs.iter().find(|d| d.body["started_at"] == FUTURE).unwrap();
+    assert!(newest.body["content"].as_str().unwrap().contains("- in1  rev 1-"), "{:?}", newest.body);
+    let in1 = sb.json(&["doc", "changes"], "");
+    let in1_seq = in1["results"].as_array().unwrap().iter().find(|d| d["_id"] == "in1").unwrap()["_seq"].as_i64().unwrap();
+    assert!(newest.body["seq"].as_i64().unwrap() >= in1_seq);
+
+    // nothing new since that run: a later tick fires nothing
+    let report = sb.json(&["tick", "--now", FUTURE], "");
+    assert_eq!(report["fired"].as_array().unwrap().len(), 0);
+
+    let out = sb.ok(&["task", "rm", "t1"], "");
+    assert_eq!(out, "removed t1\n");
+    assert!(sb.json(&["task", "list"], "").as_array().unwrap().is_empty());
+    let err = sb.fails(&["task", "rm", "runners/cat"], "");
+    assert_eq!(err["name"], "invalid_input");
+}
+
+#[test]
+fn task_runs_record_failures_timeouts_and_environment() {
+    let sb = Sandbox::new();
+    add_test_runners(&sb);
+    let prompt = sb.file("p.txt", "hello");
+    sb.ok(&["task", "add", "t-fail", "--runner", "runners/fail", "--every", "1h", &prompt], "");
+    sb.ok(&["task", "add", "t-slow", "--runner", "runners/slow", "--every", "1h", &prompt], "");
+    sb.ok(&["task", "add", "t-env", "--runner", "runners/env", "--every", "1h", &prompt], "");
+    sb.ok(&["task", "add", "t-gone", "--runner", "runners/cat", "--every", "1h", &prompt], "");
+    sb.ok(&["runner", "rm", "runners/cat"], "");
+
+    let (code, out, err) = sb.run(&["--json", "task", "run", "t-fail"], "");
+    assert_eq!(code, 1, "{out}{err}");
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(run["exit_code"], 1);
+    assert!(run["error"].as_str().unwrap().starts_with("exit code 1"), "{run}");
+    assert!(err.contains("failed"), "{err}");
+
+    let start = std::time::Instant::now();
+    let (code, out, _) = sb.run(&["--json", "task", "run", "t-slow"], "");
+    assert_eq!(code, 1);
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert!(run["exit_code"].is_null());
+    assert!(run["error"].as_str().unwrap().contains("timeout after 1s"), "{run}");
+
+    let run = sb.json(&["task", "run", "t-env"], "");
+    assert_eq!(run["exit_code"], 0);
+    let expected = format!("t-env t-env {}\n", sb.db());
+    assert_eq!(run["content"], expected);
+
+    let (code, out, _) = sb.run(&["--json", "task", "run", "t-gone"], "");
+    assert_eq!(code, 1);
+    let run: Value = serde_json::from_str(&out).unwrap();
+    assert!(run["error"].as_str().unwrap().contains("deleted"), "{run}");
+
+    // a plain task with no `when` gets the prompt and nothing else
+    let out = sb.ok(&["tick", "--now", FUTURE], "");
+    assert!(out.contains("fired  t-env"), "{out}");
+    let runs: Page = serde_json::from_value(sb.json(&["task", "runs", "t-env"], "")).unwrap();
+    assert!(runs.docs.iter().all(|d| d.body["content"] == expected), "{:?}", runs.docs);
+}
+
+#[test]
+fn run_refuses_while_a_claim_is_open_unless_forced() {
+    let sb = Sandbox::new();
+    add_test_runners(&sb);
+    let prompt = sb.file("p.txt", "hello");
+    sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", &prompt], "");
+    // the CLI is trusted: it can write a claim by hand
+    let claim = format!(
+        r#"{{"_id":"runs/t1/manual","_type":"run/v1","task":"t1","runner":"runners/cat","started_at":"{FUTURE}","seq":1,"tags":["t1"]}}"#
+    );
+    sb.json(&["doc", "put"], &claim);
+    let check = sb.json(&["task", "check", "t1"], "");
+    assert_eq!(check["running"], true);
+    assert_eq!(check["last_run"], "runs/t1/manual");
+    let err = sb.fails(&["task", "run", "t1"], "");
+    assert!(err["message"].as_str().unwrap().contains("--force"), "{err}");
+    let run = sb.json(&["task", "run", "t1", "--force"], "");
+    assert_eq!(run["exit_code"], 0);
+}
+
+#[test]
+fn serve_protects_runner_and_run_documents() {
+    // the boundary itself is covered in tests/store.rs; here: the CLI never sets it
+    let sb = Sandbox::new();
+    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"runner/v1","argv":["cat"]}"#);
+    assert_eq!(doc["_type"], "runner/v1");
+    let tomb = sb.json(&["doc", "delete", "runners/x"], "");
+    assert_eq!(tomb["_deleted"], true);
+}

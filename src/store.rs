@@ -17,11 +17,19 @@ pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 1000;
 pub const MAX_HISTORY: usize = 10_000;
 
-const DOC_COLS: &str = "d._local_seq, d._rev, d._id, d._parent, d._type, d._deleted, d.body, d._created_at";
+pub(crate) const DOC_COLS: &str =
+    "d._local_seq, d._rev, d._id, d._parent, d._type, d._deleted, d.body, d._created_at, d.actor";
+
+/// The timestamp format every stored time uses (`_created_at`, run times).
+pub const TIME_FORMAT: &str = "%Y-%m-%dT%H:%M:%fZ";
 
 pub struct Store {
     conn: Connection,
     schemas: SchemaRegistry,
+    /// Written into `docs.actor` on every revision this store creates.
+    actor: Option<String>,
+    /// `_type`s this connection may not write or delete.
+    protected: Vec<String>,
 }
 
 /// Filters shared by `list` and `search`.
@@ -72,7 +80,7 @@ fn clamp_limit(limit: Option<usize>) -> usize {
     limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT)
 }
 
-fn row_to_doc(row: &Row<'_>, with_seq: bool) -> rusqlite::Result<Doc> {
+pub(crate) fn row_to_doc(row: &Row<'_>, with_seq: bool) -> rusqlite::Result<Doc> {
     let body_text: String = row.get(6)?;
     let body: Map<String, Value> = serde_json::from_str(&body_text).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
@@ -86,6 +94,7 @@ fn row_to_doc(row: &Row<'_>, with_seq: bool) -> rusqlite::Result<Doc> {
         deleted: row.get::<_, i64>(5)? != 0,
         body,
         created_at: row.get(7)?,
+        actor: row.get(8)?,
     })
 }
 
@@ -122,19 +131,114 @@ fn leaves_in(conn: &Connection, id: &str) -> Result<Vec<String>, StoreError> {
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
+/// The one write path. Validates, checks the protected types, enforces the
+/// revision chain, and inserts. Idempotent by content: replaying an input
+/// that is already a leaf returns that leaf.
+fn put_draft_in(
+    tx: &Connection,
+    schemas: &mut SchemaRegistry,
+    actor: Option<&str>,
+    protected: &[String],
+    draft: Draft,
+) -> Result<Doc, StoreError> {
+    if let Some(type_id) = &draft.type_id
+        && protected.iter().any(|p| p == type_id)
+    {
+        return Err(StoreError::Protected { type_id: type_id.clone() });
+    }
+    if let Some(parent) = &draft.parent
+        && let Ok(parent_doc) = get_rev_in(tx, parent)
+        && let Some(type_id) = &parent_doc.type_id
+        && protected.iter().any(|p| p == type_id)
+    {
+        return Err(StoreError::Protected { type_id: type_id.clone() });
+    }
+
+    if let Some(type_id) = &draft.type_id
+        && !draft.deleted
+    {
+        schemas.validate(tx, type_id, &Value::Object(draft.body.clone()))?;
+    }
+
+    let leaves = leaves_in(tx, &draft.id)?;
+    let rev_id = rev::rev_of(
+        &draft.id,
+        draft.parent.as_deref(),
+        draft.type_id.as_deref(),
+        draft.deleted,
+        &draft.body,
+    )?;
+
+    if leaves.contains(&rev_id) {
+        return get_rev_in(tx, &rev_id);
+    }
+    let parent_ok = match &draft.parent {
+        None => leaves.is_empty(),
+        Some(p) => leaves.contains(p),
+    };
+    if !parent_ok {
+        return Err(StoreError::Conflict {
+            id: draft.id,
+            parent: draft.parent,
+            leaves,
+        });
+    }
+
+    tx.execute(
+        "INSERT INTO docs (_rev, _id, _parent, _type, _deleted, body, actor) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            rev_id,
+            draft.id,
+            draft.parent,
+            draft.type_id,
+            draft.deleted as i64,
+            serde_json::to_string(&draft.body)?,
+            actor,
+        ],
+    )?;
+    get_rev_in(tx, &rev_id)
+}
+
+/// Every schema the binary ships. Frozen: the registry is immutable, so a
+/// change here would make every existing database refuse to open. A new
+/// shape is a new `$id`.
+const BUILTIN_SCHEMAS: &[&str] = &[crate::task::TASK_SCHEMA, crate::task::RUN_SCHEMA, crate::runner::RUNNER_SCHEMA];
+
 impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
-        Ok(Store {
-            conn: db::open(path)?,
-            schemas: SchemaRegistry::default(),
-        })
+        Store::new(db::open(path)?)
     }
 
     pub fn open_in_memory() -> Result<Store, StoreError> {
-        Ok(Store {
-            conn: db::open_in_memory()?,
-            schemas: SchemaRegistry::default(),
-        })
+        Store::new(db::open_in_memory()?)
+    }
+
+    fn new(conn: Connection) -> Result<Store, StoreError> {
+        let mut schemas = SchemaRegistry::default();
+        for text in BUILTIN_SCHEMAS {
+            let schema: Value = serde_json::from_str(text).expect("built-in schemas are valid JSON");
+            schemas.ensure(&conn, schema)?;
+        }
+        Ok(Store { conn, schemas, actor: None, protected: Vec::new() })
+    }
+
+    /// Name the writer of every revision this store creates from now on.
+    pub fn set_actor(&mut self, actor: Option<String>) {
+        self.actor = actor;
+    }
+
+    pub fn actor(&self) -> Option<&str> {
+        self.actor.as_deref()
+    }
+
+    /// Refuse writes and deletes of documents with these `_type`s.
+    pub fn set_protected(&mut self, types: &[&str]) {
+        self.protected = types.iter().map(|t| t.to_string()).collect();
+    }
+
+    /// The current time in the store's own format.
+    pub fn now(&self) -> Result<String, StoreError> {
+        Ok(self.conn.query_row(&format!("SELECT strftime('{TIME_FORMAT}','now')"), [], |r| r.get(0))?)
     }
 
     // ---- writes -------------------------------------------------------
@@ -144,6 +248,25 @@ impl Store {
     pub fn put(&mut self, input: PutInput) -> Result<Doc, StoreError> {
         let draft = input.into_draft()?;
         self.put_draft(draft)
+    }
+
+    /// `put`, but only when `check` returns true inside the same write
+    /// transaction. Returns `None` when the check fails. A compare-and-set
+    /// for conditions the revision chain cannot express.
+    pub fn put_if(
+        &mut self,
+        input: PutInput,
+        check: impl FnOnce(&Connection) -> Result<bool, StoreError>,
+    ) -> Result<Option<Doc>, StoreError> {
+        let draft = input.into_draft()?;
+        let Store { conn, schemas, actor, protected } = self;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !check(&tx)? {
+            return Ok(None);
+        }
+        let doc = put_draft_in(&tx, schemas, actor.as_deref(), protected, draft)?;
+        tx.commit()?;
+        Ok(Some(doc))
     }
 
     /// Write a tombstone as a child of `parent`. The tombstone keeps the
@@ -166,55 +289,16 @@ impl Store {
     }
 
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
-        let Store { conn, schemas } = self;
+        let Store { conn, schemas, actor, protected } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        if let Some(type_id) = &draft.type_id
-            && !draft.deleted
-        {
-            schemas.validate(&tx, type_id, &Value::Object(draft.body.clone()))?;
-        }
-
-        let leaves = leaves_in(&tx, &draft.id)?;
-        let rev_id = rev::rev_of(
-            &draft.id,
-            draft.parent.as_deref(),
-            draft.type_id.as_deref(),
-            draft.deleted,
-            &draft.body,
-        )?;
-
-        if leaves.contains(&rev_id) {
-            let existing = get_rev_in(&tx, &rev_id)?;
-            tx.commit()?;
-            return Ok(existing);
-        }
-        let parent_ok = match &draft.parent {
-            None => leaves.is_empty(),
-            Some(p) => leaves.contains(p),
-        };
-        if !parent_ok {
-            return Err(StoreError::Conflict {
-                id: draft.id,
-                parent: draft.parent,
-                leaves,
-            });
-        }
-
-        tx.execute(
-            "INSERT INTO docs (_rev, _id, _parent, _type, _deleted, body) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                rev_id,
-                draft.id,
-                draft.parent,
-                draft.type_id,
-                draft.deleted as i64,
-                serde_json::to_string(&draft.body)?,
-            ],
-        )?;
-        let stored = get_rev_in(&tx, &rev_id)?;
+        let doc = put_draft_in(&tx, schemas, actor.as_deref(), protected, draft)?;
         tx.commit()?;
-        Ok(stored)
+        Ok(doc)
+    }
+
+    /// Whether any revision of `id` exists, tombstones included.
+    pub fn exists(&self, id: &str) -> Result<bool, StoreError> {
+        Ok(!leaves_in(&self.conn, id)?.is_empty())
     }
 
     // ---- reads --------------------------------------------------------

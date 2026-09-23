@@ -41,6 +41,12 @@ pub enum StoreError {
     #[error("schema {id} is already registered with a different body; schemas are immutable, register a new version")]
     ImmutableSchema { id: String },
 
+    #[error("documents of type {type_id} are read-only over this connection")]
+    Protected {
+        #[serde(rename = "type")]
+        type_id: String,
+    },
+
     #[error("invalid input: {message}")]
     InvalidInput { message: String },
 

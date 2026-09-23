@@ -204,7 +204,8 @@ fn schema_validation_on_write() {
     let mut changed = note_schema();
     changed["required"] = json!([]);
     assert!(matches!(s.register_schema(changed), Err(StoreError::ImmutableSchema { .. })));
-    assert_eq!(s.list_schemas().unwrap().schemas.len(), 1);
+    // note/v1 plus the three built-in schemas (run, runner, task)
+    assert_eq!(s.list_schemas().unwrap().schemas.len(), 4);
     assert_eq!(s.get_schema("note/v1").unwrap()["title"], "Note");
     assert!(matches!(s.get_schema("nope"), Err(StoreError::UnknownType { .. })));
 }
@@ -302,7 +303,179 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.get("a").unwrap().body["title"], "persisted");
         let n: i64 = s.connection().query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 1);
+        assert_eq!(n, 2);
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---- scheduled tasks ------------------------------------------------------
+
+use subconscious::runner::{self, PROTECTED_TYPES, RUNNER_TYPE};
+use subconscious::task::{self, RUN_TYPE, TASK_TYPE};
+
+fn plus_secs(s: &Store, from: &str, secs: i64) -> String {
+    s.connection()
+        .query_row(
+            "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', unixepoch(?1) + ?2, 'unixepoch')",
+            rusqlite::params![from, secs],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+#[test]
+fn actor_is_recorded_per_store() {
+    let mut s = store();
+    let plain = s.put(input(json!({"_id": "a", "title": "a"}))).unwrap();
+    assert_eq!(plain.actor, None);
+    s.set_actor(Some("tasks/t".into()));
+    let by_task = s.put(input(json!({"_id": "b", "title": "b"}))).unwrap();
+    assert_eq!(by_task.actor.as_deref(), Some("tasks/t"));
+    assert_eq!(serde_json::to_value(&by_task).unwrap()["_actor"], "tasks/t");
+    assert!(serde_json::to_value(&plain).unwrap().get("_actor").is_none());
+    s.set_actor(None);
+    let again = s.put(input(json!({"_id": "c", "title": "c"}))).unwrap();
+    assert_eq!(again.actor, None);
+    assert_eq!(s.get("b").unwrap().actor.as_deref(), Some("tasks/t"));
+}
+
+#[test]
+fn put_if_writes_only_when_the_check_passes() {
+    let mut s = store();
+    let written = s.put_if(input(json!({"_id": "a", "title": "a"})), |_| Ok(true)).unwrap();
+    assert!(written.is_some());
+    let refused = s.put_if(input(json!({"_id": "b", "title": "b"})), |_| Ok(false)).unwrap();
+    assert!(refused.is_none());
+    assert!(matches!(s.get("b"), Err(StoreError::NotFound { .. })));
+    // the check sees the same transaction the write would use
+    let seen = s
+        .put_if(input(json!({"_id": "c", "title": "c"})), |conn| {
+            Ok(conn.query_row("SELECT count(*) FROM docs", [], |r| r.get::<_, i64>(0))? == 1)
+        })
+        .unwrap();
+    assert!(seen.is_some());
+}
+
+#[test]
+fn protected_types_are_read_only() {
+    let mut s = store();
+    let doc = s
+        .put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]})))
+        .unwrap();
+    s.set_protected(PROTECTED_TYPES);
+    assert!(matches!(
+        s.put(input(json!({"_id": "runners/y", "_type": RUNNER_TYPE, "argv": ["cat"]}))),
+        Err(StoreError::Protected { .. })
+    ));
+    // an update that drops the type is still an update of a protected document
+    assert!(matches!(
+        s.put(input(json!({"_id": "runners/x", "_parent": doc.rev, "title": "plain"}))),
+        Err(StoreError::Protected { .. })
+    ));
+    assert!(matches!(s.delete("runners/x", &doc.rev), Err(StoreError::Protected { .. })));
+    assert!(matches!(
+        s.put(input(json!({"_id": "runs/t/1", "_type": RUN_TYPE, "task": "t", "runner": "r", "started_at": "x", "seq": 1, "tags": ["t"]}))),
+        Err(StoreError::Protected { .. })
+    ));
+    // reads and ordinary writes still work
+    assert_eq!(s.get("runners/x").unwrap().body["argv"], json!(["cat"]));
+    assert!(s.put(input(json!({"_id": "note", "title": "n"}))).is_ok());
+    s.set_protected(&[]);
+    assert!(s.delete("runners/x", &doc.rev).is_ok());
+}
+
+#[test]
+fn seed_defaults_is_idempotent_and_respects_deletions() {
+    let mut s = store();
+    let first = runner::seed_defaults(&mut s).unwrap();
+    assert_eq!(first, ["runners/claude", "runners/codex", "runners/pi"]);
+    assert!(runner::seed_defaults(&mut s).unwrap().is_empty());
+    let pi = s.get("runners/pi").unwrap();
+    assert_eq!(pi.type_id.as_deref(), Some(RUNNER_TYPE));
+    s.delete("runners/pi", &pi.rev).unwrap();
+    assert!(runner::seed_defaults(&mut s).unwrap().is_empty());
+    assert!(matches!(s.get("runners/pi"), Err(StoreError::Deleted { .. })));
+}
+
+fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> subconscious::Doc {
+    let mut body = json!({"_id": id, "_type": TASK_TYPE, "runner": "runners/cat", "every": every, "prompt": "go"});
+    if let Some(w) = when {
+        body["when"] = w;
+    }
+    s.put(input(body)).unwrap()
+}
+
+#[test]
+fn evaluate_time_and_change_rules() {
+    let mut s = store();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
+    let plain = add_task(&mut s, "tasks/plain", "1h", None);
+    let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));
+    let created = watch.created_at.clone();
+
+    // before the interval: nothing is due, and the cursor is the task's own seq
+    let evals = task::evaluate(&s, &plus_secs(&s, &created, 60), None).unwrap();
+    assert_eq!(evals.len(), 2);
+    let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
+    let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
+    assert!(!e_plain.time_due && !e_plain.due);
+    assert_eq!(e_watch.cursor, 3);
+    assert_eq!(e_watch.head, 3);
+    assert!(e_watch.changes.is_empty());
+
+    // after the interval: the plain task is due; the watcher waits for changes
+    let later = plus_secs(&s, &created, 2 * 3600);
+    let evals = task::evaluate(&s, &later, None).unwrap();
+    let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
+    let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
+    assert!(e_plain.due);
+    assert!(e_watch.time_due && !e_watch.due);
+
+    // a tagged write, an untagged write, and the watcher's own write
+    let note = s.put(input(json!({"_id": "n1", "title": "n", "tags": ["inbox"]}))).unwrap();
+    s.put(input(json!({"_id": "n2", "title": "other"}))).unwrap();
+    s.set_actor(Some("tasks/watch".into()));
+    s.put(input(json!({"_id": "n3", "title": "self", "tags": ["inbox"]}))).unwrap();
+    s.set_actor(None);
+    let e_watch = task::evaluate(&s, &later, Some("tasks/watch")).unwrap().remove(0);
+    let ids: Vec<&str> = e_watch.changes.iter().map(|c| c.id.as_str()).collect();
+    assert_eq!(ids, ["n1"]);
+    assert!(e_watch.due);
+    assert_eq!(e_watch.head, 6);
+
+    // a tombstone of a tagged document counts as a change to that tag
+    s.delete("n1", &note.rev).unwrap();
+    let e_watch = task::evaluate(&s, &later, Some("tasks/watch")).unwrap().remove(0);
+    let seen: Vec<(String, bool)> = e_watch.changes.iter().map(|c| (c.id.clone(), c.deleted)).collect();
+    assert_eq!(seen, [("n1".to_string(), false), ("n1".to_string(), true)]);
+
+    // a claim marks the task running until its timeout, then it is stale
+    let run = task::claim(&mut s, &e_watch, &later).unwrap().unwrap();
+    assert_eq!(run.body["seq"], 7);
+    assert_eq!(run.body["tags"], json!(["tasks/watch"]));
+    let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
+    assert!(e_watch.running && !e_watch.due);
+    assert_eq!(e_watch.cursor, 7);
+    assert_eq!(e_watch.last_run.as_deref(), Some(run.id.as_str()));
+    let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 3600), Some("tasks/watch")).unwrap().remove(0);
+    assert!(!e_watch.running);
+    // nothing changed since the claim's cursor, so it is not due even though time has passed
+    assert!(e_watch.time_due && !e_watch.due);
+
+    // a second claim against the same evaluation fails once the newest run moved on
+    let fresh = task::evaluate(&s, &later, Some("tasks/plain")).unwrap().remove(0);
+    assert!(task::claim(&mut s, &fresh, &later).unwrap().is_some());
+    let e_plain_old = e_plain.clone();
+    assert!(task::claim(&mut s, &e_plain_old, &later).unwrap().is_none());
+
+    // disabled tasks are skipped by the full evaluation but visible by id
+    let plain_doc = s.get("tasks/plain").unwrap();
+    s.put(input(json!({"_id": "tasks/plain", "_parent": plain_doc.rev, "_type": TASK_TYPE,
+        "runner": "runners/cat", "every": "1h", "prompt": "go", "enabled": false}))).unwrap();
+    assert!(task::evaluate(&s, &later, None).unwrap().iter().all(|e| e.task.id != "tasks/plain"));
+    let e = task::evaluate(&s, &later, Some("tasks/plain")).unwrap().remove(0);
+    assert!(!e.due && !e.parsed.enabled);
+    assert!(matches!(task::evaluate(&s, &later, Some("nope")), Err(StoreError::NotFound { .. })));
+    assert!(task::evaluate(&s, &later, Some("n2")).is_err());
+    let _ = plain;
 }

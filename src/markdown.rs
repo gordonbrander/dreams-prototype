@@ -93,6 +93,9 @@ pub fn render(doc: &Doc) -> String {
         fm.insert(yaml_str("_deleted"), Yaml::Bool(true));
     }
     fm.insert(yaml_str("_created_at"), yaml_str(&doc.created_at));
+    if let Some(a) = &doc.actor {
+        fm.insert(yaml_str("_actor"), yaml_str(a));
+    }
     if let Some(seq) = doc.seq {
         fm.insert(yaml_str("_seq"), Yaml::Number(seq.into()));
     }
@@ -125,6 +128,7 @@ mod tests {
             type_id: Some("note/v1".into()),
             deleted: false,
             created_at: "2026-09-22T20:14:03.512Z".into(),
+            actor: None,
             seq: None,
             body: body.as_object().unwrap().clone(),
         }

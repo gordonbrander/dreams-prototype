@@ -46,6 +46,7 @@ A document is a JSON object. Reserved fields start with an underscore.
 | `_type` | The id of a registered schema. Optional. |
 | `_deleted` | `true` on a tombstone. |
 | `_created_at` | When the revision was written. |
+| `_actor` | Who wrote the revision, when a writer named itself with `--actor`. A scheduled task's agent writes as the task. |
 | `_seq` | The global sequence number of the revision. |
 
 Everything else is the body. Three body fields are blessed:
@@ -90,9 +91,26 @@ subconscious [--db PATH] [--json] <command>
   schema get      <id>
   schema list
 
+  task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [PROMPT_FILE]
+  task list                                       every enabled task, its last run, and whether it is due
+  task rm     <id>
+  task check  <id>                                evaluate one task; nothing runs
+  task run    <id> [--force]                      fire one task now
+  task runs   <id> [--limit N]                    past runs
+
+  runner add  <id> [--title T] [--timeout 10m] -- <command> [args]...
+  runner list
+  runner rm   <id>
+
+  tick                                            one scheduler pass
+  daemon [--interval 60s] [--poll 2s]             run the scheduler until stopped
+  daemon install | uninstall                      start it at login (launchd or systemd)
+
   export <dir> [--type T] [--tag G]               write current documents to <dir>/<_id>
   import <dir>                                    read every *.md file under <dir>
 ```
+
+Every command also takes `--actor NAME`, or the `SUBCONSCIOUS_ACTOR` variable, to name the writer of the revisions it creates. `--db` also reads `SUBCONSCIOUS_DB`.
 
 ### Input
 
@@ -124,6 +142,73 @@ subconscious doc put hello.md
 
 Both commands continue past a failing file, report every file, and exit 1 if any failed.
 
+## Scheduled tasks
+
+A task wakes an agent every interval with a prompt. With a `when` filter, it wakes the agent only if a matching document changed since the last run. Tasks are documents of type `task/v1`, so an agent can create one over MCP with `put_doc`.
+
+```yaml
+_id: tasks/triage-inbox
+_type: task/v1
+runner: runners/claude       # the _id of a runner document
+every: 15m                   # 30s, 15m, 2h, 1d, 1w
+when:                        # optional; the fields are AND-ed
+  tag: inbox
+  glob: "inbox/*"            # SQLite GLOB on _id
+  type: note/v1
+  ids: [notes/a.md]
+prompt: |
+  Triage the documents listed below.
+enabled: true
+```
+
+The same task from the shell:
+
+```
+subconscious task add tasks/triage-inbox --runner runners/claude --every 15m --tag inbox prompt.md
+```
+
+At each tick the scheduler reads the change feed since the task's last run, keeps the revisions that match `when`, and fires when the interval has passed and at least one matched. Changes keep collecting until a run consumes them, so a task fires at most once per interval and never misses a change. A task with no `when` fires every interval. The first run comes one interval after the task was written. `task run` fires at once.
+
+The agent receives the prompt on stdin. For a task with `when`, a section lists the changed documents:
+
+```
+Triage the documents listed below.
+
+---
+Changed since last run (seq 4120 to 4133):
+- inbox/call.md  rev 3-9f2a1c0e
+- inbox/quote.md  rev 1-c04d77b2  (deleted)
+```
+
+The agent reads and writes the vault through the `subconscious` binary, which is on its `PATH` with `SUBCONSCIOUS_DB` and `SUBCONSCIOUS_ACTOR` set, and through the MCP config named by `SUBCONSCIOUS_MCP` where the host speaks the protocol. Its writes carry the task id as `_actor`, and the change filter skips them, so a task does not wake itself.
+
+### Runs
+
+Each firing writes a `run/v1` document at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. `task runs <id>` lists them. A run with no `finished_at` is in progress, or was cut off by a crash, and is left alone until its runner's timeout has passed.
+
+### Runners
+
+A runner is a `runner/v1` document with the command that starts an agent. The command is spawned as an argument list, never through a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`.
+
+Three runners are seeded on first use: `runners/claude`, `runners/codex`, and `runners/pi`. Edit them, or add your own:
+
+```
+subconscious runner add runners/claude-fast --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
+subconscious runner list
+```
+
+Runner commands are code, so they enter only through the CLI. Over MCP, runner and run documents can be read but not written or deleted. An agent can choose a runner for a task. It cannot define one.
+
+### The clock
+
+```
+subconscious tick              one pass, then exit
+subconscious daemon            tick every minute, and sooner when the database changes
+subconscious daemon install    start the daemon at login and keep it running
+```
+
+`daemon install` writes a launchd agent on macOS or a systemd user service on Linux, with your current `PATH`. Logs go to `~/Library/Logs/subconscious/<name>.log` on macOS and to the journal on Linux. Agents use their own stored logins; nothing else is copied. `daemon uninstall` removes it. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
+
 ## MCP
 
 `subconscious serve` speaks the stateless MCP protocol, version 2026-07-28, over stdio. Older protocol versions are refused. The host starts the binary as a child process and talks to it through its stdin and stdout. Logs go to stderr, controlled by `RUST_LOG`.
@@ -152,7 +237,7 @@ Each store operation is one tool:
 | `get_schema` | One schema by `id`. |
 | `list_schemas` | Id, title, and description of each schema. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Scheduled tasks need no extra tools: an agent writes a `task/v1` document with `put_doc`, finds runners with `list_docs` and `type: runner/v1`, and reads runs the same way. Writes to `runner/v1` and `run/v1` documents are refused.
 
 ## Storage
 
@@ -160,7 +245,7 @@ One SQLite file in WAL mode. Migrations run on open.
 
 - `docs` holds one row per revision. Triggers refuse updates and deletes, and enforce the parent chain.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- `schemas` holds registered schemas.
+- `schemas` holds registered schemas. Three are built in: `task/v1`, `run/v1`, and `runner/v1`.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
 
@@ -171,4 +256,4 @@ cargo test
 cargo clippy --all-targets
 ```
 
-The tests cover the revision model, the store, and the full command surface. CLI tests call the command runner in process with a temporary database.
+The tests cover the revision model, the store, the scheduler rules, and the full command surface. CLI tests call the command runner in process with a temporary database, and drive the scheduler with runners such as `cat` and `sleep`.

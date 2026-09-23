@@ -7,14 +7,17 @@
 //!   registered, validated on write.
 
 pub mod cli;
+pub mod daemon;
 pub mod db;
 pub mod doc;
 pub mod error;
 pub mod markdown;
 pub mod mcp;
 pub mod rev;
+pub mod runner;
 pub mod schema;
 pub mod store;
+pub mod task;
 
 pub use doc::{Doc, PutInput};
 pub use error::StoreError;

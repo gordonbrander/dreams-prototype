@@ -170,7 +170,11 @@ impl ServerHandler for Vault {
             .with_instructions(
                 "Subconscious: a versioned document vault. Documents have _id, _rev, optional _type (a registered \
                  JSON Schema id), and free-form bodies with blessed fields title, content, tags. Updates must name \
-                 the current _rev as _parent.",
+                 the current _rev as _parent. Scheduled agent tasks are task/v1 documents: `runner` is the _id of \
+                 a runner/v1 document (list them with list_docs and type=runner/v1), `every` is an interval like \
+                 15m, optional `when` {glob, tag, type, ids} fires only on matching changes, `prompt` is the text \
+                 the agent receives. Each firing writes a run/v1 document. Runner and run documents are read-only \
+                 over MCP.",
             )
     }
 
@@ -180,14 +184,10 @@ impl ServerHandler for Vault {
     }
 }
 
-/// Run the MCP server over stdio until the client disconnects.
+/// Run the MCP server over stdio until the client disconnects. The caller
+/// sets the store's actor and protected types.
 pub async fn serve(store: Store) -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_writer(std::io::stderr)
-        .with_ansi(false)
-        .init();
-
+    crate::cli::install_tracing("warn");
     let service = Vault::new(store).serve(stdio()).await?;
     service.waiting().await?;
     Ok(())
