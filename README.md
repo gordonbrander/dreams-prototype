@@ -99,7 +99,7 @@ subconscious [--db PATH] [--json] <command>
 
   doc put     [FILE] [--format json|yaml|md]      create, or update when the input names a revision
   doc update  <id> [FILE] [--parent REV]          replace the body
-  doc get     <id> [--rev REV] [--deleted-conflicts]
+  doc get     <id | doc://id[?rev=REV]> [--deleted-conflicts]
                                                   current revision, or one revision
   doc delete  <id> [--parent REV]                 write a tombstone
   doc list    [--type T] [--tag G] [--limit N] [--before SEQ]
@@ -238,7 +238,7 @@ _conflicts:
 
 An edit made on one side wins over a delete made on the other side, so the document comes back. This is the CouchDB rule.
 
-Until you resolve, the document works as usual. Reads, lists, and search use the winner. `doc update` writes on the winner, and the conflict stays. `doc history` follows the winner's branch only. Read a losing leaf with `doc get <id> --rev <rev>`.
+Until you resolve, the document works as usual. Reads, lists, and search use the winner. `doc update` writes on the winner, and the conflict stays. `doc history` follows the winner's branch only. Read a losing leaf with `doc get 'doc://<id>?rev=<rev>'`.
 
 To find every document with conflicts:
 
@@ -294,7 +294,7 @@ If a sync brings in a new conflict while the agent works, the resolve fails and 
 An agent resolves conflicts with the same steps:
 
 1. `list_conflicts` finds the documents.
-2. `get_doc` returns the winner and its `_conflicts`. `get_rev` reads each one.
+2. `get_doc` returns the winner and its `_conflicts`. `get_doc` with `doc://<id>?rev=<rev>`, or `get_rev`, reads each one.
 3. `resolve_doc` with `id`, the `merged` document (in the same shape as `put_doc`), and the `conflicts` it read. If new conflicts arrived since the read, the call fails, and the agent reads again.
 
 ## Scheduled tasks
@@ -486,7 +486,7 @@ Each store operation is one tool:
 | Tool | Does |
 |---|---|
 | `put_doc` | Create, or update with `_parent` set to the current `_rev`. Takes `_id`, `_parent`, `_type`, and the fields in `body`, a JSON object. |
-| `get_doc` | Current revision by `id`. `deleted_conflicts: true` adds `_deleted_conflicts`. |
+| `get_doc` | A document by `href`: a bare id or `doc://<id>` gives the current revision, `doc://<id>?rev=<rev>` gives that revision. `deleted_conflicts: true` adds `_deleted_conflicts` (unpinned only). |
 | `get_rev` | One revision by `rev`. |
 | `delete_doc` | Tombstone with `id` and `parent`. |
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |

@@ -149,6 +149,31 @@ fn delete_tombstone_and_undelete() {
 }
 
 #[test]
+fn get_href_reads_current_or_pinned() {
+    let mut s = store();
+    let a1 = s.put(input(json!({"_id": "a", "title": "one"}))).unwrap();
+    let a2 = s.put(input(json!({"_id": "a", "_parent": a1.rev, "title": "two"}))).unwrap();
+    let b = s.put(input(json!({"_id": "b"}))).unwrap();
+
+    // bare id and doc:// give the current revision
+    assert_eq!(s.get_href("a", false).unwrap().rev, a2.rev);
+    assert_eq!(s.get_href("doc://a", false).unwrap().rev, a2.rev);
+    // a pinned href gives that revision
+    assert_eq!(s.get_href(&pinned("a", &a1.rev), false).unwrap().body["title"], "one");
+    // only this document's revisions
+    assert!(matches!(s.get_href(&pinned("a", &b.rev), false), Err(StoreError::InvalidInput { .. })));
+    // deleted_conflicts needs an unpinned href
+    assert!(matches!(s.get_href(&pinned("a", &a1.rev), true), Err(StoreError::InvalidInput { .. })));
+    assert!(s.get_href("a", true).unwrap().deleted_conflicts.is_empty());
+    assert!(matches!(s.get_href("doc://", false), Err(StoreError::InvalidInput { .. })));
+
+    // a pinned tombstone is returned, not reported as Deleted
+    let tomb = s.delete("a", &a2.rev).unwrap();
+    assert!(matches!(s.get_href("a", false), Err(StoreError::Deleted { .. })));
+    assert!(s.get_href(&pinned("a", &tomb.rev), false).unwrap().deleted);
+}
+
+#[test]
 fn tags_follow_the_current_revision() {
     let mut s = store();
     let d1 = s.put(input(json!({"_id": "a", "title": "a", "tags": ["x", "y"]}))).unwrap();

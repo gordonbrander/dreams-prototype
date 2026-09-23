@@ -74,9 +74,10 @@ impl From<DocInput> for PutInput {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct GetParams {
-    /// Document id.
-    pub id: String,
+    /// `doc://<id>`, `doc://<id>?rev=<rev>`, or a bare id.
+    pub href: String,
     /// Also list tombstoned leaves other than the winner, as _deleted_conflicts.
+    /// Only for an unpinned href.
     #[serde(default)]
     pub deleted_conflicts: bool,
 }
@@ -194,15 +195,11 @@ impl Vault {
         self.lock()?.put(input.into()).map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "Get the current revision of a document by _id. When sync made concurrent edits, \
-        _conflicts lists the other live revisions; read them with get_rev and settle them with resolve_doc.")]
+    #[tool(description = "Get a document by href: doc://<id> or a bare id gives the current revision, \
+        doc://<id>?rev=<rev> gives that exact revision. When sync made concurrent edits, the current \
+        revision's _conflicts lists the other live revisions; read them with get_rev and settle them with resolve_doc.")]
     fn get_doc(&self, Parameters(p): Parameters<GetParams>) -> Result<Json<Doc>, McpError> {
-        let store = self.lock()?;
-        let mut doc = store.get(&p.id).map_err(to_mcp)?;
-        if p.deleted_conflicts {
-            doc.deleted_conflicts = store.deleted_conflicts(&doc.id, &doc.rev).map_err(to_mcp)?;
-        }
-        Ok(Json(doc))
+        self.lock()?.get_href(&p.href, p.deleted_conflicts).map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "List documents with conflicts, in id order: each with its winning _rev and the \
@@ -343,6 +340,15 @@ mod tests {
     fn doc_input_declares_body_as_an_object() {
         let schema = serde_json::to_value(schemars::schema_for!(DocInput)).unwrap();
         assert_eq!(schema["properties"]["body"]["type"], "object");
+    }
+
+    #[test]
+    fn get_params_take_an_href() {
+        let schema = serde_json::to_value(schemars::schema_for!(GetParams)).unwrap();
+        assert_eq!(schema["required"], json!(["href"]));
+        let p: GetParams = serde_json::from_value(json!({"href": "doc://a?rev=1-ab"})).unwrap();
+        assert_eq!(p.href, "doc://a?rev=1-ab");
+        assert!(!p.deleted_conflicts);
     }
 
     #[test]

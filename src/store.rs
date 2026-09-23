@@ -630,6 +630,32 @@ impl Store {
         }
     }
 
+    /// A document by reference: the current revision of `doc://<id>` (or a
+    /// bare id), or the exact revision of `doc://<id>?rev=<rev>`.
+    /// `deleted_conflicts` adds `_deleted_conflicts` to a current revision.
+    pub fn get_href(&self, href: &str, deleted_conflicts: bool) -> Result<Doc, StoreError> {
+        let r = DocRef::from_cli(href)?;
+        match r.rev {
+            None => {
+                let mut doc = self.get(&r.id)?;
+                if deleted_conflicts {
+                    doc.deleted_conflicts = self.deleted_conflicts(&doc.id, &doc.rev)?;
+                }
+                Ok(doc)
+            }
+            Some(_) if deleted_conflicts => {
+                Err(StoreError::invalid(format!("{href}: deleted_conflicts needs an unpinned reference")))
+            }
+            Some(rev) => {
+                let doc = get_rev_in(&self.conn, &rev)?;
+                if doc.id != r.id {
+                    return Err(StoreError::invalid(format!("revision {rev} belongs to {}, not {}", doc.id, r.id)));
+                }
+                Ok(doc)
+            }
+        }
+    }
+
     /// Tombstoned leaves of `id` other than `winner`: `_deleted_conflicts`.
     pub fn deleted_conflicts(&self, id: &str, winner: &str) -> Result<Vec<String>, StoreError> {
         other_leaves_in(&self.conn, id, winner, true)

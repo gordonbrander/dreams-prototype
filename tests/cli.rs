@@ -173,11 +173,14 @@ fn delete_revive_and_get_rev() {
     let err = sb.fails(&["doc", "put"], &tomb.to_string());
     assert_eq!(err["name"], "invalid_input");
 
-    // get --rev reads history, but only this document's
-    let old = sb.json(&["doc", "get", "a", "--rev", &rev1], "");
+    // a pinned href reads history, but only this document's
+    let old = sb.json(&["doc", "get", &format!("doc://a?rev={rev1}")], "");
     assert_eq!(old["title"], "one");
     let b = sb.json(&["doc", "get", "b"], "");
-    let err = sb.fails(&["doc", "get", "a", "--rev", b["_rev"].as_str().unwrap()], "");
+    assert_eq!(sb.json(&["doc", "get", "doc://b"], ""), b);
+    let err = sb.fails(&["doc", "get", &format!("doc://a?rev={}", b["_rev"].as_str().unwrap())], "");
+    assert_eq!(err["name"], "invalid_input");
+    let err = sb.fails(&["doc", "get", &format!("doc://a?rev={rev1}"), "--deleted-conflicts"], "");
     assert_eq!(err["name"], "invalid_input");
 
     let history: History = serde_json::from_value(sb.json(&["doc", "history", "a"], "")).unwrap();

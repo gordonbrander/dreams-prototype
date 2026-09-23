@@ -141,13 +141,11 @@ enum DocCmd {
         #[arg(long)]
         parent: Option<String>,
     },
-    /// Print the current revision, or one revision with --rev.
+    /// Print a document by id or doc:// reference. Pin a revision with doc://<id>?rev=<rev>.
     Get {
-        id: String,
-        #[arg(long)]
-        rev: Option<String>,
+        href: String,
         /// Also list tombstoned leaves other than the winner, as _deleted_conflicts.
-        #[arg(long, conflicts_with = "rev")]
+        #[arg(long)]
         deleted_conflicts: bool,
     },
     /// List documents with conflicts, in id order.
@@ -803,24 +801,8 @@ fn doc_cmd(store: &mut Store, db: &Path, cmd: DocCmd, json: bool, stdin: &mut dy
             let (doc, _) = upsert(store, &id, map, parent)?;
             print_doc(out, json, &doc)?;
         }
-        DocCmd::Get { id, rev, deleted_conflicts } => {
-            let doc = match rev {
-                None => {
-                    let mut doc = store.get(&id)?;
-                    if deleted_conflicts {
-                        doc.deleted_conflicts = store.deleted_conflicts(&doc.id, &doc.rev)?;
-                    }
-                    doc
-                }
-                Some(rev) => {
-                    let doc = store.get_rev(&rev)?;
-                    if doc.id != id {
-                        return Err(StoreError::invalid(format!("revision {rev} belongs to {}, not {id}", doc.id)).into());
-                    }
-                    doc
-                }
-            };
-            print_doc(out, json, &doc)?;
+        DocCmd::Get { href, deleted_conflicts } => {
+            print_doc(out, json, &store.get_href(&href, deleted_conflicts)?)?;
         }
         DocCmd::Delete { id, parent } => {
             let parent = match parent {
