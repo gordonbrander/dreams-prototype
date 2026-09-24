@@ -154,6 +154,7 @@ mod tests {
     fn a_seeded_vault_has_the_bookmark_skill() {
         let skill = find(&store(), "skill://bookmark/SKILL.md").unwrap().unwrap();
         assert!(skill.text.contains("tag `bookmark`"), "{}", skill.text);
+        assert!(skill.text.contains("bookmarks/<origin-slug>/<path-slug>.md"), "{}", skill.text);
     }
 
     #[test]
