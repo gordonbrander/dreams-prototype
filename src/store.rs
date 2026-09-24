@@ -703,12 +703,14 @@ impl Store {
         Ok(Page { docs, next })
     }
 
-    /// Every current document of one type, most recently modified first.
-    pub fn list_all(&self, type_id: &str) -> Result<Vec<Doc>, StoreError> {
+    /// Every current document, or every one of one type, most recently
+    /// modified first.
+    pub fn list_all(&self, type_id: Option<&str>) -> Result<Vec<Doc>, StoreError> {
         let mut docs = Vec::new();
         let mut before = None;
         loop {
-            let page = self.list(&ListQuery { type_id: Some(type_id.into()), tag: None, before, limit: Some(1000) })?;
+            let page =
+                self.list(&ListQuery { type_id: type_id.map(Into::into), tag: None, before, limit: Some(1000) })?;
             docs.extend(page.docs);
             match page.next {
                 Some(next) => before = Some(next),
@@ -747,6 +749,12 @@ impl Store {
         let results = rows.collect::<Result<Vec<_>, _>>()?;
         let last_seq = results.last().and_then(|d| d.seq).unwrap_or(since);
         Ok(Changes { results, last_seq })
+    }
+
+    /// The seq of the newest revision, or 0 for an empty vault. It moves on
+    /// every write: local, from another connection, or from sync.
+    pub fn last_seq(&self) -> Result<i64, StoreError> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(_local_seq), 0) FROM docs", [], |r| r.get(0))?)
     }
 
     /// Raw connection, for tests and maintenance.

@@ -532,7 +532,24 @@ dreams doc put - <<'EOF'
 EOF
 ```
 
-A prompt declares no arguments. The user's text comes with the user's own input. In Claude Code, the model sees `/dreams:daily buy milk` as the command and its full text. Claude Code splits declared arguments on whitespace and drops extra words, so a declared argument would lose text. There is no templating. When two documents have the same `name`, the most recently changed one wins. The server sends no `list_changed` notification, so reconnect the host to see a new prompt. The `schemas/prompt` document itself is read-only over MCP.
+A prompt declares no arguments. The user's text comes with the user's own input. In Claude Code, the model sees `/dreams:daily buy milk` as the command and its full text. Claude Code splits declared arguments on whitespace and drops extra words, so a declared argument would lose text. There is no templating. When two documents have the same `name`, the most recently changed one wins. The host learns about new prompts without a reconnect; see [Change notifications](#change-notifications). The `schemas/prompt` document itself is read-only over MCP.
+
+### Resources
+
+Every current document is a resource at `doc://<id>`. `resources/read` returns it as Markdown with YAML frontmatter, the same text as `dreams doc get --format md`. `doc://<id>?rev=<rev>` reads one revision. A deleted document is not found. `resources/list` lists every current document, most recently changed first, 1000 per page, with its `title`. The first page also lists the skills. The template `doc://{+id}` tells hosts that they can read any id, also ids that are not listed. In Claude Code, type `@` to find a document.
+
+### Change notifications
+
+A host that opens a `subscriptions/listen` stream gets notifications. While the stream is open, the server checks the vault once each second. Writes from any source count: MCP tools, the CLI, other processes, and sync.
+
+| Change | Notification |
+|---|---|
+| A prompt is added, removed, or edited | `notifications/prompts/list_changed` |
+| A document is created, deleted, or revived, or its `title` changes | `notifications/resources/list_changed` |
+| A skill is added or removed, or its name, description, or size changes | `notifications/resources/list_changed` |
+| A document or skill gets new content, and the host subscribed to its URI | `notifications/resources/updated` |
+
+A write that changes nothing a host sees sends nothing. A deleted resource sends only `list_changed`. A pinned `?rev=` URI never changes. Claude Code asks for the two `list_changed` notifications. It does not subscribe to single resources.
 
 ### Daily notes
 

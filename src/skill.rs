@@ -77,7 +77,12 @@ impl Skill {
 /// Every skill in the vault, most recently modified first, one per name.
 pub fn list(store: &Store) -> Result<Vec<Skill>, StoreError> {
     let mut seen = HashSet::new();
-    Ok(store.list_all(SKILL_TYPE)?.iter().filter_map(Skill::from_doc).filter(|s| seen.insert(s.name.clone())).collect())
+    Ok(store
+        .list_all(Some(SKILL_TYPE))?
+        .iter()
+        .filter_map(Skill::from_doc)
+        .filter(|s| seen.insert(s.name.clone()))
+        .collect())
 }
 
 /// The skill whose SKILL.md is at `uri`.

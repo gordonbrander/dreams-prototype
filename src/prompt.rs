@@ -48,7 +48,7 @@ impl Prompt {
 pub fn list(store: &Store) -> Result<Vec<Prompt>, StoreError> {
     let mut seen = HashSet::new();
     Ok(store
-        .list_all(PROMPT_TYPE)?
+        .list_all(Some(PROMPT_TYPE))?
         .iter()
         .filter_map(Prompt::from_doc)
         .filter(|p| seen.insert(p.name.clone()))

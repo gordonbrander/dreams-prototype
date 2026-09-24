@@ -1,20 +1,25 @@
-//! MCP server: one tool per document operation, skill documents
-//! through the Skills Extension, and prompt documents as MCP prompts. Stateless 2026-07-28 only.
+//! MCP server: one tool per document operation, every document as a
+//! `doc://` resource, skill documents through the Skills Extension, and
+//! prompt documents as MCP prompts. A `subscriptions/listen` stream gets
+//! change notifications. Stateless 2026-07-28 only.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::Duration;
 
 use rmcp::{
     ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
         CacheScope, CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, GetPromptRequestParams,
-        GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult,
-        PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
-        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, ServerConfig,
+        GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
+        ServerCapabilities, ServerConfig, SubscriptionFilter,
     },
-    service::RequestContext,
+    service::{RequestContext, SubscriptionContext, SubscriptionSendError},
     tool, tool_handler, tool_router,
     transport::stdio,
 };
@@ -22,8 +27,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::doc::{Doc, PutInput};
+use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::markdown;
 use crate::prompt;
 use crate::skill::{self, Skill};
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
@@ -254,7 +260,10 @@ impl ServerHandler for Vault {
         let capabilities = ServerCapabilities::builder()
             .enable_extensions_with(extensions)
             .enable_prompts()
+            .enable_prompts_list_changed()
             .enable_resources()
+            .enable_resources_list_changed()
+            .enable_resources_subscribe()
             .enable_tools()
             .build();
         ServerConfig::new(capabilities)
@@ -273,7 +282,10 @@ impl ServerHandler for Vault {
                  Skills are documents typed doc://schemas/skill with `name` (lowercase-hyphenated), \
                  `description`, and `content`; each is served as skill://<name>/SKILL.md. \
                  Prompts are documents typed doc://schemas/prompt with `name`, `description`, and `content`; \
-                 each is served as an MCP prompt with no arguments.",
+                 each is served as an MCP prompt with no arguments. Every current document is also a resource \
+                 at doc://<id>, as Markdown with YAML frontmatter; doc://<id>?rev=<rev> reads one revision. \
+                 subscriptions/listen gets prompts/list_changed, resources/list_changed, and \
+                 resources/updated for subscribed URIs.",
             )
     }
 
@@ -285,23 +297,46 @@ impl ServerHandler for Vault {
         self.skills_request(&request.method, request.params).map(CustomResult)
     }
 
-    /// Each skill's SKILL.md, for hosts without the Skills Extension.
+    /// The first page holds each skill's SKILL.md, for hosts without the
+    /// Skills Extension. Then every current document as `doc://<id>`, most
+    /// recently modified first, paged by the store's keyset cursor.
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
+        request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let skills = skill::list(&*self.lock()?).map_err(to_mcp)?;
-        let resources = skills
-            .into_iter()
-            .map(|s| {
+        let before = match request.and_then(|r| r.cursor) {
+            Some(c) => Some(c.parse::<i64>().map_err(|_| McpError::invalid_params(format!("bad cursor {c:?}"), None))?),
+            None => None,
+        };
+        let store = self.lock()?;
+        let mut resources = Vec::new();
+        if before.is_none() {
+            resources.extend(skill::list(&store).map_err(to_mcp)?.into_iter().map(|s| {
                 Resource::new(s.uri, s.name)
                     .with_description(s.description)
                     .with_mime_type("text/markdown")
                     .with_size(s.text.len() as u64)
-            })
-            .collect();
-        Ok(ListResourcesResult::with_all_items(resources).with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+            }));
+        }
+        let page =
+            store.list(&ListQuery { type_id: None, tag: None, before, limit: Some(RESOURCE_PAGE) }).map_err(to_mcp)?;
+        resources.extend(page.docs.iter().map(doc_resource));
+        let mut result =
+            ListResourcesResult::with_all_items(resources).with_ttl_ms(0).with_cache_scope(CacheScope::Private);
+        result.next_cursor = page.next.map(|n| n.to_string());
+        Ok(result)
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let template = ResourceTemplate::new("doc://{+id}", "document")
+            .with_description("Any document by id, including ones not listed. Add ?rev=<rev> for one revision.")
+            .with_mime_type("text/markdown");
+        Ok(ListResourceTemplatesResult::with_all_items(vec![template]))
     }
 
     async fn read_resource(
@@ -309,9 +344,49 @@ impl ServerHandler for Vault {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, McpError> {
-        let skill = self.skill(&request.uri)?;
-        let contents = ResourceContents::text(skill.text, skill.uri).with_mime_type("text/markdown");
+        let uri = request.uri;
+        let text = if uri.starts_with("skill://") {
+            self.skill(&uri)?.text
+        } else {
+            markdown::render(&read_doc(&*self.lock()?, &uri)?)
+        };
+        let contents = ResourceContents::text(text, uri).with_mime_type("text/markdown");
         Ok(ReadResourceResult::new(vec![contents]).with_ttl_ms(0).with_cache_scope(CacheScope::Private).into())
+    }
+
+    fn accepted_subscription_filter(&self, requested: &SubscriptionFilter) -> Option<SubscriptionFilter> {
+        Some(requested.supported_by(&self.get_info().capabilities))
+    }
+
+    /// Poll the vault while the stream is open, and send what changed.
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        let mut watch = Watch::new(&*self.lock()?).map_err(to_mcp)?;
+        let (accepted, sink) = (context.accepted(), context.sink());
+        let subscribed: HashSet<&str> = accepted.resource_subscriptions.iter().flatten().map(String::as_str).collect();
+        loop {
+            tokio::select! {
+                _ = context.cancelled() => return Ok(()),
+                _ = tokio::time::sleep(LISTEN_POLL) => {}
+            }
+            let changed = watch.update(&*self.lock()?).map_err(to_mcp)?;
+            let mut sent = Vec::new();
+            if changed.prompts && accepted.prompts_list_changed == Some(true) {
+                sent.push(sink.notify_prompt_list_changed().await);
+            }
+            if changed.resources && accepted.resources_list_changed == Some(true) {
+                sent.push(sink.notify_resource_list_changed().await);
+            }
+            for uri in changed.updated.into_iter().filter(|u| subscribed.contains(u.as_str())) {
+                sent.push(sink.notify_resource_updated(uri).await);
+            }
+            for result in sent {
+                match result {
+                    Ok(()) => {}
+                    Err(SubscriptionSendError::SubscriptionClosed) => return Ok(()),
+                    Err(e) => tracing::warn!(error = %e, "change notification not sent"),
+                }
+            }
+        }
     }
 
     /// Each prompt document, with no arguments: the user's text comes
@@ -342,6 +417,130 @@ impl ServerHandler for Vault {
     /// Accept only the stateless 2026-07-28 protocol.
     fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
         Cow::Borrowed(&[ProtocolVersion::V_2026_07_28])
+    }
+}
+
+/// Documents per `resources/list` page.
+const RESOURCE_PAGE: usize = 1000;
+
+/// How often a `subscriptions/listen` stream checks the vault.
+const LISTEN_POLL: Duration = Duration::from_secs(1);
+
+fn title_of(doc: &Doc) -> Option<String> {
+    doc.body.get("title").and_then(Value::as_str).map(str::to_string)
+}
+
+fn doc_uri(id: &str) -> String {
+    format!("{}{id}", DocRef::SCHEME)
+}
+
+/// A current document as a listed resource.
+fn doc_resource(doc: &Doc) -> Resource {
+    let resource = Resource::new(doc_uri(&doc.id), &doc.id).with_mime_type("text/markdown");
+    match title_of(doc) {
+        Some(title) => resource.with_title(title),
+        None => resource,
+    }
+}
+
+/// The document or revision at a `doc://` URI. A missing or deleted one,
+/// or any other URI, is not found.
+fn read_doc(store: &Store, uri: &str) -> Result<Doc, McpError> {
+    let not_found = || McpError::resource_not_found(format!("no resource at {uri}"), None);
+    DocRef::parse(uri).map_err(|_| not_found())?;
+    match store.get_href(uri, false) {
+        Ok(doc) if !doc.deleted => Ok(doc),
+        Ok(_) | Err(StoreError::NotFound { .. } | StoreError::Deleted { .. }) => Err(not_found()),
+        Err(e) => Err(to_mcp(e)),
+    }
+}
+
+/// What a listen stream last told the host about.
+struct Watch {
+    seq: i64,
+    /// Current documents: id → title.
+    docs: HashMap<String, Option<String>>,
+    prompts: Vec<prompt::Prompt>,
+    /// Skills by URI.
+    skills: BTreeMap<String, Skill>,
+}
+
+/// What changed since the last update.
+#[derive(Debug, Default, PartialEq)]
+struct Changed {
+    /// The prompt list changed.
+    prompts: bool,
+    /// The resource list changed: a resource came or went, or what the list
+    /// shows of one changed.
+    resources: bool,
+    /// Resources that still exist and have new content.
+    updated: Vec<String>,
+}
+
+impl Watch {
+    fn new(store: &Store) -> Result<Watch, StoreError> {
+        let seq = store.last_seq()?;
+        let docs = store.list_all(None)?.iter().map(|d| (d.id.clone(), title_of(d))).collect();
+        let skills = skill::list(store)?.into_iter().map(|s| (s.uri.clone(), s)).collect();
+        Ok(Watch { seq, docs, prompts: prompt::list(store)?, skills })
+    }
+
+    /// Read the vault again, and remember what it holds now.
+    fn update(&mut self, store: &Store) -> Result<Changed, StoreError> {
+        let mut changed = Changed::default();
+        if store.last_seq()? == self.seq {
+            return Ok(changed);
+        }
+
+        // Documents: only the ids in the changes feed. Each one's head is
+        // the conflict winner or a tombstone.
+        let mut ids = Vec::new();
+        let mut seen = HashSet::new();
+        loop {
+            let page = store.changes(self.seq, Some(1000))?;
+            if page.results.is_empty() {
+                break;
+            }
+            ids.extend(page.results.into_iter().map(|d| d.id).filter(|id| seen.insert(id.clone())));
+            self.seq = page.last_seq;
+        }
+        for id in ids {
+            let now = match store.get(&id) {
+                Ok(doc) => Some(title_of(&doc)),
+                Err(StoreError::NotFound { .. } | StoreError::Deleted { .. }) => None,
+                Err(e) => return Err(e),
+            };
+            let before = match &now {
+                Some(title) => self.docs.insert(id.clone(), title.clone()),
+                None => self.docs.remove(&id),
+            };
+            match (before, now) {
+                (Some(old), Some(new)) => {
+                    changed.resources |= old != new;
+                    changed.updated.push(doc_uri(&id));
+                }
+                (None, None) => {}
+                _ => changed.resources = true,
+            }
+        }
+
+        // Skills: the list shows name, description, and size.
+        let skills: BTreeMap<String, Skill> = skill::list(store)?.into_iter().map(|s| (s.uri.clone(), s)).collect();
+        let listed = |m: &BTreeMap<String, Skill>| -> Vec<(String, String, String, usize)> {
+            m.values().map(|s| (s.uri.clone(), s.name.clone(), s.description.clone(), s.text.len())).collect()
+        };
+        changed.resources |= listed(&self.skills) != listed(&skills);
+        for (uri, skill) in &skills {
+            if self.skills.get(uri).is_some_and(|old| old.text != skill.text) {
+                changed.updated.push(uri.clone());
+            }
+        }
+        self.skills = skills;
+
+        let prompts = prompt::list(store)?;
+        changed.prompts = prompts != self.prompts;
+        self.prompts = prompts;
+        Ok(changed)
     }
 }
 
@@ -384,5 +583,100 @@ mod tests {
         assert_eq!(input.id.as_deref(), Some("b1"));
         assert_eq!(input.body["tags"], json!(["a", "b"]));
         assert_eq!(input.body["properties"]["url"]["type"], "string");
+    }
+
+    fn store() -> Store {
+        let mut store = Store::open_in_memory().unwrap();
+        crate::seed::seed(&mut store).unwrap();
+        store
+    }
+
+    fn put(store: &mut Store, body: Value) -> Doc {
+        store.put(serde_json::from_value(body).unwrap()).unwrap()
+    }
+
+    fn changed(prompts: bool, resources: bool, updated: &[&str]) -> Changed {
+        Changed { prompts, resources, updated: updated.iter().map(|u| u.to_string()).collect() }
+    }
+
+    #[test]
+    fn watch_reports_nothing_without_a_write() {
+        let store = store();
+        let mut watch = Watch::new(&store).unwrap();
+        assert_eq!(watch.update(&store).unwrap(), Changed::default());
+    }
+
+    #[test]
+    fn watch_follows_a_document_through_its_life() {
+        let mut store = store();
+        let mut watch = Watch::new(&store).unwrap();
+
+        let v1 = put(&mut store, json!({"_id": "note", "title": "A", "content": "one"}));
+        assert_eq!(watch.update(&store).unwrap(), changed(false, true, &[]));
+
+        let v2 = put(&mut store, json!({"_id": "note", "_parent": v1.rev, "title": "A", "content": "two"}));
+        assert_eq!(watch.update(&store).unwrap(), changed(false, false, &["doc://note"]));
+
+        let v3 = put(&mut store, json!({"_id": "note", "_parent": v2.rev, "title": "B", "content": "two"}));
+        assert_eq!(watch.update(&store).unwrap(), changed(false, true, &["doc://note"]));
+
+        store.delete("note", &v3.rev).unwrap();
+        assert_eq!(watch.update(&store).unwrap(), changed(false, true, &[]));
+        assert_eq!(watch.update(&store).unwrap(), Changed::default());
+    }
+
+    #[test]
+    fn watch_names_a_document_once_per_update() {
+        let mut store = store();
+        let v1 = put(&mut store, json!({"_id": "note", "content": "one"}));
+        let mut watch = Watch::new(&store).unwrap();
+        let v2 = put(&mut store, json!({"_id": "note", "_parent": v1.rev, "content": "two"}));
+        put(&mut store, json!({"_id": "note", "_parent": v2.rev, "content": "three"}));
+        assert_eq!(watch.update(&store).unwrap(), changed(false, false, &["doc://note"]));
+    }
+
+    #[test]
+    fn watch_sees_prompts_and_skills() {
+        let mut store = store();
+        let mut watch = Watch::new(&store).unwrap();
+
+        put(
+            &mut store,
+            json!({"_id": "prompts/x", "_type": prompt::PROMPT_TYPE, "name": "x", "description": "d", "content": "c"}),
+        );
+        assert_eq!(watch.update(&store).unwrap(), changed(true, true, &[]));
+
+        let skill = store.get("skills/daily-note").unwrap();
+        let mut body = serde_json::to_value(&skill.body).unwrap();
+        body["content"] = json!("# Changed\n");
+        body["_id"] = json!("skills/daily-note");
+        body["_parent"] = json!(skill.rev);
+        body["_type"] = json!(skill::SKILL_TYPE);
+        put(&mut store, body);
+        assert_eq!(
+            watch.update(&store).unwrap(),
+            changed(false, true, &["doc://skills/daily-note", "skill://daily-note/SKILL.md"])
+        );
+    }
+
+    #[test]
+    fn read_doc_serves_current_and_pinned_revisions() {
+        let mut store = store();
+        let v1 = put(&mut store, json!({"_id": "note", "content": "one"}));
+        put(&mut store, json!({"_id": "note", "_parent": v1.rev, "content": "two"}));
+        assert!(markdown::render(&read_doc(&store, "doc://note").unwrap()).ends_with("---\ntwo"));
+        let pinned = read_doc(&store, &format!("doc://note?rev={}", v1.rev)).unwrap();
+        assert!(markdown::render(&pinned).ends_with("---\none"));
+    }
+
+    #[test]
+    fn read_doc_refuses_deleted_missing_and_foreign_uris() {
+        let mut store = store();
+        let v1 = put(&mut store, json!({"_id": "note", "content": "one"}));
+        store.delete("note", &v1.rev).unwrap();
+        for uri in ["doc://note", "doc://nope", "file:///etc/passwd", "note"] {
+            let err = read_doc(&store, uri).unwrap_err();
+            assert_eq!(err.code, ErrorCode::RESOURCE_NOT_FOUND, "{uri}");
+        }
     }
 }
