@@ -41,7 +41,7 @@ enum Command {
     Init,
     /// Seed the built-in schemas, runners, skills, and prompts. Writes each one whose current
     /// revision differs from the default, and revives deleted ones. Earlier revisions stay in history.
-    Seed,
+    RestoreDefaults,
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
     Serve,
     /// Print how a host starts `serve` on this vault, as the JSON of one `mcpServers` entry.
@@ -365,7 +365,7 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
                 writeln!(out, "seeded {id}")?;
             }
         }
-        Command::Seed => {
+        Command::RestoreDefaults => {
             let mut store = Store::open(&cli.db)?;
             let seeded = seed::seed(&mut store)?;
             if json {

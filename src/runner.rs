@@ -3,7 +3,7 @@
 //! spawned directly, never through a shell, with tokens replaced inside
 //! each element. Runner commands are code, so they enter only through the
 //! CLI: `serve` marks the type protected. The default runners are seeded
-//! by `seed`.
+//! by `seed::seed`.
 
 use std::path::{Path, PathBuf};
 

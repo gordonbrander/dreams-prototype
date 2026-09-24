@@ -376,7 +376,7 @@ fn add_test_runners(sb: &Sandbox) {
 fn seed_writes_the_built_in_documents_again() {
     let sb = Sandbox::new();
     sb.ok(&["init"], "");
-    assert_eq!(sb.ok(&["seed"], ""), "nothing to seed\n");
+    assert_eq!(sb.ok(&["restore-defaults"], ""), "nothing to seed\n");
     let skill = sb.file(
         "skill.json",
         r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#,
@@ -385,10 +385,10 @@ fn seed_writes_the_built_in_documents_again() {
     sb.ok(&["runner", "rm", "runners/pi"], "");
     // other commands leave the edit and the deletion as they are
     assert_eq!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"], "y");
-    let out = sb.ok(&["seed"], "");
+    let out = sb.ok(&["restore-defaults"], "");
     assert_eq!(out, "seeded runners/pi\nseeded skills/daily-note\n");
     assert!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"].as_str().unwrap().contains("daily"));
-    assert_eq!(sb.json(&["seed"], "")["seeded"], serde_json::json!([]));
+    assert_eq!(sb.json(&["restore-defaults"], "")["seeded"], serde_json::json!([]));
     // init also writes the defaults again
     sb.ok(&["doc", "update", "skills/daily-note", &skill], "");
     assert!(sb.ok(&["init"], "").contains("seeded skills/daily-note\n"));

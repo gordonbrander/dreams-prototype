@@ -1,7 +1,7 @@
 //! Seeding: the built-in documents every vault starts with. `seed` writes
 //! each default whose current revision differs from it, as the next
 //! revision, and revives deleted ones. Earlier revisions stay in history.
-//! The CLI seeds on `init`, on `seed`, and when it creates a database.
+//! The CLI seeds on `init`, on `restore-defaults`, and when it creates a database.
 
 use serde_json::{Value, json};
 

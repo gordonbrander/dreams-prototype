@@ -93,7 +93,7 @@ Filters take either form. `--type doc://schemas/note` matches every pinned revis
 dreams [--db PATH] [--json] <command>
 
   init                                            create the database if needed, and seed
-  seed                                            write the built-in documents again
+  restore-defaults                                write the built-in documents again
   serve                                           serve MCP over stdio
   mcp-json                                        print the MCP server entry for this vault
 
@@ -553,7 +553,7 @@ A write that changes nothing a host sees sends nothing. A deleted resource sends
 
 ### Daily notes
 
-Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams seed` replace the edit with the default.
+Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
 
 Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
 
@@ -567,7 +567,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
 - Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, the three default runners, the `skills/daily-note` skill, and the `prompts/daily` and `prompts/intention` prompts.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
-- `dreams init` and `dreams seed` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams seed` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
+- `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
 
