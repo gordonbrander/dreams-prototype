@@ -198,7 +198,9 @@ pub fn uninstall(db: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
         let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{label}")]).output();
         match std::fs::remove_file(&plist) {
             Ok(()) => writeln!(out, "removed {label}").map_err(io)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => writeln!(out, "{label} was not installed").map_err(io)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                writeln!(out, "{label} was not installed").map_err(io)?
+            }
             Err(e) => return Err(io(e)),
         }
     } else if cfg!(target_os = "linux") {
@@ -210,7 +212,9 @@ pub fn uninstall(db: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
                 let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
                 writeln!(out, "removed {name}").map_err(io)?
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => writeln!(out, "{name} was not installed").map_err(io)?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                writeln!(out, "{name} was not installed").map_err(io)?
+            }
             Err(e) => return Err(io(e)),
         }
     } else {

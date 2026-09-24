@@ -29,10 +29,7 @@ pub enum StoreError {
     },
 
     #[error("schema validation failed against {schema}: {}", summarize(errors))]
-    Validation {
-        schema: String,
-        errors: Vec<FieldError>,
-    },
+    Validation { schema: String, errors: Vec<FieldError> },
 
     #[error("schema not found: {type_id}")]
     UnknownType {
@@ -84,24 +81,18 @@ impl StoreError {
     }
 
     pub fn invalid(message: impl Into<String>) -> Self {
-        StoreError::InvalidInput {
-            message: message.into(),
-        }
+        StoreError::InvalidInput { message: message.into() }
     }
 }
 
 impl From<rusqlite::Error> for StoreError {
     fn from(e: rusqlite::Error) -> Self {
-        StoreError::Sqlite {
-            message: e.to_string(),
-        }
+        StoreError::Sqlite { message: e.to_string() }
     }
 }
 
 impl From<serde_json::Error> for StoreError {
     fn from(e: serde_json::Error) -> Self {
-        StoreError::InvalidInput {
-            message: format!("invalid JSON: {e}"),
-        }
+        StoreError::InvalidInput { message: format!("invalid JSON: {e}") }
     }
 }

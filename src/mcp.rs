@@ -1,20 +1,21 @@
-//! MCP server: one tool per document operation, and skill documents
-//! through the Skills Extension. Stateless 2026-07-28 only.
+//! MCP server: one tool per document operation, skill documents
+//! through the Skills Extension, and prompt documents as MCP prompts. Stateless 2026-07-28 only.
 
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rmcp::{
-    ErrorData as McpError, Json, ServerHandler, ServiceExt,
+    ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CacheScope, CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, Implementation, ListResourcesResult,
-        PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
-        ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerConfig,
+        CacheScope, CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, GetPromptRequestParams,
+        GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourcesResult,
+        PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, Role, ServerCapabilities, ServerConfig,
     },
     service::RequestContext,
-    tool, tool_handler, tool_router, RoleServer,
+    tool, tool_handler, tool_router,
     transport::stdio,
 };
 use schemars::JsonSchema;
@@ -23,6 +24,7 @@ use serde_json::{Map, Value, json};
 
 use crate::doc::{Doc, PutInput};
 use crate::error::StoreError;
+use crate::prompt;
 use crate::skill::{self, Skill};
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
 
@@ -146,16 +148,11 @@ pub struct Vault {
 #[tool_router]
 impl Vault {
     pub fn new(store: Store) -> Self {
-        Self {
-            store: Arc::new(Mutex::new(store)),
-            tool_router: Self::tool_router(),
-        }
+        Self { store: Arc::new(Mutex::new(store)), tool_router: Self::tool_router() }
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Store>, McpError> {
-        self.store
-            .lock()
-            .map_err(|e| McpError::internal_error(format!("store lock poisoned: {e}"), None))
+        self.store.lock().map_err(|e| McpError::internal_error(format!("store lock poisoned: {e}"), None))
     }
 
     fn skill(&self, uri: &str) -> Result<Skill, McpError> {
@@ -246,10 +243,7 @@ impl Vault {
     #[tool(description = "Change feed: every revision (including tombstones) committed after `since`, in order. \
         Each result carries _seq; continue from last_seq.")]
     fn changes(&self, Parameters(p): Parameters<ChangesParams>) -> Result<Json<Changes>, McpError> {
-        self.lock()?
-            .changes(p.since.unwrap_or(0), p.limit)
-            .map(Json)
-            .map_err(to_mcp)
+        self.lock()?.changes(p.since.unwrap_or(0), p.limit).map(Json).map_err(to_mcp)
     }
 }
 
@@ -259,6 +253,7 @@ impl ServerHandler for Vault {
         let extensions = ExtensionCapabilities::from([(skill::EXTENSION_ID.to_string(), Default::default())]);
         let capabilities = ServerCapabilities::builder()
             .enable_extensions_with(extensions)
+            .enable_prompts()
             .enable_resources()
             .enable_tools()
             .build();
@@ -276,7 +271,9 @@ impl ServerHandler for Vault {
                  ids} fires only on matching changes, `prompt` is the text the agent receives. Each firing writes a \
                  document typed doc://schemas/run. Runner, run, and seeded schema documents are read-only over MCP. \
                  Skills are documents typed doc://schemas/skill with `name` (lowercase-hyphenated), \
-                 `description`, and `content`; each is served as skill://<name>/SKILL.md.",
+                 `description`, and `content`; each is served as skill://<name>/SKILL.md. \
+                 Prompts are documents typed doc://schemas/prompt with `name`, `description`, and `content`; \
+                 each is served as an MCP prompt with no arguments.",
             )
     }
 
@@ -304,9 +301,7 @@ impl ServerHandler for Vault {
                     .with_size(s.text.len() as u64)
             })
             .collect();
-        Ok(ListResourcesResult::with_all_items(resources)
-            .with_ttl_ms(0)
-            .with_cache_scope(CacheScope::Private))
+        Ok(ListResourcesResult::with_all_items(resources).with_ttl_ms(0).with_cache_scope(CacheScope::Private))
     }
 
     async fn read_resource(
@@ -316,9 +311,31 @@ impl ServerHandler for Vault {
     ) -> Result<ReadResourceResponse, McpError> {
         let skill = self.skill(&request.uri)?;
         let contents = ResourceContents::text(skill.text, skill.uri).with_mime_type("text/markdown");
-        Ok(ReadResourceResult::new(vec![contents])
-            .with_ttl_ms(0)
-            .with_cache_scope(CacheScope::Private)
+        Ok(ReadResourceResult::new(vec![contents]).with_ttl_ms(0).with_cache_scope(CacheScope::Private).into())
+    }
+
+    /// Each prompt document, with no arguments: the user's text comes
+    /// with their own input, not through the prompt.
+    async fn list_prompts(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        let prompts = prompt::list(&*self.lock()?).map_err(to_mcp)?;
+        let prompts = prompts.into_iter().map(|p| Prompt::new(p.name, Some(p.description), None)).collect();
+        Ok(ListPromptsResult::with_all_items(prompts).with_ttl_ms(0).with_cache_scope(CacheScope::Private))
+    }
+
+    async fn get_prompt(
+        &self,
+        request: GetPromptRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResponse, McpError> {
+        let p = prompt::find(&*self.lock()?, &request.name)
+            .map_err(to_mcp)?
+            .ok_or_else(|| McpError::invalid_params(format!("no prompt named {}", request.name), None))?;
+        Ok(GetPromptResult::new(vec![PromptMessage::new_text(Role::User, p.content)])
+            .with_description(p.description)
             .into())
     }
 

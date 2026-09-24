@@ -1,5 +1,5 @@
-use serde_json::{Value, json};
 use dreams::{ListQuery, PutInput, Store, StoreError};
+use serde_json::{Value, json};
 
 fn store() -> Store {
     Store::open_in_memory().unwrap()
@@ -49,17 +49,13 @@ fn genesis_update_and_conflicts() {
     assert_eq!(d1.parent, None);
     assert_eq!(d1.body["title"], "one");
 
-    let d2 = s
-        .put(input(json!({"_id": "a", "_parent": d1.rev, "title": "two"})))
-        .unwrap();
+    let d2 = s.put(input(json!({"_id": "a", "_parent": d1.rev, "title": "two"}))).unwrap();
     assert!(d2.rev.starts_with("2-"));
     assert_eq!(d2.parent.as_deref(), Some(d1.rev.as_str()));
     assert_eq!(s.get("a").unwrap().rev, d2.rev);
 
     // stale parent
-    let err = s
-        .put(input(json!({"_id": "a", "_parent": d1.rev, "title": "three"})))
-        .unwrap_err();
+    let err = s.put(input(json!({"_id": "a", "_parent": d1.rev, "title": "three"}))).unwrap_err();
     match err {
         StoreError::Conflict { id, parent, leaves, .. } => {
             assert_eq!(id, "a");
@@ -69,10 +65,7 @@ fn genesis_update_and_conflicts() {
         other => panic!("{other:?}"),
     }
     // genesis on an existing doc
-    assert!(matches!(
-        s.put(input(json!({"_id": "a", "title": "four"}))),
-        Err(StoreError::Conflict { .. })
-    ));
+    assert!(matches!(s.put(input(json!({"_id": "a", "title": "four"}))), Err(StoreError::Conflict { .. })));
     // parent that never existed
     assert!(matches!(
         s.put(input(json!({"_id": "a", "_parent": "2-deadbeef", "title": "x"}))),
@@ -96,10 +89,7 @@ fn idempotent_replay() {
 
     let d2 = s.put(input(json!({"_id": "a", "_parent": d1.rev, "title": "two"}))).unwrap();
     // replaying the old genesis after an update is a conflict, not a silent stale return
-    assert!(matches!(
-        s.put(input(json!({"_id": "a", "title": "one", "n": 1}))),
-        Err(StoreError::Conflict { .. })
-    ));
+    assert!(matches!(s.put(input(json!({"_id": "a", "title": "one", "n": 1}))), Err(StoreError::Conflict { .. })));
     assert_eq!(s.put(input(json!({"_id": "a", "_parent": d1.rev, "title": "two"}))).unwrap().rev, d2.rev);
 }
 
@@ -115,9 +105,7 @@ fn generated_ids_are_uuid_v7() {
 fn delete_tombstone_and_undelete() {
     let mut s = store();
     let schema = put_note_schema(&mut s);
-    let d1 = s
-        .put(input(json!({"_id": "a", "_type": NOTE, "title": "t", "tags": ["x"]})))
-        .unwrap();
+    let d1 = s.put(input(json!({"_id": "a", "_type": NOTE, "title": "t", "tags": ["x"]}))).unwrap();
     assert_eq!(d1.type_id.as_deref(), Some(pinned("schemas/note", &schema.rev).as_str()));
     // wrong parent
     assert!(matches!(s.delete("a", "1-nope"), Err(StoreError::NotFound { .. })));
@@ -139,9 +127,8 @@ fn delete_tombstone_and_undelete() {
     assert!(s.list(&ListQuery { tag: Some("x".into()), ..Default::default() }).unwrap().docs.is_empty());
     assert!(s.search("t", &ListQuery::default()).unwrap().docs.is_empty());
 
-    let back = s
-        .put(input(json!({"_id": "a", "_parent": tomb.rev, "_type": NOTE, "title": "back", "tags": ["x"]})))
-        .unwrap();
+    let back =
+        s.put(input(json!({"_id": "a", "_parent": tomb.rev, "_type": NOTE, "title": "back", "tags": ["x"]}))).unwrap();
     assert!(back.rev.starts_with("3-"));
     assert_eq!(s.get("a").unwrap().body["title"], "back");
     assert_eq!(ids(&s.list(&ListQuery { tag: Some("x".into()), ..Default::default() }).unwrap()), vec!["a"]);
@@ -178,7 +165,12 @@ fn tags_follow_the_current_revision() {
     let mut s = store();
     let d1 = s.put(input(json!({"_id": "a", "title": "a", "tags": ["x", "y"]}))).unwrap();
     s.put(input(json!({"_id": "b", "title": "b", "tags": ["x"]}))).unwrap();
-    let by = |s: &Store, tag: &str| ids(&s.list(&ListQuery { tag: Some(tag.into()), ..Default::default() }).unwrap()).into_iter().map(String::from).collect::<Vec<_>>();
+    let by = |s: &Store, tag: &str| {
+        ids(&s.list(&ListQuery { tag: Some(tag.into()), ..Default::default() }).unwrap())
+            .into_iter()
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
     assert_eq!(by(&s, "x"), vec!["b", "a"]); // most recently modified first
     assert_eq!(by(&s, "y"), vec!["a"]);
 
@@ -211,10 +203,7 @@ fn input_validation() {
 #[test]
 fn schema_validation_on_write() {
     let mut s = store();
-    assert!(matches!(
-        s.put(input(json!({"_type": NOTE, "title": "x"}))),
-        Err(StoreError::UnknownType { .. })
-    ));
+    assert!(matches!(s.put(input(json!({"_type": NOTE, "title": "x"}))), Err(StoreError::UnknownType { .. })));
     assert!(matches!(s.put(input(json!({"_type": "note/v1", "title": "x"}))), Err(StoreError::InvalidInput { .. })));
     let schema = put_note_schema(&mut s);
     let pin = pinned("schemas/note", &schema.rev);
@@ -256,7 +245,10 @@ fn schema_validation_on_write() {
     // a deleted schema cannot be referenced unpinned, but its old pin still validates
     let bad = s.get("schemas/bad").unwrap();
     s.delete("schemas/bad", &bad.rev).unwrap();
-    assert!(matches!(s.put(input(json!({"_type": "doc://schemas/bad", "title": "x"}))), Err(StoreError::Deleted { .. })));
+    assert!(matches!(
+        s.put(input(json!({"_type": "doc://schemas/bad", "title": "x"}))),
+        Err(StoreError::Deleted { .. })
+    ));
 }
 
 #[test]
@@ -285,7 +277,10 @@ fn pinning_makes_replay_a_no_op() {
     let old_pin = pinned("schemas/note", &schema.rev);
     let short = s.put(input(json!({"_id": "m", "_type": old_pin, "title": "x"}))).unwrap();
     assert_eq!(short.type_id.as_deref(), Some(old_pin.as_str()));
-    assert!(matches!(s.put(input(json!({"_id": "m2", "_type": NOTE, "title": "x"}))), Err(StoreError::Validation { .. })));
+    assert!(matches!(
+        s.put(input(json!({"_id": "m2", "_type": NOTE, "title": "x"}))),
+        Err(StoreError::Validation { .. })
+    ));
 }
 
 /// Write the next revision of `schemas/note` with one edit applied to the note schema body.
@@ -340,9 +335,7 @@ fn changes_feed() {
 #[test]
 fn search_sees_only_current_revisions() {
     let mut s = store();
-    let d1 = s
-        .put(input(json!({"_id": "a", "title": "Alpha", "content": "first draft", "tags": ["blue"]})))
-        .unwrap();
+    let d1 = s.put(input(json!({"_id": "a", "title": "Alpha", "content": "first draft", "tags": ["blue"]}))).unwrap();
     s.put(input(json!({"_id": "b", "title": "Beta", "content": "unrelated"}))).unwrap();
     assert_eq!(ids(&s.search("first", &ListQuery::default()).unwrap()), vec!["a"]);
     assert_eq!(ids(&s.search("blue", &ListQuery::default()).unwrap()), vec!["a"]);
@@ -391,9 +384,10 @@ fn docs_rows_are_immutable() {
     assert!(conn.execute("UPDATE docs SET _type = 'x' WHERE _id = 'a'", []).is_err());
     assert!(conn.execute("DELETE FROM docs WHERE _id = 'a'", []).is_err());
     // rev-chain trigger rejects a forged genesis at gen 2
-    assert!(conn
-        .execute("INSERT INTO docs(_rev,_id,_parent,_type,_deleted,body) VALUES ('2-ff','z',NULL,NULL,0,'{}')", [])
-        .is_err());
+    assert!(
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,_type,_deleted,body) VALUES ('2-ff','z',NULL,NULL,0,'{}')", [])
+            .is_err()
+    );
 }
 
 #[test]
@@ -467,9 +461,7 @@ fn put_if_writes_only_when_the_check_passes() {
 fn protected_types_are_read_only() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    let doc = s
-        .put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]})))
-        .unwrap();
+    let doc = s.put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
     s.set_protected(PROTECTED_TYPES, PROTECTED_IDS);
     assert!(matches!(
         s.put(input(json!({"_id": "runners/y", "_type": RUNNER_TYPE, "argv": ["cat"]}))),
@@ -515,10 +507,14 @@ fn seed_is_idempotent_and_respects_deletions() {
             "schemas/run",
             "schemas/runner",
             "schemas/skill",
+            "schemas/prompt",
+            "schemas/daily",
             "runners/claude",
             "runners/codex",
             "runners/pi",
             "skills/daily-note",
+            "prompts/daily",
+            "prompts/intention",
         ]
     );
     assert!(seed::seed(&mut s).unwrap().is_empty());
@@ -558,11 +554,12 @@ fn restore_rewrites_edited_and_deleted_defaults() {
 
     // a fresh vault is seeded and reports what it wrote
     let mut fresh = store();
-    assert_eq!(seed::restore(&mut fresh).unwrap().len(), 8);
+    assert_eq!(seed::restore(&mut fresh).unwrap().len(), 12);
 }
 
 fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams::Doc {
-    let mut body = json!({"_id": id, "_type": TASK_TYPE, "runner": "doc://runners/cat", "every": every, "prompt": "go"});
+    let mut body =
+        json!({"_id": id, "_type": TASK_TYPE, "runner": "doc://runners/cat", "every": every, "prompt": "go"});
     if let Some(w) = when {
         body["when"] = w;
     }
@@ -572,8 +569,9 @@ fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams
 #[test]
 fn evaluate_time_and_change_rules() {
     let mut s = store();
-    seed::seed_schemas(&mut s).unwrap(); // seqs 1..=4
-    let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
+    seed::seed_schemas(&mut s).unwrap(); // seqs 1..=6
+    let cat =
+        s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
     let plain = add_task(&mut s, "tasks/plain", "1h", None);
     let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));
     let created = watch.created_at.clone();
@@ -584,8 +582,8 @@ fn evaluate_time_and_change_rules() {
     let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
     let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
     assert!(!e_plain.time_due && !e_plain.due);
-    assert_eq!(e_watch.cursor, 7);
-    assert_eq!(e_watch.head, 7);
+    assert_eq!(e_watch.cursor, 9);
+    assert_eq!(e_watch.head, 9);
     assert!(e_watch.changes.is_empty());
     assert_eq!(e_watch.runner.as_ref().unwrap().rev, cat.rev);
 
@@ -607,7 +605,7 @@ fn evaluate_time_and_change_rules() {
     let ids: Vec<&str> = e_watch.changes.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["n1"]);
     assert!(e_watch.due);
-    assert_eq!(e_watch.head, 10);
+    assert_eq!(e_watch.head, 12);
 
     // a tombstone of a tagged document counts as a change to that tag
     s.delete("n1", &note.rev).unwrap();
@@ -617,13 +615,13 @@ fn evaluate_time_and_change_rules() {
 
     // a claim marks the task running until its timeout, then it is stale
     let run = task::claim(&mut s, &e_watch, &later).unwrap().unwrap();
-    assert_eq!(run.body["seq"], 11);
+    assert_eq!(run.body["seq"], 13);
     assert_eq!(run.body["tags"], json!(["tasks/watch"]));
     assert_eq!(run.body["runner"], pinned("runners/cat", &cat.rev));
     assert_eq!(run.type_path(), Some(RUN_TYPE));
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
     assert!(e_watch.running && !e_watch.due);
-    assert_eq!(e_watch.cursor, 11);
+    assert_eq!(e_watch.cursor, 13);
     assert_eq!(e_watch.last_run.as_deref(), Some(run.id.as_str()));
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 3600), Some("tasks/watch")).unwrap().remove(0);
     assert!(!e_watch.running);
@@ -639,7 +637,8 @@ fn evaluate_time_and_change_rules() {
     // disabled tasks are skipped by the full evaluation but visible by id
     let plain_doc = s.get("tasks/plain").unwrap();
     s.put(input(json!({"_id": "tasks/plain", "_parent": plain_doc.rev, "_type": TASK_TYPE,
-        "runner": "doc://runners/cat", "every": "1h", "prompt": "go", "enabled": false}))).unwrap();
+        "runner": "doc://runners/cat", "every": "1h", "prompt": "go", "enabled": false})))
+        .unwrap();
     assert!(task::evaluate(&s, &later, None).unwrap().iter().all(|e| e.task.id != "tasks/plain"));
     let e = task::evaluate(&s, &later, Some("tasks/plain")).unwrap().remove(0);
     assert!(!e.due && !e.parsed.enabled);

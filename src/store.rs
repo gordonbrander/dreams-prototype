@@ -115,9 +115,8 @@ fn clamp_limit(limit: Option<usize>) -> usize {
 
 pub(crate) fn row_to_doc(row: &Row<'_>, with_seq: bool) -> rusqlite::Result<Doc> {
     let body_text: String = row.get(6)?;
-    let body: Map<String, Value> = serde_json::from_str(&body_text).map_err(|e| {
-        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e))
-    })?;
+    let body: Map<String, Value> = serde_json::from_str(&body_text)
+        .map_err(|e| rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, Box::new(e)))?;
     Ok(Doc {
         seq: if with_seq { Some(row.get(0)?) } else { None },
         rev: row.get(1)?,
@@ -189,13 +188,7 @@ fn rev_exists_in(conn: &Connection, rev_id: &str) -> Result<bool, StoreError> {
 /// A tombstone draft on `parent`. It keeps the parent's pinned type.
 fn tombstone_draft(parent: &Doc) -> Result<Draft, StoreError> {
     let type_ref = parent.type_id.as_deref().map(DocRef::parse).transpose()?;
-    Ok(Draft {
-        id: parent.id.clone(),
-        parent: Some(parent.rev.clone()),
-        type_ref,
-        deleted: true,
-        body: Map::new(),
-    })
+    Ok(Draft { id: parent.id.clone(), parent: Some(parent.rev.clone()), type_ref, deleted: true, body: Map::new() })
 }
 
 /// What happened to one replicated revision.
@@ -352,15 +345,15 @@ fn put_draft_in(
             (None, [leaf]) => get_rev_in(tx, leaf)
                 .ok()
                 .filter(|d| !d.deleted && d.body == draft.body && d.type_id != type_id)
-                .map(|d| format!("same body, but the schema moved since {leaf}; update with _parent = {leaf} to re-pin it", leaf = d.rev)),
+                .map(|d| {
+                    format!(
+                        "same body, but the schema moved since {leaf}; update with _parent = {leaf} to re-pin it",
+                        leaf = d.rev
+                    )
+                }),
             _ => None,
         };
-        return Err(StoreError::Conflict {
-            id: draft.id,
-            parent: draft.parent,
-            leaves,
-            hint,
-        });
+        return Err(StoreError::Conflict { id: draft.id, parent: draft.parent, leaves, hint });
     }
 
     tx.execute(
@@ -389,13 +382,7 @@ impl Store {
     }
 
     fn new(conn: Connection) -> Store {
-        Store {
-            conn,
-            validators: HashMap::new(),
-            actor: None,
-            protected_types: Vec::new(),
-            protected_ids: Vec::new(),
-        }
+        Store { conn, validators: HashMap::new(), actor: None, protected_types: Vec::new(), protected_ids: Vec::new() }
     }
 
     /// Name the writer of every revision this store creates from now on.
@@ -467,7 +454,12 @@ impl Store {
     /// conflicts must be exactly those revisions, so a leaf that arrived after
     /// the caller read the document is never discarded unseen. Returns the
     /// new current revision.
-    pub fn resolve(&mut self, id: &str, merged: Option<PutInput>, expected: Option<&[String]>) -> Result<Doc, StoreError> {
+    pub fn resolve(
+        &mut self,
+        id: &str,
+        merged: Option<PutInput>,
+        expected: Option<&[String]>,
+    ) -> Result<Doc, StoreError> {
         let Store { conn, validators, actor, protected_types, protected_ids } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head = head_in(&tx, id)?.ok_or_else(|| StoreError::NotFound { id: id.to_string() })?;
@@ -596,10 +588,7 @@ impl Store {
 
     /// The revision committed at change-feed position `seq`.
     pub fn rev_at_seq(&self, seq: i64) -> Result<Option<String>, StoreError> {
-        Ok(self
-            .conn
-            .query_row("SELECT _rev FROM docs WHERE _local_seq = ?1", [seq], |r| r.get(0))
-            .optional()?)
+        Ok(self.conn.query_row("SELECT _rev FROM docs WHERE _local_seq = ?1", [seq], |r| r.get(0)).optional()?)
     }
 
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
@@ -712,6 +701,20 @@ impl Store {
             d.seq = None;
         }
         Ok(Page { docs, next })
+    }
+
+    /// Every current document of one type, most recently modified first.
+    pub fn list_all(&self, type_id: &str) -> Result<Vec<Doc>, StoreError> {
+        let mut docs = Vec::new();
+        let mut before = None;
+        loop {
+            let page = self.list(&ListQuery { type_id: Some(type_id.into()), tag: None, before, limit: Some(1000) })?;
+            docs.extend(page.docs);
+            match page.next {
+                Some(next) => before = Some(next),
+                None => return Ok(docs),
+            }
+        }
     }
 
     /// Full-text search over title, content and tags of current documents.

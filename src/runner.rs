@@ -21,7 +21,8 @@ pub const RUNNER_TYPE: &str = "doc://schemas/runner";
 pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
 
 /// Seeded schema documents that MCP clients may not change.
-pub const PROTECTED_IDS: &[&str] = &["schemas/task", "schemas/run", "schemas/runner", "schemas/skill"];
+pub const PROTECTED_IDS: &[&str] =
+    &["schemas/task", "schemas/run", "schemas/runner", "schemas/skill", "schemas/prompt", "schemas/daily"];
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
 
@@ -67,12 +68,7 @@ impl Runner {
             return Err(StoreError::invalid(format!("runner {} has an empty argv", doc.id)));
         }
         let timeout = doc.body.get("timeout").and_then(Value::as_str).unwrap_or(DEFAULT_TIMEOUT);
-        Ok(Runner {
-            id: doc.id.clone(),
-            rev: doc.rev.clone(),
-            argv,
-            timeout_secs: parse_duration(timeout)?,
-        })
+        Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
     }
 
     /// Load by `doc://` reference: the head, or one pinned revision.
@@ -101,7 +97,8 @@ impl Runner {
 /// out, or exits non-zero is an error.
 pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Result<String, StoreError> {
     let scratch = std::env::temp_dir().join(format!("dreams-{}", crate::doc::new_id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
     let ctx = Context {
         db: db.to_path_buf(),
         task: name.to_string(),
@@ -110,7 +107,8 @@ pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Res
         out: scratch.join("last-message"),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
-    let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let cwd =
+        db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
     let timeout = std::time::Duration::from_secs(runner.timeout_secs);
     let outcome = task::spawn(&ctx.resolve(&runner.argv), &ctx.env(), &cwd, prompt, timeout).await;
@@ -156,9 +154,7 @@ impl Context {
     pub fn resolve(&self, argv: &[String]) -> Vec<String> {
         let pairs = self.pairs();
         argv.iter()
-            .map(|arg| {
-                pairs.iter().fold(arg.clone(), |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value))
-            })
+            .map(|arg| pairs.iter().fold(arg.clone(), |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value)))
             .collect()
     }
 
@@ -183,7 +179,8 @@ impl Context {
 
     /// An MCP config file body for hosts that take one.
     pub fn mcp_config(&self) -> String {
-        json!({ "mcpServers": { "dreams": crate::mcp::server_entry(&self.exe, &self.db, Some(&self.task)) } }).to_string()
+        json!({ "mcpServers": { "dreams": crate::mcp::server_entry(&self.exe, &self.db, Some(&self.task)) } })
+            .to_string()
     }
 }
 
@@ -204,10 +201,8 @@ mod tests {
 
     #[test]
     fn tokens_are_replaced_per_element() {
-        let argv: Vec<String> = ["x", "--db={db}", "{task}:{run}", "{missing}", "a {out} b"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
+        let argv: Vec<String> =
+            ["x", "--db={db}", "{task}:{run}", "{missing}", "a {out} b"].iter().map(|s| s.to_string()).collect();
         assert_eq!(
             ctx().resolve(&argv),
             ["x", "--db=/v/vault.db", "tasks/t:runs/tasks/t/1", "{missing}", "a /tmp/r/out b"]

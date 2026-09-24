@@ -17,18 +17,14 @@ pub fn parse(rev: &str) -> Result<Rev, StoreError> {
     let (generation, hash) = rev
         .split_once('-')
         .ok_or_else(|| StoreError::invalid(format!("malformed _rev {rev:?}: expected <generation>-<hash>")))?;
-    let generation: u64 = generation
-        .parse()
-        .ok()
-        .filter(|g| *g >= 1)
-        .ok_or_else(|| StoreError::invalid(format!("malformed _rev {rev:?}: generation must be a positive integer")))?;
+    let generation: u64 =
+        generation.parse().ok().filter(|g| *g >= 1).ok_or_else(|| {
+            StoreError::invalid(format!("malformed _rev {rev:?}: generation must be a positive integer"))
+        })?;
     if hash.is_empty() || !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(StoreError::invalid(format!("malformed _rev {rev:?}: hash must be hex")));
     }
-    Ok(Rev {
-        generation,
-        hash: hash.to_string(),
-    })
+    Ok(Rev { generation, hash: hash.to_string() })
 }
 
 pub fn format(generation: u64, hash: &str) -> String {
@@ -84,13 +80,7 @@ fn hex(bytes: &[u8]) -> String {
 
 /// Content hash of a revision. Covers `_id`, `_parent`, `_type`, `_deleted`
 /// and the user body. Absent `_parent` / `_type` are written as `null`.
-pub fn hash(
-    id: &str,
-    parent: Option<&str>,
-    type_id: Option<&str>,
-    deleted: bool,
-    body: &Map<String, Value>,
-) -> String {
+pub fn hash(id: &str, parent: Option<&str>, type_id: Option<&str>, deleted: bool, body: &Map<String, Value>) -> String {
     let mut preimage = body.clone();
     preimage.insert("_id".into(), Value::String(id.to_string()));
     preimage.insert("_parent".into(), parent.map(|p| Value::String(p.to_string())).unwrap_or(Value::Null));

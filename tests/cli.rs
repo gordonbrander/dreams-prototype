@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
 use dreams::{Changes, History, Page, cli};
+use serde_json::{Value, json};
 
 struct Sandbox {
     dir: PathBuf,
@@ -127,7 +127,7 @@ fn markdown_round_trip_unchanged_then_edited() {
     let again = sb.ok(&["doc", "update", "n1", "--format", "md"], &fetched);
     assert_eq!(again, fetched);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 8 + 2, "eight seeded documents, the schema, the note");
+    assert_eq!(changes.results.len(), 12 + 2, "twelve seeded documents, the schema, the note");
 
     // edited: update yields gen 2 with parent = rev 1
     let edited = fetched.replace("first draft", "second draft");
@@ -207,7 +207,7 @@ fn lists_tables_and_json_shapes() {
     assert_eq!(&cells[2..], ["Alpha", "x"]);
 
     let page: Page = serde_json::from_value(sb.json(&["doc", "list"], "")).unwrap();
-    assert_eq!(page.docs.len(), 8 + 2, "eight seeded documents plus a and b");
+    assert_eq!(page.docs.len(), 12 + 2, "twelve seeded documents plus a and b");
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--limit", "1"], "")).unwrap();
     assert!(page.next.is_some());
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
@@ -218,7 +218,7 @@ fn lists_tables_and_json_shapes() {
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
-    assert!(text.trim_end().ends_with("last_seq: 10"));
+    assert!(text.trim_end().ends_with("last_seq: 14"));
 
     // type filters: a path matches every pinned revision, the TYPE column shows the path
     let schema = sb.file("note.yaml", SCHEMA_YAML);
@@ -226,7 +226,8 @@ fn lists_tables_and_json_shapes() {
     let typed = sb.json(&["doc", "put"], r#"{"_id":"c","_type":"doc://schemas/note","title":"Typed"}"#);
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--type", "doc://schemas/note"], "")).unwrap();
     assert_eq!(page.docs.len(), 1);
-    let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--type", typed["_type"].as_str().unwrap()], "")).unwrap();
+    let page: Page =
+        serde_json::from_value(sb.json(&["doc", "list", "--type", typed["_type"].as_str().unwrap()], "")).unwrap();
     assert_eq!(page.docs[0].id, "c");
     let text = sb.ok(&["doc", "list", "--type", "doc://schemas/note"], "");
     let row: Vec<&str> = text.lines().nth(1).unwrap().split_whitespace().collect();
@@ -278,7 +279,7 @@ fn export_then_import_round_trip() {
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("11 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with("15 exported, 0 errors"), "{out}");
     assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
@@ -290,11 +291,12 @@ fn export_then_import_round_trip() {
 
     // exported and unchanged: every .md file is a no-op; `plain` is not a .md file and is skipped
     let report = sb.json(&["import", out_dir.to_str().unwrap()], "");
-    let statuses: Vec<&str> = report["results"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
+    let statuses: Vec<&str> =
+        report["results"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
     assert_eq!(statuses, ["unchanged", "unchanged"]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 8 + 5);
+    assert_eq!(changes.results.len(), 12 + 5);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
@@ -337,7 +339,15 @@ fn add_test_runners(sb: &Sandbox) {
     sb.ok(&["runner", "add", "runners/fail", "--", "false"], "");
     sb.ok(&["runner", "add", "runners/slow", "--timeout", "1s", "--", "sleep", "30"], "");
     sb.ok(
-        &["runner", "add", "runners/env", "--", "sh", "-c", "cat >/dev/null; echo $DREAMS_TASK $DREAMS_ACTOR $DREAMS_DB"],
+        &[
+            "runner",
+            "add",
+            "runners/env",
+            "--",
+            "sh",
+            "-c",
+            "cat >/dev/null; echo $DREAMS_TASK $DREAMS_ACTOR $DREAMS_DB",
+        ],
         "",
     );
 }
@@ -347,7 +357,10 @@ fn seed_restores_the_built_in_documents() {
     let sb = Sandbox::new();
     sb.ok(&["init"], "");
     assert_eq!(sb.ok(&["seed"], ""), "nothing to restore\n");
-    let skill = sb.file("skill.json", r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#);
+    let skill = sb.file(
+        "skill.json",
+        r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#,
+    );
     sb.ok(&["doc", "update", "skills/daily-note", &skill], "");
     sb.ok(&["runner", "rm", "runners/pi"], "");
     let out = sb.ok(&["seed"], "");
@@ -405,7 +418,8 @@ fn task_lifecycle_with_change_trigger() {
     assert_eq!(task["when"], json!({"tag": "inbox"}));
     assert_eq!(task["prompt"], "Triage these.\n");
     // the doc:// form of --runner is accepted too, and an identical re-add writes nothing
-    let out = sb.ok(&["task", "add", "t1", "--runner", "doc://runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
+    let out =
+        sb.ok(&["task", "add", "t1", "--runner", "doc://runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
     assert!(out.starts_with("unchanged t1 1-"), "{out}");
 
     let list: Value = sb.json(&["task", "list"], "");
@@ -459,7 +473,8 @@ fn task_lifecycle_with_change_trigger() {
     let newest = runs.docs.iter().find(|d| d.body["started_at"] == FUTURE).unwrap();
     assert!(newest.body["content"].as_str().unwrap().contains("- in1  rev 1-"), "{:?}", newest.body);
     let in1 = sb.json(&["doc", "changes"], "");
-    let in1_seq = in1["results"].as_array().unwrap().iter().find(|d| d["_id"] == "in1").unwrap()["_seq"].as_i64().unwrap();
+    let in1_seq =
+        in1["results"].as_array().unwrap().iter().find(|d| d["_id"] == "in1").unwrap()["_seq"].as_i64().unwrap();
     assert!(newest.body["seq"].as_i64().unwrap() >= in1_seq);
 
     // nothing new since that run: a later tick fires nothing
@@ -565,7 +580,7 @@ fn pull_and_sync_between_two_vaults() {
     b.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "from b"}"#);
     let out = a.ok(&["pull", &b_db], "");
     assert!(out.starts_with("pulled 1 revision from "), "{out}");
-    assert!(out.contains("8 present"), "{out}");
+    assert!(out.contains("12 present"), "{out}");
     assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
 
     a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);
@@ -660,9 +675,19 @@ fn doc_conflicts_lists_conflicted_ids() {
 #[test]
 fn resolve_auto_merges_with_a_runner() {
     let (a, b) = conflicted_vaults();
-    a.ok(&["runner", "add", "runners/echo", "--", "echo", r#"```json
+    a.ok(
+        &[
+            "runner",
+            "add",
+            "runners/echo",
+            "--",
+            "echo",
+            r#"```json
 {"title": "merged", "_rev": "ignored"}
-```"#], "");
+```"#,
+        ],
+        "",
+    );
     let conflicts = a.json(&["doc", "get", "x"], "")["_conflicts"].clone();
 
     // flags that need --auto, and --auto with a file, are usage errors

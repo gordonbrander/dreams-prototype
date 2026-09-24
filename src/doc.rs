@@ -42,11 +42,7 @@ impl DocRef {
 
     /// Lenient, for command-line flags: a bare id gets the scheme.
     pub fn from_cli(text: &str) -> Result<DocRef, StoreError> {
-        if text.starts_with(Self::SCHEME) {
-            Self::parse(text)
-        } else {
-            Self::parse(&format!("{}{text}", Self::SCHEME))
-        }
+        if text.starts_with(Self::SCHEME) { Self::parse(text) } else { Self::parse(&format!("{}{text}", Self::SCHEME)) }
     }
 
     pub fn pinned(id: &str, rev: &str) -> DocRef {
@@ -186,9 +182,7 @@ pub fn check_body(body: &Map<String, Value>) -> Result<(), StoreError> {
         }
     }
     if let Some(tags) = body.get("tags") {
-        let ok = tags
-            .as_array()
-            .is_some_and(|items| items.iter().all(Value::is_string));
+        let ok = tags.as_array().is_some_and(|items| items.iter().all(Value::is_string));
         if !ok {
             return Err(StoreError::invalid("tags must be an array of strings"));
         }
@@ -217,13 +211,7 @@ impl PutInput {
             rev::parse(p)?;
         }
         check_body(&self.body)?;
-        Ok(Draft {
-            id,
-            parent: self.parent,
-            type_ref,
-            deleted: false,
-            body: self.body,
-        })
+        Ok(Draft { id, parent: self.parent, type_ref, deleted: false, body: self.body })
     }
 }
 

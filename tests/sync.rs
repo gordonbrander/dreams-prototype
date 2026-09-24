@@ -1,9 +1,9 @@
-use serde_json::{Value, json};
 use dreams::runner::{RUNNER_TYPE, Runner};
 use dreams::seed;
 use dreams::sync::{pull, sync};
 use dreams::task::{RUN_TYPE, TASK_TYPE};
 use dreams::{Doc, PutInput, Store, StoreError};
+use serde_json::{Value, json};
 
 fn store() -> Store {
     Store::open_in_memory().unwrap()
@@ -164,12 +164,18 @@ fn tasks_and_runs_do_not_replicate_but_runners_do() {
     seed::seed(&mut b).unwrap();
     let fresh = sync(&mut a, "a", &mut b, "b").unwrap();
     for r in &fresh {
-        assert_eq!((r.written, r.present), (0, 8), "seeded documents are identical");
+        assert_eq!((r.written, r.present), (0, 12), "seeded documents are identical");
     }
 
-    put(&mut b, json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}));
-    put(&mut b, json!({"_id": "runs/1", "_type": RUN_TYPE, "task": "doc://tasks/t", "runner": "doc://runners/claude",
-                       "started_at": "2026-09-23T10:00:00.000Z", "seq": 7, "tags": ["run"]}));
+    put(
+        &mut b,
+        json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}),
+    );
+    put(
+        &mut b,
+        json!({"_id": "runs/1", "_type": RUN_TYPE, "task": "doc://tasks/t", "runner": "doc://runners/claude",
+                       "started_at": "2026-09-23T10:00:00.000Z", "seq": 7, "tags": ["run"]}),
+    );
     let claude = b.get("runners/claude").unwrap();
     let mut body = Value::Object(claude.body.clone());
     body["_id"] = json!("runners/claude");

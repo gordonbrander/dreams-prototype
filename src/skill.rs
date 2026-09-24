@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 
 use crate::doc::Doc;
 use crate::error::StoreError;
-use crate::store::{ListQuery, Store};
+use crate::store::Store;
 
 /// The seeded schema document for skills, as a type path.
 pub const SKILL_TYPE: &str = "doc://schemas/skill";
@@ -76,26 +76,8 @@ impl Skill {
 
 /// Every skill in the vault, most recently modified first, one per name.
 pub fn list(store: &Store) -> Result<Vec<Skill>, StoreError> {
-    let mut skills = Vec::new();
     let mut seen = HashSet::new();
-    let mut before = None;
-    loop {
-        let page = store.list(&ListQuery {
-            type_id: Some(SKILL_TYPE.into()),
-            tag: None,
-            before,
-            limit: Some(1000),
-        })?;
-        for skill in page.docs.iter().filter_map(Skill::from_doc) {
-            if seen.insert(skill.name.clone()) {
-                skills.push(skill);
-            }
-        }
-        match page.next {
-            Some(next) => before = Some(next),
-            None => return Ok(skills),
-        }
-    }
+    Ok(store.list_all(SKILL_TYPE)?.iter().filter_map(Skill::from_doc).filter(|s| seen.insert(s.name.clone())).collect())
 }
 
 /// The skill whose SKILL.md is at `uri`.

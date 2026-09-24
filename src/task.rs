@@ -213,7 +213,13 @@ fn newest_run(conn: &Connection, task_id: &str) -> Result<Option<Doc>, StoreErro
     Ok(conn.query_row(&sql, params![task_id, RUN_TYPE], |r| row_to_doc(r, false)).optional()?)
 }
 
-fn changes_since(conn: &Connection, task_id: &str, when: &When, cursor: i64, head: i64) -> Result<Vec<Change>, StoreError> {
+fn changes_since(
+    conn: &Connection,
+    task_id: &str,
+    when: &When,
+    cursor: i64,
+    head: i64,
+) -> Result<Vec<Change>, StoreError> {
     let ids_json = match &when.ids {
         Some(ids) => Some(serde_json::to_string(ids)?),
         None => None,
@@ -235,17 +241,9 @@ fn changes_since(conn: &Connection, task_id: &str, when: &When, cursor: i64, hea
             AND (?7 IS NULL OR d._id IN (SELECT value FROM json_each(?7)))
           ORDER BY d._local_seq",
     )?;
-    let rows = stmt.query_map(
-        params![cursor, head, task_id, when.glob, exact, when.tag, ids_json, path],
-        |r| {
-            Ok(Change {
-                seq: r.get(0)?,
-                id: r.get(1)?,
-                rev: r.get(2)?,
-                deleted: r.get::<_, i64>(3)? != 0,
-            })
-        },
-    )?;
+    let rows = stmt.query_map(params![cursor, head, task_id, when.glob, exact, when.tag, ids_json, path], |r| {
+        Ok(Change { seq: r.get(0)?, id: r.get(1)?, rev: r.get(2)?, deleted: r.get::<_, i64>(3)? != 0 })
+    })?;
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
@@ -260,9 +258,7 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
           ORDER BY d._id"
     );
     let mut stmt = tx.prepare(&sql)?;
-    let docs = stmt
-        .query_map(params![TASK_TYPE, only], |r| row_to_doc(r, true))?
-        .collect::<Result<Vec<_>, _>>()?;
+    let docs = stmt.query_map(params![TASK_TYPE, only], |r| row_to_doc(r, true))?.collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     if let Some(id) = only
         && docs.is_empty()
@@ -457,7 +453,8 @@ pub fn failures(outcome: &Outcome, timeout: Duration) -> Vec<String> {
         errors.push(format!("timeout after {}s", timeout.as_secs()));
     }
     if !outcome.timed_out && outcome.spawn_error.is_none() && outcome.exit_code != Some(0) {
-        let (tail, _) = truncate_utf8(&outcome.stderr[outcome.stderr.len().saturating_sub(MAX_STDERR_BYTES)..], MAX_STDERR_BYTES);
+        let (tail, _) =
+            truncate_utf8(&outcome.stderr[outcome.stderr.len().saturating_sub(MAX_STDERR_BYTES)..], MAX_STDERR_BYTES);
         let tail = tail.trim();
         errors.push(match outcome.exit_code {
             Some(code) if tail.is_empty() => format!("exit code {code}"),
@@ -470,7 +467,14 @@ pub fn failures(outcome: &Outcome, timeout: Duration) -> Vec<String> {
 }
 
 /// Write run revision 2 with the result. `content` is the command's last message.
-pub fn finish(store: &mut Store, run: &Doc, outcome: &Outcome, out_file: &Path, timeout: Duration, now: &str) -> Result<Doc, StoreError> {
+pub fn finish(
+    store: &mut Store,
+    run: &Doc,
+    outcome: &Outcome,
+    out_file: &Path,
+    timeout: Duration,
+    now: &str,
+) -> Result<Doc, StoreError> {
     let mut body = run.body.clone();
     body.insert("finished_at".into(), Value::String(now.to_string()));
     let (content, cut) = truncate_utf8(&last_message(out_file, &outcome.stdout), MAX_CONTENT_BYTES);
@@ -519,7 +523,8 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
         return Ok(None);
     };
     let scratch = std::env::temp_dir().join(format!("dreams-{}", crate::doc::new_id()));
-    std::fs::create_dir_all(&scratch).map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
+    std::fs::create_dir_all(&scratch)
+        .map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
     let ctx = Context {
         db: db.to_path_buf(),
         task: eval.task.id.clone(),
@@ -528,7 +533,8 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
         out: scratch.join("last-message"),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
-    let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let cwd =
+        db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 
     let outcome = match &eval.runner {
         Ok(runner) => {
@@ -537,10 +543,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
             let argv = ctx.resolve(&runner.argv);
             (spawn(&argv, &ctx.env(), &cwd, &prompt_text(eval), timeout).await, timeout)
         }
-        Err(e) => (
-            Outcome { spawn_error: Some(e.clone()), ..Default::default() },
-            Duration::from_secs(0),
-        ),
+        Err(e) => (Outcome { spawn_error: Some(e.clone()), ..Default::default() }, Duration::from_secs(0)),
     };
     let finished_at = store.now()?;
     let done = finish(store, &run, &outcome.0, &ctx.out, outcome.1, &finished_at);

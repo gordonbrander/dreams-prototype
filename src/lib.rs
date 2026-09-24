@@ -14,6 +14,7 @@ pub mod doc;
 pub mod error;
 pub mod markdown;
 pub mod mcp;
+pub mod prompt;
 pub mod resolve;
 pub mod rev;
 pub mod runner;

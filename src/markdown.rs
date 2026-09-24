@@ -44,8 +44,7 @@ fn split(text: &str) -> Result<(Option<&str>, &str), StoreError> {
 
 /// Parse YAML into a JSON object. Empty YAML is an empty object.
 pub fn yaml_to_map(yaml: &str) -> Result<Map<String, Value>, StoreError> {
-    let value: Value =
-        serde_yaml_ng::from_str(yaml).map_err(|e| StoreError::invalid(format!("invalid YAML: {e}")))?;
+    let value: Value = serde_yaml_ng::from_str(yaml).map_err(|e| StoreError::invalid(format!("invalid YAML: {e}")))?;
     match value {
         Value::Null => Ok(Map::new()),
         Value::Object(map) => Ok(map),
@@ -63,9 +62,7 @@ pub fn parse(text: &str) -> Result<Map<String, Value>, StoreError> {
     };
     if !content.is_empty() {
         if map.contains_key("content") {
-            return Err(StoreError::invalid(
-                "frontmatter sets `content` but the document also has a body",
-            ));
+            return Err(StoreError::invalid("frontmatter sets `content` but the document also has a body"));
         }
         map.insert("content".into(), Value::String(content.to_string()));
     }

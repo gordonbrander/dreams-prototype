@@ -20,10 +20,7 @@ pub fn compile(schema_ref: &str, body: &Value) -> Result<Validator, StoreError> 
 pub fn validate(validator: &Validator, body: &Value) -> Vec<FieldError> {
     validator
         .iter_errors(body)
-        .map(|e| FieldError {
-            path: e.instance_path().to_string(),
-            message: e.to_string(),
-        })
+        .map(|e| FieldError { path: e.instance_path().to_string(), message: e.to_string() })
         .collect()
 }
 

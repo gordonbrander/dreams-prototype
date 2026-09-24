@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::doc::PutInput;
 use crate::error::StoreError;
+use crate::prompt::{self, PROMPT_TYPE};
 use crate::runner::{self, RUNNER_TYPE};
 use crate::skill::{self, SKILL_TYPE};
 use crate::store::Store;
@@ -18,7 +19,22 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("schemas/run", task::RUN_SCHEMA),
     ("schemas/runner", runner::RUNNER_SCHEMA),
     ("schemas/skill", skill::SKILL_SCHEMA),
+    ("schemas/prompt", prompt::PROMPT_SCHEMA),
+    ("schemas/daily", DAILY_SCHEMA),
 ];
+
+/// The body of `schemas/daily`: one note per day, see `seed/daily-note.md`.
+pub const DAILY_SCHEMA: &str = r#"{
+  "title": "Daily note",
+  "description": "One document per day. The _id is the local date as YYYY-MM-DD. content is the log for the day; intention is the one intention for the day.",
+  "type": "object",
+  "properties": {
+    "title": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "intention": {"type": "string"}
+  }
+}"#;
 
 /// The runners the binary seeds: id, title, argv.
 pub const RUNNERS: &[(&str, &str, &[&str])] = &[
@@ -77,9 +93,28 @@ pub fn defaults() -> Vec<PutInput> {
             Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
         "content": include_str!("seed/daily-note.md"),
     })];
+    let prompts = [
+        json!({
+            "_id": "prompts/daily",
+            "_type": PROMPT_TYPE,
+            "name": "daily",
+            "description": "Add text to today's daily note.",
+            "content": "Use the daily-note skill. Add the text the user gave with this command to today's \
+                daily note. If the user gave no text, ask what to add.",
+        }),
+        json!({
+            "_id": "prompts/intention",
+            "_type": PROMPT_TYPE,
+            "name": "intention",
+            "description": "Set today's intention in the daily note.",
+            "content": "Use the daily-note skill. Set today's intention to the text the user gave with this \
+                command. If the user gave no text, ask for the intention.",
+        }),
+    ];
     schemas
         .chain(runners)
         .chain(skills)
+        .chain(prompts)
         .map(|v| serde_json::from_value(v).expect("seeded documents are valid put input"))
         .collect()
 }
@@ -94,9 +129,7 @@ pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
         |r| r.get(0),
     )?;
     if legacy {
-        return Err(StoreError::invalid(
-            "this vault predates doc:// types; delete it and start again",
-        ));
+        return Err(StoreError::invalid("this vault predates doc:// types; delete it and start again"));
     }
     write_missing(store, defaults())
 }

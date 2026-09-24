@@ -13,8 +13,8 @@ use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
-use crate::task::{self, Evaluation, TickReport, When};
 use crate::sync::{self, PullReport};
+use crate::task::{self, Evaluation, TickReport, When};
 use crate::{daemon, markdown, mcp, resolve, rev, seed};
 
 /// Dreams: a versioned document vault in SQLite, with a CLI and an MCP server.
@@ -37,9 +37,9 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create the database if needed, apply migrations, and seed the built-in schemas, runners, and skills.
+    /// Create the database if needed, apply migrations, and seed the built-in schemas, runners, skills, and prompts.
     Init,
-    /// Restore the built-in schemas, runners, and skills. Writes each one whose current
+    /// Restore the built-in schemas, runners, skills, and prompts. Writes each one whose current
     /// revision differs from the default, and revives deleted ones. Earlier revisions stay in history.
     Seed,
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
@@ -507,7 +507,9 @@ fn absolute(path: &Path) -> Result<PathBuf, StoreError> {
 
 fn read_text(file: Option<&Path>, stdin: &mut dyn Read) -> Result<String, StoreError> {
     match file.filter(|p| *p != Path::new("-")) {
-        Some(path) => std::fs::read_to_string(path).map_err(|e| StoreError::invalid(format!("reading {}: {e}", path.display()))),
+        Some(path) => {
+            std::fs::read_to_string(path).map_err(|e| StoreError::invalid(format!("reading {}: {e}", path.display())))
+        }
         None => {
             let mut text = String::new();
             stdin.read_to_string(&mut text).map_err(|e| StoreError::invalid(format!("reading stdin: {e}")))?;
@@ -516,7 +518,14 @@ fn read_text(file: Option<&Path>, stdin: &mut dyn Read) -> Result<String, StoreE
     }
 }
 
-fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
+fn task_cmd(
+    store: &mut Store,
+    db: &Path,
+    cmd: TaskCmd,
+    json: bool,
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     match cmd {
         TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, disabled, prompt_file } => {
             id_to_relpath(&task_id)?;
@@ -599,7 +608,11 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
             } else {
                 writeln!(out, "task:      {}", eval.task.id)?;
                 writeln!(out, "runner:    {}", eval.parsed.runner)?;
-                writeln!(out, "every:     {}", eval.task.body.get("every").and_then(Value::as_str).unwrap_or_default())?;
+                writeln!(
+                    out,
+                    "every:     {}",
+                    eval.task.body.get("every").and_then(Value::as_str).unwrap_or_default()
+                )?;
                 if let Some(w) = &eval.parsed.when {
                     writeln!(out, "when:      {}", w.summary())?;
                 }
@@ -612,7 +625,14 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
                     let rows: Vec<Vec<String>> = eval
                         .changes
                         .iter()
-                        .map(|c| vec![c.seq.to_string(), c.id.clone(), short_rev(&c.rev), if c.deleted { "yes".into() } else { String::new() }])
+                        .map(|c| {
+                            vec![
+                                c.seq.to_string(),
+                                c.id.clone(),
+                                short_rev(&c.rev),
+                                if c.deleted { "yes".into() } else { String::new() },
+                            ]
+                        })
                         .collect();
                     table(out, &["SEQ", "ID", "REV", "DELETED"], &rows)?;
                 }
@@ -639,7 +659,12 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
                 write!(out, "{}", markdown::render(&run))?;
             }
             if fired.error.is_some() {
-                return Err(StoreError::invalid(format!("run {} failed: {}", fired.run, fired.error.unwrap_or_default())).into());
+                return Err(StoreError::invalid(format!(
+                    "run {} failed: {}",
+                    fired.run,
+                    fired.error.unwrap_or_default()
+                ))
+                .into());
             }
         }
         TaskCmd::Runs { task_id, limit } => {
@@ -677,7 +702,8 @@ fn task_cmd(store: &mut Store, db: &Path, cmd: TaskCmd, json: bool, stdin: &mut 
 fn upsert_unless_same(store: &mut Store, id: &str, map: Map<String, Value>) -> Result<(Doc, WriteStatus), StoreError> {
     if let Ok(head) = store.get(id) {
         let same_type = head.type_path() == map.get("_type").and_then(Value::as_str).map(DocRef::path_of);
-        let body: Map<String, Value> = map.iter().filter(|(k, _)| !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect();
+        let body: Map<String, Value> =
+            map.iter().filter(|(k, _)| !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect();
         if same_type && body == head.body {
             return Ok((head, WriteStatus::Unchanged));
         }
@@ -724,7 +750,11 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
             }
         }
         RunnerCmd::List => {
-            let page = store.list(&ListQuery { type_id: Some(runner::RUNNER_TYPE.into()), limit: Some(1000), ..Default::default() })?;
+            let page = store.list(&ListQuery {
+                type_id: Some(runner::RUNNER_TYPE.into()),
+                limit: Some(1000),
+                ..Default::default()
+            })?;
             if json {
                 print_json(out, &page)?;
             } else {
@@ -742,7 +772,11 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
                         vec![
                             d.id.clone(),
                             title_of(d),
-                            d.body.get("timeout").and_then(Value::as_str).unwrap_or(runner::DEFAULT_TIMEOUT).to_string(),
+                            d.body
+                                .get("timeout")
+                                .and_then(Value::as_str)
+                                .unwrap_or(runner::DEFAULT_TIMEOUT)
+                                .to_string(),
                             clip(&argv, 80),
                         ]
                     })
@@ -754,7 +788,9 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
             let parent = head_rev(store, &runner_id)?;
             let doc = store.get_rev(&parent)?;
             if doc.type_path() != Some(runner::RUNNER_TYPE) {
-                return Err(StoreError::invalid(format!("{runner_id} is not a {} document", runner::RUNNER_TYPE)).into());
+                return Err(
+                    StoreError::invalid(format!("{runner_id} is not a {} document", runner::RUNNER_TYPE)).into()
+                );
             }
             let tomb = store.delete(&runner_id, &parent)?;
             if json {
@@ -786,7 +822,14 @@ fn print_tick(out: &mut dyn Write, json: bool, report: &TickReport) -> io::Resul
     writeln!(out, "{} fired, {} skipped, {} errors", report.fired.len(), report.skipped.len(), report.errors.len())
 }
 
-fn doc_cmd(store: &mut Store, db: &Path, cmd: DocCmd, json: bool, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
+fn doc_cmd(
+    store: &mut Store,
+    db: &Path,
+    cmd: DocCmd,
+    json: bool,
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+) -> anyhow::Result<()> {
     match cmd {
         DocCmd::Put(input) => {
             let map = read_input(&input, stdin)?;
@@ -886,12 +929,7 @@ fn doc_cmd(store: &mut Store, db: &Path, cmd: DocCmd, json: bool, stdin: &mut dy
 
 impl From<Filter> for ListQuery {
     fn from(f: Filter) -> Self {
-        ListQuery {
-            type_id: f.type_id,
-            tag: f.tag,
-            before: None,
-            limit: f.limit,
-        }
+        ListQuery { type_id: f.type_id, tag: f.tag, before: None, limit: f.limit }
     }
 }
 
@@ -969,16 +1007,12 @@ pub fn relpath_to_id(rel: &Path) -> Option<String> {
     if rel.extension()?.to_str()? != "md" {
         return None;
     }
-    let parts: Vec<String> = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect();
+    let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     Some(parts.join("/"))
 }
 
 fn walk_md(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<(), StoreError> {
-    let entries = std::fs::read_dir(dir)
-        .map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
+    let entries = std::fs::read_dir(dir).map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
         let path = entry.path();
@@ -1028,11 +1062,7 @@ fn report(out: &mut dyn Write, json: bool, verb: &str, results: Vec<FileResult>)
             }
         }
         if verb == "imported" {
-            writeln!(
-                out,
-                "{} created, {} updated, {} unchanged, {errors} errors",
-                counts[0], counts[1], counts[2]
-            )?;
+            writeln!(out, "{} created, {} updated, {} unchanged, {errors} errors", counts[0], counts[1], counts[2])?;
         } else {
             writeln!(out, "{} {verb}, {errors} errors", results.len() - errors)?;
         }
@@ -1052,7 +1082,13 @@ fn export(store: &Store, dir: &Path, filter: ListQuery, json: bool, out: &mut dy
             let rel = match id_to_relpath(&doc.id) {
                 Ok(rel) => rel,
                 Err(e) => {
-                    results.push(FileResult { path: doc.id.clone(), id: Some(doc.id.clone()), rev: None, status: None, error: Some(e.to_string()) });
+                    results.push(FileResult {
+                        path: doc.id.clone(),
+                        id: Some(doc.id.clone()),
+                        rev: None,
+                        status: None,
+                        error: Some(e.to_string()),
+                    });
                     continue;
                 }
             };
@@ -1102,7 +1138,9 @@ fn import(store: &mut Store, dir: &Path, json: bool, out: &mut dyn Write) -> any
                 upsert(store, &id, map, None)
             });
         results.push(match outcome {
-            Ok((doc, status)) => FileResult { path: rel_text, id: Some(id), rev: Some(doc.rev), status: Some(status), error: None },
+            Ok((doc, status)) => {
+                FileResult { path: rel_text, id: Some(id), rev: Some(doc.rev), status: Some(status), error: None }
+            }
             Err(e) => FileResult { path: rel_text, id: Some(id), rev: None, status: None, error: Some(e.to_string()) },
         });
     }
@@ -1152,9 +1190,7 @@ fn read_input(input: &Input, stdin: &mut dyn Read) -> Result<Map<String, Value>,
         }
         None => {
             let mut text = String::new();
-            stdin
-                .read_to_string(&mut text)
-                .map_err(|e| StoreError::invalid(format!("reading stdin: {e}")))?;
+            stdin.read_to_string(&mut text).map_err(|e| StoreError::invalid(format!("reading stdin: {e}")))?;
             (text, input.format.unwrap_or(Format::Json))
         }
     };
@@ -1207,21 +1243,13 @@ pub fn prepare_write(mut map: Map<String, Value>, mode: WriteMode) -> Result<Pre
 
     let mut unchanged = false;
     if let Some(rev_value) = map.remove("_rev") {
-        let rev_id = rev_value
-            .as_str()
-            .ok_or_else(|| StoreError::invalid("_rev must be a string"))?
-            .to_string();
-        let id = map
-            .get("_id")
-            .and_then(Value::as_str)
-            .ok_or_else(|| StoreError::invalid("input has _rev but no _id"))?;
+        let rev_id = rev_value.as_str().ok_or_else(|| StoreError::invalid("_rev must be a string"))?.to_string();
+        let id =
+            map.get("_id").and_then(Value::as_str).ok_or_else(|| StoreError::invalid("input has _rev but no _id"))?;
         let parent = map.get("_parent").and_then(Value::as_str);
         let type_id = map.get("_type").and_then(Value::as_str);
-        let body: Map<String, Value> = map
-            .iter()
-            .filter(|(k, _)| !k.starts_with('_'))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let body: Map<String, Value> =
+            map.iter().filter(|(k, _)| !k.starts_with('_')).map(|(k, v)| (k.clone(), v.clone())).collect();
         let computed = rev::rev_of(id, parent, type_id, false, &body)?;
         if computed == rev_id {
             unchanged = true;
@@ -1241,11 +1269,7 @@ fn print_json<T: Serialize>(out: &mut dyn Write, value: &T) -> io::Result<()> {
 }
 
 fn print_doc(out: &mut dyn Write, json: bool, doc: &Doc) -> io::Result<()> {
-    if json {
-        print_json(out, doc)
-    } else {
-        write!(out, "{}", markdown::render(doc))
-    }
+    if json { print_json(out, doc) } else { write!(out, "{}", markdown::render(doc)) }
 }
 
 fn short_rev(rev: &str) -> String {

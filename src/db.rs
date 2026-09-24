@@ -152,11 +152,8 @@ pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let version = i as i64 + 1;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let applied: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM migrations WHERE version = ?1)",
-            [version],
-            |r| r.get(0),
-        )?;
+        let applied: bool =
+            tx.query_row("SELECT EXISTS(SELECT 1 FROM migrations WHERE version = ?1)", [version], |r| r.get(0))?;
         if !applied {
             tx.execute_batch(sql)?;
             tx.execute(
@@ -177,9 +174,7 @@ mod tests {
     fn migrations_are_idempotent() {
         let mut conn = open_in_memory().unwrap();
         migrate(&mut conn).unwrap();
-        let n: i64 = conn
-            .query_row("SELECT count(*) FROM migrations", [], |r| r.get(0))
-            .unwrap();
+        let n: i64 = conn.query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap();
         assert_eq!(n as usize, MIGRATIONS.len());
     }
 
@@ -190,9 +185,8 @@ mod tests {
             .query_row("SELECT hidden FROM pragma_table_xinfo('docs') WHERE name = '_type_path'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(hidden, 2, "virtual generated column");
-        let schemas: i64 = conn
-            .query_row("SELECT count(*) FROM sqlite_master WHERE name = 'schemas'", [], |r| r.get(0))
-            .unwrap();
+        let schemas: i64 =
+            conn.query_row("SELECT count(*) FROM sqlite_master WHERE name = 'schemas'", [], |r| r.get(0)).unwrap();
         assert_eq!(schemas, 0);
         conn.execute_batch(
             "INSERT INTO docs(_rev,_id,_type,body) VALUES ('1-a','x','doc://s?rev=1-b','{}'), ('1-c','y',NULL,'{}')",
@@ -200,7 +194,8 @@ mod tests {
         .unwrap();
         let path: String = conn.query_row("SELECT _type_path FROM docs WHERE _id='x'", [], |r| r.get(0)).unwrap();
         assert_eq!(path, "doc://s");
-        let none: Option<String> = conn.query_row("SELECT _type_path FROM docs WHERE _id='y'", [], |r| r.get(0)).unwrap();
+        let none: Option<String> =
+            conn.query_row("SELECT _type_path FROM docs WHERE _id='y'", [], |r| r.get(0)).unwrap();
         assert_eq!(none, None);
     }
 

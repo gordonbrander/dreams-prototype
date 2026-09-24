@@ -266,7 +266,7 @@ dreams doc resolve notes/plan.md plan.md
 
 A resolve does not delete the losing revisions. It writes a tombstone on each one, and you can still read them. As in CouchDB, `doc get <id> --deleted-conflicts` lists these tombstones as `_deleted_conflicts`.
 
-Vaults seeded by different versions of this binary can have different built-in schemas, runners, or skills. A sync then makes conflicts on those documents. MCP clients cannot write the schemas or runners, so resolve them with the CLI.
+Vaults seeded by different versions of this binary can have different built-in schemas, runners, skills, or prompts. A sync then makes conflicts on those documents. MCP clients cannot write the schemas or runners, so resolve them with the CLI.
 
 ### Let an agent merge
 
@@ -516,9 +516,29 @@ EOF
 
 The server shows each skill as one file, `skill://<name>/SKILL.md`. The file has `name` and `description` as frontmatter, then `content`. `skills/list` and `skills/get` return it, and `resources/read` reads it. `resources/list` also lists it, for hosts that do not know the extension. When two documents have the same `name`, the most recently changed one wins. Agents can write skills with `put_doc`. The `schemas/skill` document itself is read-only over MCP.
 
+### Prompts
+
+A document typed `doc://schemas/prompt` is a prompt. The server gives prompts to the host as [MCP prompts](https://modelcontextprotocol.io/specification/2025-06-18/server/prompts). Claude Code shows each one as a slash command, `/dreams:<name>`. The body needs three fields, with the same rules as a skill:
+
+- `name`: lowercase letters, digits, and single hyphens, 64 characters or less.
+- `description`: what the prompt does, 1024 characters or less.
+- `content`: the instructions. The server sends them as one user message.
+
+```
+dreams doc put - <<'EOF'
+{"_id": "prompts/standup", "_type": "doc://schemas/prompt",
+ "name": "standup", "description": "Summarize yesterday's daily note.",
+ "content": "Use the daily-note skill. Summarize yesterday's note as three bullets."}
+EOF
+```
+
+A prompt declares no arguments. The user's text comes with the user's own input. In Claude Code, the model sees `/dreams:daily buy milk` as the command and its full text. Claude Code splits declared arguments on whitespace and drops extra words, so a declared argument would lose text. There is no templating. When two documents have the same `name`, the most recently changed one wins. The server sends no `list_changed` notification, so reconnect the host to see a new prompt. The `schemas/prompt` document itself is read-only over MCP.
+
 ### Daily notes
 
-Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is an ordinary document. Its `_id` is the local date as `YYYY-MM-DD`, and it has the tag `daily`. The skill tells the agent how to create today's note, add to it with `_parent`, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes.
+Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes.
+
+Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
 
 ## Storage
 
@@ -528,7 +548,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Every entry point seeds the built-in documents on first use: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, the three default runners, and the `skills/daily-note` skill. A built-in document that you edit or delete stays as you left it.
+- Schemas are documents. Every entry point seeds the built-in documents on first use: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, the three default runners, the `skills/daily-note` skill, and the `prompts/daily` and `prompts/intention` prompts. A built-in document that you edit or delete stays as you left it.
 - `dreams seed` restores the built-in documents. It writes each one whose current revision is different from the default, and it revives deleted ones. The earlier revisions stay in history. Use it after an edit goes wrong, or to get the defaults of a newer binary.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
@@ -538,6 +558,7 @@ Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tag
 ```
 cargo test
 cargo clippy --all-targets
+cargo fmt --check
 ```
 
 The tests cover the revision model, the store, the scheduler rules, and the full command surface. CLI tests call the command runner in process with a temporary database, and drive the scheduler with runners such as `cat` and `sleep`.
