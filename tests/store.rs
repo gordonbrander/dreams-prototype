@@ -1,5 +1,5 @@
 use serde_json::{Value, json};
-use subconscious::{ListQuery, PutInput, Store, StoreError};
+use dreams::{ListQuery, PutInput, Store, StoreError};
 
 fn store() -> Store {
     Store::open_in_memory().unwrap()
@@ -26,12 +26,12 @@ fn note_schema() -> Value {
     })
 }
 
-fn ids(page: &subconscious::Page) -> Vec<&str> {
+fn ids(page: &dreams::Page) -> Vec<&str> {
     page.docs.iter().map(|d| d.id.as_str()).collect()
 }
 
 /// Write the note schema as the document `schemas/note`.
-fn put_note_schema(s: &mut Store) -> subconscious::Doc {
+fn put_note_schema(s: &mut Store) -> dreams::Doc {
     let mut body = note_schema();
     body["_id"] = json!("schemas/note");
     s.put(input(body)).unwrap()
@@ -289,7 +289,7 @@ fn pinning_makes_replay_a_no_op() {
 }
 
 /// Write the next revision of `schemas/note` with one edit applied to the note schema body.
-fn put_schema_revision(s: &mut Store, parent: &str, edit: impl FnOnce(&mut Value)) -> subconscious::Doc {
+fn put_schema_revision(s: &mut Store, parent: &str, edit: impl FnOnce(&mut Value)) -> dreams::Doc {
     let mut body = note_schema();
     edit(&mut body);
     body["_id"] = json!("schemas/note");
@@ -398,7 +398,7 @@ fn docs_rows_are_immutable() {
 
 #[test]
 fn reopening_a_file_keeps_data_and_does_not_remigrate() {
-    let dir = std::env::temp_dir().join(format!("subconscious-test-{}", uuid::Uuid::now_v7()));
+    let dir = std::env::temp_dir().join(format!("dreams-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("vault.db");
     {
@@ -416,9 +416,9 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
 
 // ---- scheduled tasks ------------------------------------------------------
 
-use subconscious::runner::{PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
-use subconscious::seed;
-use subconscious::task::{self, RUN_TYPE, TASK_TYPE};
+use dreams::runner::{PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
+use dreams::seed;
+use dreams::task::{self, RUN_TYPE, TASK_TYPE};
 
 fn plus_secs(s: &Store, from: &str, secs: i64) -> String {
     s.connection()
@@ -561,7 +561,7 @@ fn restore_rewrites_edited_and_deleted_defaults() {
     assert_eq!(seed::restore(&mut fresh).unwrap().len(), 8);
 }
 
-fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> subconscious::Doc {
+fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams::Doc {
     let mut body = json!({"_id": id, "_type": TASK_TYPE, "runner": "doc://runners/cat", "every": every, "prompt": "go"});
     if let Some(w) = when {
         body["when"] = w;

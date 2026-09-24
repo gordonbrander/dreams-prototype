@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
-use subconscious::{Changes, History, Page, cli};
+use dreams::{Changes, History, Page, cli};
 
 struct Sandbox {
     dir: PathBuf,
@@ -9,7 +9,7 @@ struct Sandbox {
 
 impl Sandbox {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("subconscious-cli-{}", uuid::Uuid::now_v7()));
+        let dir = std::env::temp_dir().join(format!("dreams-cli-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
         Sandbox { dir }
     }
@@ -26,7 +26,7 @@ impl Sandbox {
 
     /// Run the CLI in-process. Returns (exit code, stdout, stderr).
     fn run(&self, args: &[&str], stdin: &str) -> (i32, String, String) {
-        let mut argv = vec!["subconscious".to_string(), "--db".to_string(), self.db()];
+        let mut argv = vec!["dreams".to_string(), "--db".to_string(), self.db()];
         argv.extend(args.iter().map(|s| s.to_string()));
         let mut input = stdin.as_bytes();
         let mut out = Vec::new();
@@ -337,7 +337,7 @@ fn add_test_runners(sb: &Sandbox) {
     sb.ok(&["runner", "add", "runners/fail", "--", "false"], "");
     sb.ok(&["runner", "add", "runners/slow", "--timeout", "1s", "--", "sleep", "30"], "");
     sb.ok(
-        &["runner", "add", "runners/env", "--", "sh", "-c", "cat >/dev/null; echo $SUBCONSCIOUS_TASK $SUBCONSCIOUS_ACTOR $SUBCONSCIOUS_DB"],
+        &["runner", "add", "runners/env", "--", "sh", "-c", "cat >/dev/null; echo $DREAMS_TASK $DREAMS_ACTOR $DREAMS_DB"],
         "",
     );
 }

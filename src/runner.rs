@@ -100,7 +100,7 @@ impl Runner {
 /// of anything the agent writes. A command that does not start, times
 /// out, or exits non-zero is an error.
 pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Result<String, StoreError> {
-    let scratch = std::env::temp_dir().join(format!("subconscious-{}", crate::doc::new_id()));
+    let scratch = std::env::temp_dir().join(format!("dreams-{}", crate::doc::new_id()));
     std::fs::create_dir_all(&scratch).map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
     let ctx = Context {
         db: db.to_path_buf(),
@@ -108,7 +108,7 @@ pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Res
         run: String::new(),
         mcp: scratch.join("mcp.json"),
         out: scratch.join("last-message"),
-        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("subconscious")),
+        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
     let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
     let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
@@ -162,15 +162,15 @@ impl Context {
             .collect()
     }
 
-    /// The same values as `SUBCONSCIOUS_*` variables, plus `PATH` with this
-    /// binary's directory first so an agent's shell finds `subconscious`.
+    /// The same values as `DREAMS_*` variables, plus `PATH` with this
+    /// binary's directory first so an agent's shell finds `dreams`.
     pub fn env(&self) -> Vec<(String, String)> {
         let mut env: Vec<(String, String)> = self
             .pairs()
             .into_iter()
-            .map(|(name, value)| (format!("SUBCONSCIOUS_{}", name.to_ascii_uppercase()), value))
+            .map(|(name, value)| (format!("DREAMS_{}", name.to_ascii_uppercase()), value))
             .collect();
-        env.push(("SUBCONSCIOUS_ACTOR".into(), self.task.clone()));
+        env.push(("DREAMS_ACTOR".into(), self.task.clone()));
         let mut path = self.exe.parent().map(Path::to_path_buf).unwrap_or_default().to_string_lossy().into_owned();
         if let Ok(existing) = std::env::var("PATH")
             && !existing.is_empty()
@@ -183,7 +183,7 @@ impl Context {
 
     /// An MCP config file body for hosts that take one.
     pub fn mcp_config(&self) -> String {
-        json!({ "mcpServers": { "subconscious": crate::mcp::server_entry(&self.exe, &self.db, Some(&self.task)) } }).to_string()
+        json!({ "mcpServers": { "dreams": crate::mcp::server_entry(&self.exe, &self.db, Some(&self.task)) } }).to_string()
     }
 }
 
@@ -198,7 +198,7 @@ mod tests {
             run: "runs/tasks/t/1".into(),
             mcp: "/tmp/r/mcp.json".into(),
             out: "/tmp/r/out".into(),
-            exe: "/bin/subconscious".into(),
+            exe: "/bin/dreams".into(),
         }
     }
 
@@ -218,13 +218,13 @@ mod tests {
     fn env_names_everything_and_prepends_exe_dir() {
         let env = ctx().env();
         let get = |k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.as_str()).unwrap();
-        assert_eq!(get("SUBCONSCIOUS_DB"), "/v/vault.db");
-        assert_eq!(get("SUBCONSCIOUS_TASK"), "tasks/t");
-        assert_eq!(get("SUBCONSCIOUS_ACTOR"), "tasks/t");
-        assert_eq!(get("SUBCONSCIOUS_MCP"), "/tmp/r/mcp.json");
+        assert_eq!(get("DREAMS_DB"), "/v/vault.db");
+        assert_eq!(get("DREAMS_TASK"), "tasks/t");
+        assert_eq!(get("DREAMS_ACTOR"), "tasks/t");
+        assert_eq!(get("DREAMS_MCP"), "/tmp/r/mcp.json");
         assert!(get("PATH").starts_with("/bin"));
         let cfg: Value = serde_json::from_str(&ctx().mcp_config()).unwrap();
-        assert_eq!(cfg["mcpServers"]["subconscious"]["args"][3], "tasks/t");
+        assert_eq!(cfg["mcpServers"]["dreams"]["args"][3], "tasks/t");
     }
 
     #[test]

@@ -266,7 +266,7 @@ impl ServerHandler for Vault {
             .with_server_info(Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")))
             .with_protocol_version(ProtocolVersion::V_2026_07_28)
             .with_instructions(
-                "Subconscious: a versioned document vault. Documents have _id, _rev, optional _type, and free-form \
+                "Dreams: a versioned document vault. Documents have _id, _rev, optional _type, and free-form \
                  bodies with blessed fields title, content, tags. Updates must name the current _rev as _parent. \
                  A schema is a document whose body is a JSON Schema, by convention under schemas/. _type is \
                  doc://<id> of a schema and is pinned to doc://<id>?rev=<rev> at write; list_docs with \

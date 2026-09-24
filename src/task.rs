@@ -518,7 +518,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
     let Some(run) = claim(store, eval, now)? else {
         return Ok(None);
     };
-    let scratch = std::env::temp_dir().join(format!("subconscious-{}", crate::doc::new_id()));
+    let scratch = std::env::temp_dir().join(format!("dreams-{}", crate::doc::new_id()));
     std::fs::create_dir_all(&scratch).map_err(|e| StoreError::invalid(format!("creating {}: {e}", scratch.display())))?;
     let ctx = Context {
         db: db.to_path_buf(),
@@ -526,7 +526,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
         run: run.id.clone(),
         mcp: scratch.join("mcp.json"),
         out: scratch.join("last-message"),
-        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("subconscious")),
+        exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
     let cwd = db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
 

@@ -1,8 +1,8 @@
-# Subconscious
+# Dreams
 
 A versioned document vault in one SQLite file, with a command line and an MCP server.
 
-Subconscious stores JSON documents the way CouchDB does. Every write makes a new immutable revision. Documents can carry a JSON Schema type, and three fields get first-class support: `title`, `content`, and `tags`. You can read and write the vault from a shell, from files of Markdown with frontmatter, or from an AI agent over MCP.
+Dreams stores JSON documents the way CouchDB does. Every write makes a new immutable revision. Documents can carry a JSON Schema type, and three fields get first-class support: `title`, `content`, and `tags`. You can read and write the vault from a shell, from files of Markdown with frontmatter, or from an AI agent over MCP.
 
 ## Build
 
@@ -10,12 +10,12 @@ Subconscious stores JSON documents the way CouchDB does. Every write makes a new
 cargo build --release
 ```
 
-The binary is `target/release/subconscious`. SQLite is bundled, so there is nothing else to install.
+The binary is `target/release/dreams`. SQLite is bundled, so there is nothing else to install.
 
 ## Quick start
 
 ```
-subconscious init
+dreams init
 
 cat > note.md <<'EOF'
 ---
@@ -26,10 +26,10 @@ tags: [greeting, demo]
 The first note.
 EOF
 
-subconscious doc put note.md
-subconscious doc list
-subconscious doc search hello
-subconscious doc get notes/hello.md
+dreams doc put note.md
+dreams doc list
+dreams doc search hello
+dreams doc get notes/hello.md
 ```
 
 Every command takes `--db PATH`. The default is `vault.db` in the current directory. The database is created on first use, so `init` is optional.
@@ -78,19 +78,19 @@ properties:
   title: {type: string, minLength: 1}
   tags: {type: array, items: {type: string}}
 EOF
-subconscious doc put note.yaml
+dreams doc put note.yaml
 ```
 
 A document names its schema with a `doc://` reference: `_type: doc://schemas/note`. On write, the store pins the reference to the schema's current revision, `doc://schemas/note?rev=1-c04d…`, validates the body against that revision, and only then computes the document's `_rev`. So the pinned type is part of the revision, and an unchanged document written again is a no-op until its schema moves.
 
-Revision ids are content hashes, so a pinned reference names the same schema bytes in every vault, forever. Edit a schema and new writes pin the new revision. Old documents keep their pin and still validate against what they were written with. To re-pin an old document, update it with the unpinned `_type`: `subconscious doc update n1 n1.md`, or `put_doc` with `_parent` set. A fetched document carries its pin, so an edit cycle keeps it.
+Revision ids are content hashes, so a pinned reference names the same schema bytes in every vault, forever. Edit a schema and new writes pin the new revision. Old documents keep their pin and still validate against what they were written with. To re-pin an old document, update it with the unpinned `_type`: `dreams doc update n1 n1.md`, or `put_doc` with `_parent` set. A fetched document carries its pin, so an edit cycle keeps it.
 
 Filters take either form. `--type doc://schemas/note` matches every pinned revision of that schema. `--type doc://schemas/note?rev=1-c04d…` matches one.
 
 ## Command line
 
 ```
-subconscious [--db PATH] [--json] <command>
+dreams [--db PATH] [--json] <command>
 
   init                                            create the database if needed
   seed                                            restore the built-in documents
@@ -133,7 +133,7 @@ subconscious [--db PATH] [--json] <command>
   import <dir>                                    read every *.md file under <dir>
 ```
 
-Every command also takes `--actor NAME`, or the `SUBCONSCIOUS_ACTOR` variable, to name the writer of the revisions it creates. `--db` also reads `SUBCONSCIOUS_DB`.
+Every command also takes `--actor NAME`, or the `DREAMS_ACTOR` variable, to name the writer of the revisions it creates. `--db` also reads `DREAMS_DB`.
 
 ### Input
 
@@ -150,9 +150,9 @@ One document prints as Markdown with frontmatter. A list prints as a table. Pass
 `doc get` output is valid input. You can save it, edit it, and give it to `doc put` or `doc update`. The CLI recomputes the revision from the file. An unchanged file is a no-op. An edited file becomes the next revision, with the file's `_rev` as its parent. So this is a complete edit cycle:
 
 ```
-subconscious doc get notes/hello.md > hello.md
+dreams doc get notes/hello.md > hello.md
 $EDITOR hello.md
-subconscious doc put hello.md
+dreams doc put hello.md
 ```
 
 `doc update` and `doc delete` look up the current revision for you. Pass `--parent` when you want an explicit compare-and-swap.
@@ -170,8 +170,8 @@ Both commands continue past a failing file, report every file, and exit 1 if any
 Two vaults replicate the way CouchDB databases do. A vault can pull from another vault, or sync with it in both directions:
 
 ```
-subconscious --db laptop.db pull desktop.db     # desktop's changes into laptop
-subconscious --db laptop.db sync desktop.db     # pull, then push
+dreams --db laptop.db pull desktop.db     # desktop's changes into laptop
+dreams --db laptop.db sync desktop.db     # pull, then push
 ```
 
 The peer is another vault file on this machine. It must exist, so run `init` on it first. A vault cannot sync with itself. Pull and sync are CLI commands only. An agent cannot start them over MCP.
@@ -179,10 +179,10 @@ The peer is another vault file on this machine. It must exist, so run `init` on 
 ### A session
 
 ```
-subconscious --db laptop.db init
-subconscious --db desktop.db init
-subconscious --db laptop.db doc put notes/plan.md
-subconscious --db laptop.db sync desktop.db
+dreams --db laptop.db init
+dreams --db desktop.db init
+dreams --db laptop.db doc put notes/plan.md
+dreams --db laptop.db sync desktop.db
 pulled 0 revisions from /Users/me/desktop.db (8 present, 0 excluded)
 pushed 1 revision to /Users/me/desktop.db (8 present, 0 excluded)
 ```
@@ -227,7 +227,7 @@ Do not copy a vault file with Dropbox, iCloud, or a similar service while it is 
 If two vaults edit the same revision, a sync keeps both edits. The document now has two leaves. Every vault picks the same winner: a live revision beats a tombstone, then the higher generation wins, then the lower hash. (CouchDB keeps the higher hash. Any fixed rule gives every vault the same winner.) `doc get` returns the winner, and `_conflicts` lists the other live leaves:
 
 ```
-subconscious doc get notes/plan.md
+dreams doc get notes/plan.md
 ---
 _id: notes/plan.md
 _rev: 3-4be1…
@@ -243,7 +243,7 @@ Until you resolve, the document works as usual. Reads, lists, and search use the
 To find every document with conflicts:
 
 ```
-subconscious doc conflicts
+dreams doc conflicts
 ID             WINNER      CONFLICTS
 notes/plan.md  3-4be1…     1
 ```
@@ -251,15 +251,15 @@ notes/plan.md  3-4be1…     1
 To resolve, keep the winner:
 
 ```
-subconscious doc resolve notes/plan.md
+dreams doc resolve notes/plan.md
 ```
 
 or write a merge on the winner:
 
 ```
-subconscious doc get notes/plan.md > plan.md
+dreams doc get notes/plan.md > plan.md
 $EDITOR plan.md
-subconscious doc resolve notes/plan.md plan.md
+dreams doc resolve notes/plan.md plan.md
 ```
 
 `resolve` writes the merge (if given) as a child of the winner, and a tombstone on each revision in `_conflicts`, in one transaction. A merge file must build on the winner. A file with a different `_parent` fails with a conflict. Sync the result to the other vaults. You can also do the same steps by hand: `doc update` on the winner, then `doc delete <id> --parent <rev>` for each conflict.
@@ -271,8 +271,8 @@ Vaults seeded by different versions of this binary can have different built-in s
 ### Let an agent merge
 
 ```
-subconscious doc resolve notes/plan.md --auto --dry-run   # look first
-subconscious doc resolve notes/plan.md --auto
+dreams doc resolve notes/plan.md --auto --dry-run   # look first
+dreams doc resolve notes/plan.md --auto
 ```
 
 `--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
@@ -282,9 +282,9 @@ The merge keeps the winner's `_type`, unpinned, so it is validated against the c
 `--dry-run` prints the merge and writes nothing. Its output is valid input for `doc resolve <id> FILE`, so you can edit the merge before you apply it:
 
 ```
-subconscious doc resolve notes/plan.md --auto --dry-run > merge.md
+dreams doc resolve notes/plan.md --auto --dry-run > merge.md
 $EDITOR merge.md
-subconscious doc resolve notes/plan.md merge.md
+dreams doc resolve notes/plan.md merge.md
 ```
 
 If a sync brings in a new conflict while the agent works, the resolve fails and writes nothing. Run it again. If the runner fails, times out, or replies without a JSON object, the command fails with an error named `runner`, and nothing is written. A merge that you do not like loses nothing: the losing revisions are still in the vault, and the merge is an ordinary revision that you can edit. A document without conflicts is printed, and no runner starts.
@@ -311,8 +311,8 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
 1. Seed the default runners and look at them.
 
    ```
-   subconscious init
-   subconscious runner list
+   dreams init
+   dreams runner list
    ```
 
    You get `runners/claude`, `runners/codex`, and `runners/pi`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in.
@@ -321,17 +321,17 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
 
    ```
    cat > digest.md <<'EOF'
-   Read every document tagged `inbox` with `subconscious doc list --tag inbox --json`.
+   Read every document tagged `inbox` with `dreams doc list --tag inbox --json`.
    Write a short digest as a new document with the tag `digest`.
    EOF
    ```
 
-   The agent has the `subconscious` binary on its `PATH`, and `SUBCONSCIOUS_DB` already points at this vault. It can read and write with the shell commands in this README.
+   The agent has the `dreams` binary on its `PATH`, and `DREAMS_DB` already points at this vault. It can read and write with the shell commands in this README.
 
 3. Add the task.
 
    ```
-   subconscious task add tasks/digest --runner runners/claude --every 1d digest.md
+   dreams task add tasks/digest --runner runners/claude --every 1d digest.md
    ```
 
    The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude` and follows later edits to that runner. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
@@ -339,7 +339,7 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
 4. Look before it runs.
 
    ```
-   subconscious task check tasks/digest
+   dreams task check tasks/digest
    ```
 
    This prints the schedule, the last run, whether the task is due, and the exact command it will spawn. Nothing runs.
@@ -347,8 +347,8 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
 5. Run it once by hand.
 
    ```
-   subconscious task run tasks/digest
-   subconscious task runs tasks/digest
+   dreams task run tasks/digest
+   dreams task runs tasks/digest
    ```
 
    `task run` fires at once and prints the run document. `task runs` lists past runs with their exit code and error. The agent's last message is in the run's `content`.
@@ -356,17 +356,17 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
 6. Start the clock.
 
    ```
-   subconscious daemon install
+   dreams daemon install
    ```
 
-   From now on the daemon starts at login and fires each task when it is due. `subconscious task list` shows every enabled task, its last run, and whether it is due right now.
+   From now on the daemon starts at login and fires each task when it is due. `dreams task list` shows every enabled task, its last run, and whether it is due right now.
 
 ### A task that waits for changes
 
 Add a `when` filter and the task fires only if a matching document changed since its last run:
 
 ```
-subconscious task add tasks/triage --runner runners/claude --every 15m --tag inbox triage.md
+dreams task add tasks/triage --runner runners/claude --every 15m --tag inbox triage.md
 ```
 
 The filters are `--tag`, `--type`, `--glob` (a SQLite GLOB on `_id`, for example `inbox/*`), and `--id` (repeatable). They are AND-ed. The agent gets the prompt, then a section that lists what changed:
@@ -403,18 +403,18 @@ It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads pa
 ### Managing tasks
 
 ```
-subconscious task list                 every enabled task, last run, due or not
-subconscious task check <id>           one task in detail, plus the command it would run
-subconscious task run <id> [--force]   fire now; --force also when the last run has not finished
-subconscious task runs <id>            past runs, newest first
-subconscious task rm <id>              delete the task; its runs stay
+dreams task list                 every enabled task, last run, due or not
+dreams task check <id>           one task in detail, plus the command it would run
+dreams task run <id> [--force]   fire now; --force also when the last run has not finished
+dreams task runs <id>            past runs, newest first
+dreams task rm <id>              delete the task; its runs stay
 ```
 
 To pause a task, edit it with `enabled: false`:
 
 ```
-subconscious doc get tasks/digest > t.md   # edit enabled: false
-subconscious doc put t.md
+dreams doc get tasks/digest > t.md   # edit enabled: false
+dreams doc put t.md
 ```
 
 A disabled task leaves `task list`; `task check` still shows it. `task add` on an existing id replaces it. An identical re-add writes nothing.
@@ -426,13 +426,13 @@ A runner is a document typed `doc://schemas/runner` with the command that starts
 Add your own, for example a cheaper model for frequent tasks:
 
 ```
-subconscious runner add runners/claude-fast --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
-subconscious runner rm runners/pi
+dreams runner add runners/claude-fast --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
+dreams runner rm runners/pi
 ```
 
 Runner commands are code. They enter only through the CLI, or from a vault that you [sync](#what-replicates) with. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted. `doc resolve --auto` also uses runners.
 
-The command inherits these variables: `SUBCONSCIOUS_DB`, `SUBCONSCIOUS_TASK`, `SUBCONSCIOUS_RUN`, `SUBCONSCIOUS_ACTOR` (the task id), `SUBCONSCIOUS_MCP` (a generated MCP config for this vault), and `SUBCONSCIOUS_OUT`. `PATH` starts with the directory of this binary.
+The command inherits these variables: `DREAMS_DB`, `DREAMS_TASK`, `DREAMS_RUN`, `DREAMS_ACTOR` (the task id), `DREAMS_MCP` (a generated MCP config for this vault), and `DREAMS_OUT`. `PATH` starts with the directory of this binary.
 
 ### Runs
 
@@ -441,12 +441,12 @@ Each firing writes a document typed `doc://schemas/run` at `runs/<task id>/<time
 ### The clock
 
 ```
-subconscious tick                        one pass, then exit
-subconscious daemon                      keep ticking; every --interval (60s) and sooner when the database changes
-subconscious daemon install | uninstall  start it at login (launchd on macOS, systemd on Linux)
+dreams tick                        one pass, then exit
+dreams daemon                      keep ticking; every --interval (60s) and sooner when the database changes
+dreams daemon install | uninstall  start it at login (launchd on macOS, systemd on Linux)
 ```
 
-`daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. Logs go to `~/Library/Logs/subconscious/<name>.log` on macOS and to `journalctl --user -u subconscious-<name>` on Linux. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
+`daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. Logs go to `~/Library/Logs/dreams/<name>.log` on macOS and to `journalctl --user -u dreams-<name>` on Linux. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
 
 ### When something goes wrong
 
@@ -457,14 +457,14 @@ subconscious daemon install | uninstall  start it at login (launchd on macOS, sy
 
 ## MCP
 
-`subconscious serve` speaks the stateless MCP protocol, version 2026-07-28, over stdio. Older protocol versions are refused. The host starts the binary as a child process and talks to it through its stdin and stdout. Logs go to stderr, controlled by `RUST_LOG`.
+`dreams serve` speaks the stateless MCP protocol, version 2026-07-28, over stdio. Older protocol versions are refused. The host starts the binary as a child process and talks to it through its stdin and stdout. Logs go to stderr, controlled by `RUST_LOG`.
 
 ### Use with Claude Code
 
 Register the server. `mcp-json` prints the server entry for the vault that `--db` names, with absolute paths, because the host does not start the server in your project directory.
 
 ```
-claude mcp add-json -s user subconscious "$(subconscious --db ~/.subconscious/vault.db mcp-json)"
+claude mcp add-json -s user dreams "$(dreams --db ~/.dreams/vault.db mcp-json)"
 ```
 
 `-s user` makes the server available in all your projects. Leave it out to add the server to the current project only. To record writes under an agent name, add `--actor claude` before `mcp-json`. Other hosts take the same entry under `mcpServers` in their config file.
@@ -477,7 +477,7 @@ Then turn on protocol negotiation in Claude Code. Without it, Claude Code does n
 
 Or export `MCP_PROTOCOL_NEGOTIATION=auto` in your shell profile.
 
-To check, start Claude Code and run `/mcp`. `subconscious` shows as connected, and its tools have names like `mcp__subconscious__list_docs`.
+To check, start Claude Code and run `/mcp`. `dreams` shows as connected, and its tools have names like `mcp__dreams__list_docs`.
 
 ### Tools
 
@@ -507,7 +507,7 @@ A document typed `doc://schemas/skill` is a skill. The server gives skills to th
 - `content`: the instructions, in Markdown.
 
 ```
-subconscious doc put - <<'EOF'
+dreams doc put - <<'EOF'
 {"_id": "skills/git-workflow", "_type": "doc://schemas/skill",
  "name": "git-workflow", "description": "Branch, commit, and open a PR.",
  "content": "# Steps\n1. Make a branch first.\n"}
@@ -529,7 +529,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
 - Schemas are documents. Every entry point seeds the built-in documents on first use: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, the three default runners, and the `skills/daily-note` skill. A built-in document that you edit or delete stays as you left it.
-- `subconscious seed` restores the built-in documents. It writes each one whose current revision is different from the default, and it revives deleted ones. The earlier revisions stay in history. Use it after an edit goes wrong, or to get the defaults of a newer binary.
+- `dreams seed` restores the built-in documents. It writes each one whose current revision is different from the default, and it revives deleted ones. The earlier revisions stay in history. Use it after an edit goes wrong, or to get the defaults of a newer binary.
 
 Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
 

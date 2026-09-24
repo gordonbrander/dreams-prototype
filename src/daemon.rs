@@ -118,7 +118,7 @@ pub fn render_plist(label: &str, exe: &Path, db: &Path, log: &Path, path_env: &s
 /// A systemd user service that keeps the daemon running.
 pub fn render_unit(exe: &Path, db: &Path, path_env: &str) -> String {
     format!(
-        "[Unit]\nDescription=subconscious daemon for {db}\n\n[Service]\nExecStart={exe} --db {db} daemon\nRestart=always\nRestartSec=5\nEnvironment=PATH={path}\n\n[Install]\nWantedBy=default.target\n",
+        "[Unit]\nDescription=dreams daemon for {db}\n\n[Service]\nExecStart={exe} --db {db} daemon\nRestart=always\nRestartSec=5\nEnvironment=PATH={path}\n\n[Install]\nWantedBy=default.target\n",
         exe = exe.to_string_lossy(),
         db = db.to_string_lossy(),
         path = path_env,
@@ -154,9 +154,9 @@ pub fn install(db: &Path, exe: &Path, out: &mut dyn Write) -> Result<(), StoreEr
     let stem = stem(db);
     let io = |e: std::io::Error| StoreError::invalid(e.to_string());
     if cfg!(target_os = "macos") {
-        let label = format!("io.subconscious.{stem}");
+        let label = format!("io.dreams.{stem}");
         let plist = home.join("Library/LaunchAgents").join(format!("{label}.plist"));
-        let log = home.join("Library/Logs/subconscious").join(format!("{stem}.log"));
+        let log = home.join("Library/Logs/dreams").join(format!("{stem}.log"));
         std::fs::create_dir_all(plist.parent().unwrap()).map_err(io)?;
         std::fs::create_dir_all(log.parent().unwrap()).map_err(io)?;
         std::fs::write(&plist, render_plist(&label, exe, db, &log, &path_env)).map_err(io)?;
@@ -165,7 +165,7 @@ pub fn install(db: &Path, exe: &Path, out: &mut dyn Write) -> Result<(), StoreEr
         sh("launchctl", &["bootstrap".into(), domain, plist.to_string_lossy().into_owned()])?;
         writeln!(out, "installed {label}\n  {}\nlogs: {}", plist.display(), log.display()).map_err(io)?;
     } else if cfg!(target_os = "linux") {
-        let name = format!("subconscious-{stem}.service");
+        let name = format!("dreams-{stem}.service");
         let unit = home.join(".config/systemd/user").join(&name);
         std::fs::create_dir_all(unit.parent().unwrap()).map_err(io)?;
         std::fs::write(&unit, render_unit(exe, db, &path_env)).map_err(io)?;
@@ -192,7 +192,7 @@ pub fn uninstall(db: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
     let stem = stem(db);
     let io = |e: std::io::Error| StoreError::invalid(e.to_string());
     if cfg!(target_os = "macos") {
-        let label = format!("io.subconscious.{stem}");
+        let label = format!("io.dreams.{stem}");
         let plist = home.join("Library/LaunchAgents").join(format!("{label}.plist"));
         let domain = format!("gui/{}", uid(&home)?);
         let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{label}")]).output();
@@ -202,7 +202,7 @@ pub fn uninstall(db: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
             Err(e) => return Err(io(e)),
         }
     } else if cfg!(target_os = "linux") {
-        let name = format!("subconscious-{stem}.service");
+        let name = format!("dreams-{stem}.service");
         let unit = home.join(".config/systemd/user").join(&name);
         let _ = Command::new("systemctl").args(["--user", "disable", "--now", &name]).output();
         match std::fs::remove_file(&unit) {
@@ -226,19 +226,19 @@ mod tests {
     #[test]
     fn plist_and_unit_name_the_binary_and_database() {
         let plist = render_plist(
-            "io.subconscious.vault",
-            Path::new("/opt/bin/subconscious"),
+            "io.dreams.vault",
+            Path::new("/opt/bin/dreams"),
             Path::new("/v/my vault.db"),
             Path::new("/l/vault.log"),
             "/opt/bin:/usr/bin",
         );
-        assert!(plist.contains("<string>io.subconscious.vault</string>"));
-        assert!(plist.contains("<string>/opt/bin/subconscious</string>\n    <string>--db</string>\n    <string>/v/my vault.db</string>\n    <string>daemon</string>"));
+        assert!(plist.contains("<string>io.dreams.vault</string>"));
+        assert!(plist.contains("<string>/opt/bin/dreams</string>\n    <string>--db</string>\n    <string>/v/my vault.db</string>\n    <string>daemon</string>"));
         assert!(plist.contains("<key>KeepAlive</key>\n  <true/>"));
         assert!(plist.contains("<string>/l/vault.log</string>"));
 
-        let unit = render_unit(Path::new("/opt/bin/subconscious"), Path::new("/v/vault.db"), "/opt/bin");
-        assert!(unit.contains("ExecStart=/opt/bin/subconscious --db /v/vault.db daemon\n"));
+        let unit = render_unit(Path::new("/opt/bin/dreams"), Path::new("/v/vault.db"), "/opt/bin");
+        assert!(unit.contains("ExecStart=/opt/bin/dreams --db /v/vault.db daemon\n"));
         assert!(unit.contains("Restart=always"));
         assert!(unit.contains("Environment=PATH=/opt/bin"));
     }

@@ -32,7 +32,7 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "Bash(subconscious:*)",
+            "Bash(dreams:*)",
             "--mcp-config",
             "{mcp}",
             "--strict-mcp-config",

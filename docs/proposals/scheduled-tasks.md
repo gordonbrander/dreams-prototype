@@ -21,7 +21,7 @@ Checked on 2026-09-22 against Claude Code 2.1.280, Codex CLI 0.39.0 (installed) 
 
 Hooks in every host fire on events, never on a timer.
 
-One blocker for every approach: `subconscious serve` accepts only MCP 2026-07-28. Codex sends 2025-06-18 and cannot connect. Claude Code may also refuse. Either widen `supported_protocol_versions` in `src/mcp.rs`, or let the agent drive the `subconscious` binary through Bash. Both are small.
+One blocker for every approach: `dreams serve` accepts only MCP 2026-07-28. Codex sends 2025-06-18 and cannot connect. Claude Code may also refuse. Either widen `supported_protocol_versions` in `src/mcp.rs`, or let the agent drive the `dreams` binary through Bash. Both are small.
 
 ## Shared piece: the watch primitive
 
@@ -47,7 +47,7 @@ The cursor lives in the vault, so a fresh session each run still knows where it 
 
 An agent that writes into the set it watches wakes itself on the next tick. Three fixes, in order of preference:
 
-1. Add a nullable `actor` column to `docs`. `subconscious serve --actor <id>` sets it on every write from that connection. `check_watch` skips rows whose actor is the watch's own id. Correct. One migration.
+1. Add a nullable `actor` column to `docs`. `dreams serve --actor <id>` sets it on every write from that connection. `check_watch` skips rows whose actor is the watch's own id. Correct. One migration.
 2. Ack the head `seq` at the end of the run. Simple, but drops changes made by others during the run.
 3. Accept one extra run per interval and keep prompts idempotent. Zero code, wasteful.
 
@@ -63,7 +63,7 @@ MCP has three carriers for instructions: server `instructions`, prompts, and res
 2. Give your host scheduler this prompt: "call `check_watch`, do the task on the returned documents, then `ack_watch`."
 3. Per host. Claude Code session: `/loop 15m`. Persistent: write `~/.claude/scheduled-tasks/<name>/SKILL.md`, or start `claude --bg "/loop ..."`. Codex and Pi: no clock available; see Option B.
 
-A second carrier is files on disk. Claude, Codex, and Pi all read skill files. `subconscious skill install <host>` writes the same text into each host's skill folder. One command, and it works for hosts that never read MCP prompts.
+A second carrier is files on disk. Claude, Codex, and Pi all read skill files. `dreams skill install <host>` writes the same text into each host's skill folder. One command, and it works for hosts that never read MCP prompts.
 
 ### Against the requirements
 
@@ -78,7 +78,7 @@ The watch primitive, the skill text, the MCP prompt, and `skill install`. Nothin
 
 ## Option B: vault clock
 
-Subconscious owns schedules, fires them, and records the runs. This follows eto's scheduler: durable schedule rows, a one-minute tick, publish before advance, and a failing row that advances instead of retrying every minute.
+Dreams owns schedules, fires them, and records the runs. This follows eto's scheduler: durable schedule rows, a one-minute tick, publish before advance, and a failing row that advances instead of retrying every minute.
 
 ### Schedules and runs are documents
 
@@ -100,7 +100,7 @@ A `_type: run` document per fire holds the schedule id, start time, exit code, t
 
 ### The tick
 
-`subconscious tick` is one pass:
+`dreams tick` is one pass:
 
 1. List current `_type: schedule` documents with `enabled: true`.
 2. For each, find the last run. A `watch` schedule is due when matching changes exist since the run's `seq` and the interval has passed. A `cron` schedule is due when the newest occurrence after the last run is in the past. Fire once for the latest missed time.
@@ -121,19 +121,19 @@ This is the model-agnostic part. About 30 lines plus the timeout.
 
 ### The clock
 
-- **B1, recommended.** `subconscious schedule install` writes a launchd agent on macOS or a systemd user timer on Linux that runs `tick` every minute. `uninstall` removes it. No daemon. Survives reboot. launchd never overlaps one job.
-- **B2.** `subconscious daemon` with a sleep loop, installed as a `KeepAlive` service by the same `install` command. Same tick plus a loop. Worth it only for sub-minute reaction or a status endpoint.
+- **B1, recommended.** `dreams schedule install` writes a launchd agent on macOS or a systemd user timer on Linux that runs `tick` every minute. `uninstall` removes it. No daemon. Survives reboot. launchd never overlaps one job.
+- **B2.** `dreams daemon` with a sleep loop, installed as a `KeepAlive` service by the same `install` command. Same tick plus a loop. Worth it only for sub-minute reaction or a status endpoint.
 
 ### Command surface
 
 ```
-subconscious schedule add <id> [--cron EXPR] [--watch tag=inbox] [--every 15m] --runner claude [PROMPT_FILE]
-subconscious schedule list
-subconscious schedule rm <id>
-subconscious schedule run <id>            manual fire
-subconscious schedule runs <id>           run history
-subconscious schedule install | uninstall
-subconscious tick                         one pass; what the timer calls
+dreams schedule add <id> [--cron EXPR] [--watch tag=inbox] [--every 15m] --runner claude [PROMPT_FILE]
+dreams schedule list
+dreams schedule rm <id>
+dreams schedule run <id>            manual fire
+dreams schedule runs <id>           run history
+dreams schedule install | uninstall
+dreams tick                         one pass; what the timer calls
 ```
 
 MCP needs nothing beyond the `schedule` schema. `run_schedule` and `list_runs` are optional conveniences.
@@ -152,8 +152,8 @@ A cron parser (the `croner` crate, or a hand-rolled 5-field parser like eto's, a
 ## Ruled out
 
 - **Host-owned schedules without the vault** (a launchd plist per task that runs `claude -p`; a Desktop routine by hand). Zero code, but fails requirements 1, 2, and 3.
-- **Agent as dispatcher.** One Claude routine every hour that runs `subconscious schedule due` and does each task. Claude only, and one long task delays the rest.
-- **Tick inside `subconscious serve`.** No install, but tasks stop when the session closes, and one agent spawns another.
+- **Agent as dispatcher.** One Claude routine every hour that runs `dreams schedule due` and does each task. Claude only, and one long task delays the rest.
+- **Tick inside `dreams serve`.** No install, but tasks stop when the session closes, and one agent spawns another.
 
 ## Recommended order
 

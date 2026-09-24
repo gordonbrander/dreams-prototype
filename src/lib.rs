@@ -1,4 +1,4 @@
-//! Subconscious: a CouchDB-like, append-only document store on SQLite.
+//! Dreams: a CouchDB-like, append-only document store on SQLite.
 //!
 //! - `docs` holds one immutable row per revision.
 //! - `doc_heads`, `doc_tags`, `docs_fts` are projections of the current

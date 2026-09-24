@@ -108,7 +108,7 @@ Assuming a CouchDB-shaped record (vs DialogDB)...
 type Doc = {
   _id: string; // UUID. Globally-unique reference.
   _rev: string; // CouchDB-style rev.
-  _schema: string; // URI e.g. `urn:subconscious:schema:g:agent/v1`
+  _schema: string; // URI e.g. `urn:dreams:schema:g:agent/v1`
   _path: string; // path string "foo/bar/baz". Locally unique address
   title?: string;
   content: string;

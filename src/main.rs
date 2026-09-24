@@ -1,6 +1,6 @@
 fn main() {
     // Real stdio handles, unlocked: `serve` hands stdin/stdout to tokio.
-    let code = subconscious::cli::run(
+    let code = dreams::cli::run(
         std::env::args_os(),
         &mut std::io::stdin(),
         &mut std::io::stdout(),

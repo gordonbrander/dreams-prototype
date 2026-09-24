@@ -17,19 +17,19 @@ use crate::task::{self, Evaluation, TickReport, When};
 use crate::sync::{self, PullReport};
 use crate::{daemon, markdown, mcp, resolve, rev, seed};
 
-/// Subconscious: a versioned document vault in SQLite, with a CLI and an MCP server.
+/// Dreams: a versioned document vault in SQLite, with a CLI and an MCP server.
 #[derive(Parser)]
-#[command(name = "subconscious", version, about)]
+#[command(name = "dreams", version, about)]
 pub struct Cli {
     /// Path to the SQLite database file.
-    #[arg(long, global = true, default_value = "vault.db", env = "SUBCONSCIOUS_DB")]
+    #[arg(long, global = true, default_value = "vault.db", env = "DREAMS_DB")]
     db: PathBuf,
     /// Print JSON (the same structures the MCP tools return) instead of human output.
     #[arg(long, global = true)]
     json: bool,
     /// Record this name as the writer of every revision. A scheduled task's
     /// agent runs with its task id here, so the task does not wake itself.
-    #[arg(long, global = true, env = "SUBCONSCIOUS_ACTOR")]
+    #[arg(long, global = true, env = "DREAMS_ACTOR")]
     actor: Option<String>,
     #[command(subcommand)]
     command: Command,
@@ -45,7 +45,7 @@ enum Command {
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
     Serve,
     /// Print how a host starts `serve` on this vault, as the JSON of one `mcpServers` entry.
-    /// Paths are absolute. For example: claude mcp add-json subconscious "$(subconscious mcp-json)"
+    /// Paths are absolute. For example: claude mcp add-json dreams "$(dreams mcp-json)"
     McpJson,
     /// Documents. A schema is a document too: put one, then reference it as `_type: doc://<id>`.
     #[command(subcommand)]

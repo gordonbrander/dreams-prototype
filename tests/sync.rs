@@ -1,9 +1,9 @@
 use serde_json::{Value, json};
-use subconscious::runner::{RUNNER_TYPE, Runner};
-use subconscious::seed;
-use subconscious::sync::{pull, sync};
-use subconscious::task::{RUN_TYPE, TASK_TYPE};
-use subconscious::{Doc, PutInput, Store, StoreError};
+use dreams::runner::{RUNNER_TYPE, Runner};
+use dreams::seed;
+use dreams::sync::{pull, sync};
+use dreams::task::{RUN_TYPE, TASK_TYPE};
+use dreams::{Doc, PutInput, Store, StoreError};
 
 fn store() -> Store {
     Store::open_in_memory().unwrap()
@@ -279,7 +279,7 @@ fn the_common_ancestor_is_the_fork_point() {
     let (a, _b, base) = forked("x");
     let head = a.get("x").unwrap();
     assert_eq!(a.ancestors(&head.rev).unwrap(), [head.rev.clone(), base.clone()]);
-    let ancestor = subconscious::resolve::common_ancestor(&a, &head.rev, &head.conflicts).unwrap();
+    let ancestor = dreams::resolve::common_ancestor(&a, &head.rev, &head.conflicts).unwrap();
     assert_eq!(ancestor, Some(base));
 
     // two vaults that each created the same id share nothing
@@ -289,7 +289,7 @@ fn the_common_ancestor_is_the_fork_point() {
     put(&mut d, json!({"_id": "y", "title": "d"}));
     sync(&mut c, "c", &mut d, "d").unwrap();
     let y = c.get("y").unwrap();
-    assert_eq!(subconscious::resolve::common_ancestor(&c, &y.rev, &y.conflicts).unwrap(), None);
+    assert_eq!(dreams::resolve::common_ancestor(&c, &y.rev, &y.conflicts).unwrap(), None);
 }
 
 #[test]

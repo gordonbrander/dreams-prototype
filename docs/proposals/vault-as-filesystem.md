@@ -37,7 +37,7 @@ Effort: about 1000 to 1500 lines, plus the install story.
 
 Crates such as `nfsserve` and `nfs3_server` give a FUSE-like trait. The binary listens on localhost. macOS and Linux mount it with the built-in `mount` command, with no driver. FUSE-T works this way internally.
 
-`subconscious mount <dir>` can start the server and run the `mount` command itself. `subconscious unmount` reverses it.
+`dreams mount <dir>` can start the server and run the `mount` command itself. `dreams unmount` reverses it.
 
 Effort: about 800 to 1200 lines for the trait. The install is one command we run. This is the best of the mount options.
 
