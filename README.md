@@ -185,11 +185,11 @@ dreams --db laptop.db init
 dreams --db desktop.db init
 dreams --db laptop.db doc put notes/plan.md
 dreams --db laptop.db sync desktop.db
-pulled 0 revisions from /Users/me/desktop.db (8 present)
-pushed 1 revision to /Users/me/desktop.db (8 present)
+pulled 0 revisions from /Users/me/desktop.db (15 present)
+pushed 1 revision to /Users/me/desktop.db (15 present)
 ```
 
-Two vaults made by the same binary seed the same eight built-in documents with identical revisions, so the first sync copies none of them.
+Two vaults made by the same binary seed the same fifteen built-in documents with identical revisions, so the first sync copies none of them.
 
 ### How a pull works
 
@@ -561,6 +561,26 @@ Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/S
 
 Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
 
+### Daily brief
+
+A brief is a short page of food for thought for the day. It brings back ideas from your own notes, with today's intention as its theme. If there is no intention, the agent finds a theme in your recent notes. A brief has four sections:
+
+- **Theme**: the theme, and where it came from.
+- **Review**: excerpts from 3 notes that relate to the theme, with links.
+- **Prompt**: one provocation to find new ideas, in the style of Oblique Strategies, SCAMPER, or the questions at the end of a textbook chapter.
+- **Collider**: a draft for a new note that joins two far-apart notes, found with the Zettelkasten Compass, and a prompt to continue it.
+
+The seeded skill `skills/brief` (`skill://brief/SKILL.md`) tells the agent how to make a brief. Two seeded documents use it:
+
+- `/dreams:brief` makes today's brief and shows it. It writes nothing.
+- The task `tasks/brief` makes a brief once a day and adds it to the end of today's daily note, under `## Brief`. If the note already has a `## Brief` heading, the run stops.
+
+Like every task, `tasks/brief` is dormant until you deploy it. Deploy it on one vault only, because each vault that deploys it writes a brief. `every: 1d` counts from the time of deploy, so deploy it at the time of day that you want the brief:
+
+```
+dreams task deploy tasks/brief
+```
+
 ## Storage
 
 One SQLite file in WAL mode. Migrations run on open.
@@ -569,7 +589,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, the three default runners, the `skills/daily-note` skill, and the `prompts/daily` and `prompts/intention` prompts.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, the three default runners, the `skills/daily-note` and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, and `prompts/brief` prompts, and the dormant `tasks/brief` task.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 

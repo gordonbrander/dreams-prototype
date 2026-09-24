@@ -753,8 +753,8 @@ mod tests {
         assert!(state.enabled);
         assert_eq!(state.task_rev, edited.rev);
 
-        // nothing left to deploy completes at once; disable needs no confirmation
-        assert!(matches!(vault.deploy_round(None, None, None, true).unwrap(), CallToolResponse::Complete(_)));
+        // a task already deployed completes at once; disable needs no confirmation
+        assert!(matches!(vault.deploy_round(id(), None, None, true).unwrap(), CallToolResponse::Complete(_)));
         let off = vault.disable_task(Parameters(TaskParams { id: "tasks/t".into() })).unwrap();
         assert!(!off.0.enabled);
     }
