@@ -599,6 +599,26 @@ fn task_runs_record_failures_timeouts_and_environment() {
 }
 
 #[test]
+fn tasks_run_in_workspace_or_their_cwd() {
+    let sb = Sandbox::new();
+    sb.ok(&["runner", "add", "runners/pwd", "--", "pwd", "-P"], "");
+    let prompt = sb.file("p.txt", "hello");
+    sb.ok(&["task", "add", "t-default", "--runner", "runners/pwd", "--every", "1h", &prompt], "");
+    sb.ok(&["task", "add", "t-own", "--runner", "runners/pwd", "--every", "1h", "--cwd", "repos/a", &prompt], "");
+    let physical = |p: PathBuf| format!("{}\n", p.canonicalize().unwrap().display());
+
+    // the folder is made on the first run
+    let run = sb.json(&["task", "run", "t-default"], "");
+    assert_eq!(run["content"], physical(sb.dir.join("workspace")));
+    let run = sb.json(&["task", "run", "t-own"], "");
+    assert_eq!(run["content"], physical(sb.dir.join("repos/a")));
+
+    let check = sb.json(&["task", "check", "t-own"], "");
+    assert_eq!(check["cwd"], sb.dir.join("repos/a").to_string_lossy().as_ref());
+    assert!(sb.ok(&["task", "check", "t-default"], "").contains("cwd:       "));
+}
+
+#[test]
 fn deploys_need_confirmation_and_pin_revisions() {
     let sb = Sandbox::new();
     add_test_runners(&sb);

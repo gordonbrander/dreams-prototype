@@ -405,6 +405,18 @@ An agent that uses the MCP server creates a task by writing a document, then ask
 
 It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It cannot write runner or run documents, or the seeded schemas. Those are read-only over MCP.
 
+### Where an agent runs, and what it can use
+
+An agent runs in the folder `workspace`, next to the vault, and tasks share it. To use another folder, give the task a `cwd`: `task add --cwd DIR`, or the `cwd` field in the task document. A relative path is relative to the vault's folder, and `~/` is your home folder. The folder is made when the task first runs. `task check` shows it.
+
+The seeded runners give the agent these tools:
+
+- `runners/claude`: web search, web fetch, Bash, and the file tools. Bash runs in Claude Code's sandbox: it writes only in the cwd and has no network, so the agent uses web fetch for the web. The file tools write only in the cwd, and read anywhere. `dreams` runs outside the sandbox, so it can write the vault. On Linux, the sandbox needs `bubblewrap` and `socat`.
+- `runners/codex`: web search, and a shell in Codex's `workspace-write` sandbox: it writes only in the cwd and has no network.
+- `runners/pi`: Pi's own tools. Pi has no web tools without extensions, and no sandbox.
+
+All of them can read and write the vault over MCP. A vault made before these tools gets them with `dreams restore-defaults`. A deployed task keeps the runner revision it has until you run `dreams task deploy` again.
+
 ### Managing tasks
 
 ```

@@ -35,13 +35,14 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 /// The body of `schemas/task`.
 pub const TASK_SCHEMA: &str = r#"{
   "title": "Scheduled task",
-  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document.",
+  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document. `cwd` is the folder the agent runs in: a relative path is relative to the vault's folder, and the default is `workspace`.",
   "type": "object",
   "required": ["runner", "every", "prompt"],
   "properties": {
     "runner": {"type": "string", "pattern": "^doc://"},
     "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
     "prompt": {"type": "string"},
+    "cwd": {"type": "string", "minLength": 1},
     "when": {
       "type": "object",
       "additionalProperties": false,
@@ -137,6 +138,7 @@ pub struct Task {
     pub every_secs: u64,
     pub when: Option<When>,
     pub prompt: String,
+    pub cwd: Option<String>,
 }
 
 impl Task {
@@ -155,8 +157,23 @@ impl Task {
             every_secs: parse_duration(&text("every"))?,
             when,
             prompt: text("prompt"),
+            cwd: doc.body.get("cwd").and_then(Value::as_str).map(str::to_string),
         })
     }
+}
+
+/// The folder an agent runs in when its task names none.
+pub const DEFAULT_CWD: &str = "workspace";
+
+/// The folder an agent runs in: `cwd`, or `workspace`. A leading `~/` is the
+/// home folder, so one task works on machines with different home paths. A
+/// relative path is relative to the folder of `db`.
+pub fn work_dir(db: &Path, cwd: Option<&str>) -> PathBuf {
+    let cwd = cwd.unwrap_or(DEFAULT_CWD);
+    if let (Some(rest), Some(home)) = (cwd.strip_prefix("~/"), std::env::var_os("HOME")) {
+        return PathBuf::from(home).join(rest);
+    }
+    db.parent().unwrap_or(Path::new(".")).join(cwd)
 }
 
 /// One matching revision since the cursor.
@@ -758,17 +775,18 @@ async fn fire_as_task(
         out: scratch.join("last-message"),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
-    let cwd =
-        db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let cwd = work_dir(db, eval.parsed.cwd.as_deref());
 
-    let outcome = match &eval.runner {
-        Ok(runner) => {
+    let failed = |e: String| (Outcome { spawn_error: Some(e), ..Default::default() }, Duration::from_secs(0));
+    let outcome = match (&eval.runner, std::fs::create_dir_all(&cwd)) {
+        (Err(e), _) => failed(e.clone()),
+        (Ok(_), Err(e)) => failed(format!("creating {}: {e}", cwd.display())),
+        (Ok(runner), Ok(())) => {
             let timeout = Duration::from_secs(runner.timeout_secs);
             let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
             let argv = ctx.resolve(&runner.argv);
             (spawn(&argv, &ctx.env(), &cwd, &prompt_text(eval), timeout).await, timeout)
         }
-        Err(e) => (Outcome { spawn_error: Some(e.clone()), ..Default::default() }, Duration::from_secs(0)),
     };
     let finished_at = store.now()?;
     let done = finish(store, &claim, &outcome.0, &ctx.out, outcome.1, &finished_at);
@@ -856,9 +874,20 @@ mod tests {
                 every_secs: 60,
                 when,
                 prompt: prompt.into(),
+                cwd: None,
             },
             runner: Err("not loaded".into()),
         }
+    }
+
+    #[test]
+    fn work_dir_is_cwd_or_workspace_next_to_the_vault() {
+        let db = Path::new("/v/vault.db");
+        assert_eq!(work_dir(db, None), Path::new("/v/workspace"));
+        assert_eq!(work_dir(db, Some("repos/a")), Path::new("/v/repos/a"));
+        assert_eq!(work_dir(db, Some("/abs")), Path::new("/abs"));
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        assert_eq!(work_dir(db, Some("~/src")), home.join("src"));
     }
 
     #[test]

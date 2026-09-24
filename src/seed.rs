@@ -41,14 +41,19 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
     (
         "runners/claude",
         "Claude Code, headless",
-        // Not `--bare`: bare mode skips the stored login.
+        // Not `--bare`: bare mode skips the stored login. Bash runs in the
+        // sandbox: it writes only in the cwd and has no network, and
+        // `dreams` runs outside it to write the vault. `Edit(./**)` covers
+        // every file-writing tool.
         &[
             "claude",
             "-p",
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "Bash(dreams:*),mcp__dreams",
+            "Bash,Read,Glob,Grep,Edit(./**),WebSearch,WebFetch,mcp__dreams",
+            "--settings",
+            r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"excludedCommands":["dreams"]}}"#,
             "--mcp-config",
             "{mcp}",
             "--strict-mcp-config",
@@ -58,11 +63,14 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
         "runners/codex",
         "Codex CLI, non-interactive",
         // `-c approval_policy=never` works on every Codex version; `-a` does not.
+        // The workspace-write sandbox writes only in the cwd.
         &[
             "codex",
             "exec",
             "-c",
             "approval_policy=never",
+            "-c",
+            "tools.web_search=true",
             "--sandbox",
             "workspace-write",
             "--skip-git-repo-check",
