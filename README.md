@@ -114,8 +114,10 @@ dreams [--db PATH] [--json] <command>
   pull <peer.db>                                  copy the revisions this vault does not have
   sync <peer.db>                                  pull, then push
 
-  task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [PROMPT_FILE]
-  task list                                       every enabled task, its last run, and whether it is due
+  task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [--no-deploy] [--yes] [PROMPT_FILE]
+  task list                                       every task, its state here, its last run, and whether it is due
+  task deploy [<id>] [--yes]                      run the current revisions on this vault; asks first
+  task disable <id>                               stop running a task on this vault
   task rm     <id>
   task check  <id>                                evaluate one task; nothing runs
   task run    <id> [--force]                      fire one task now
@@ -183,8 +185,8 @@ dreams --db laptop.db init
 dreams --db desktop.db init
 dreams --db laptop.db doc put notes/plan.md
 dreams --db laptop.db sync desktop.db
-pulled 0 revisions from /Users/me/desktop.db (8 present, 0 excluded)
-pushed 1 revision to /Users/me/desktop.db (8 present, 0 excluded)
+pulled 0 revisions from /Users/me/desktop.db (8 present)
+pushed 1 revision to /Users/me/desktop.db (8 present)
 ```
 
 Two vaults made by the same binary seed the same eight built-in documents with identical revisions, so the first sync copies none of them.
@@ -203,20 +205,18 @@ Each line of output counts revisions:
 |---|---|
 | `pulled N` / `pushed N` | Revisions written into the target vault. |
 | `present` | Revisions the target already had. |
-| `excluded` | Tasks and runs, which never replicate. |
 | `missing parent` | Revisions skipped because an ancestor did not replicate. Shown only when not zero. |
 | `checkpoint reset` | The peer changed, so the whole feed was read again. |
 
-`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `excluded`, `missing_parent`, `last_seq`, and `restarted`.
+`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `missing_parent`, `last_seq`, and `restarted`.
 
 ### What replicates
 
-Every document replicates, with two exceptions:
+Every document replicates: notes, schemas, runners, tasks, and run receipts.
 
-- **Tasks.** A synced task would fire in both vaults.
-- **Runs.** A run records a position in its own vault's change feed.
+State that belongs to one vault is not a document, and does not replicate. This includes which tasks run here, and where each task's schedule is. A task that arrives by sync is **dormant**: it does not run until you deploy it with `dreams task deploy <id>`. So a task runs only on the vaults where you deployed it.
 
-Runners and schemas replicate like other documents. **So a peer can change the commands that your tasks run.** A task follows the current revision of its runner. Sync only with vaults that you trust.
+Runners replicate so that you can share your configurations. A deploy pins the task revision and the runner revision, so an edit from a peer, to a task or to its runner, does not run on your vault until you deploy again. `task list` shows `changed` for a task with an edit that is not deployed. A deleted task, or a deleted runner, stops at once on every vault that syncs the deletion. No deploy is needed to stop.
 
 A copied revision counts as a change in this vault. So a task that waits for changes wakes for edits that came in through a sync.
 
@@ -304,7 +304,7 @@ A task wakes an agent on a schedule with a prompt. There are two kinds:
 - **Periodic.** Every interval, run the prompt.
 - **On change.** Every interval, run the prompt only if a watched document changed since the last run.
 
-Tasks, runners, and runs are all documents in the vault. There is no other configuration.
+Tasks, runners, and runs are documents in the vault. A task document is a template: it replicates, but it runs only on a vault where it is deployed. A deploy pins the exact task and runner revisions that run, and asks you to confirm them first. `task add` deploys the task on this vault.
 
 ### Your first task
 
@@ -334,7 +334,9 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
    dreams task add tasks/digest --runner runners/claude --every 1d digest.md
    ```
 
-   The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude` and follows later edits to that runner. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
+   The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude`. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
+
+   `task add` then shows the prompt and the command, and asks `Deploy? [y/N]` on your terminal. Answer `y` to run the task on this vault. The question goes to the terminal, not to stdin, so a prompt on stdin works. In a script, pass `--yes` to deploy without the question. Without a terminal and without `--yes`, the deploy fails and the task stays dormant.
 
 4. Look before it runs.
 
@@ -351,7 +353,7 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
    dreams task runs tasks/digest
    ```
 
-   `task run` fires at once and prints the run document. `task runs` lists past runs with their exit code and error. The agent's last message is in the run's `content`.
+   `task run` fires at once and prints the run receipt. `task runs` lists past runs with their exit code and error. The agent's last message is in the run's `content`.
 
 6. Start the clock.
 
@@ -359,7 +361,7 @@ Tasks, runners, and runs are all documents in the vault. There is no other confi
    dreams daemon install
    ```
 
-   From now on the daemon starts at login and fires each task when it is due. `dreams task list` shows every enabled task, its last run, and whether it is due right now.
+   From now on the daemon starts at login and fires each deployed task when it is due. `dreams task list` shows every task, its state on this vault (`deployed`, `disabled`, or `dormant`, plus `changed` when an edit is not deployed), its last run, and whether it is due right now.
 
 ### A task that waits for changes
 
@@ -384,7 +386,7 @@ Changes collect until a run consumes them. So the task fires at most once per in
 
 ### From an agent
 
-An agent that uses the MCP server creates a task by writing a document. It does not need new tools.
+An agent that uses the MCP server creates a task by writing a document, then asks to deploy it with the `deploy_task` tool. A task document that is not deployed does not run.
 
 ```json
 {
@@ -393,31 +395,31 @@ An agent that uses the MCP server creates a task by writing a document. It does 
   "runner": "doc://runners/claude",
   "every": "15m",
   "when": { "tag": "inbox" },
-  "prompt": "Triage the documents listed below.",
-  "enabled": true
+  "prompt": "Triage the documents listed below."
 }
 ```
+
+`deploy_task` takes a task `id`, or no id for every task that is not deployed at its current revisions. It never deploys on its own: it asks you, through your MCP client, to confirm the exact prompt and command. Your client shows the question; the agent cannot answer it. If you decline, nothing is deployed. If the task or runner changed before you answered, you are asked again. A client that cannot ask questions (MCP elicitation) cannot deploy; run `dreams task deploy` in a terminal instead. A scheduled agent runs with no person to ask, so it cannot deploy tasks.
+
+`disable_task` takes a task `id` and stops it on this vault, with no question.
 
 It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It cannot write runner or run documents, or the seeded schemas. Those are read-only over MCP.
 
 ### Managing tasks
 
 ```
-dreams task list                 every enabled task, last run, due or not
+dreams task list                 every task, its state here, last run, due or not
+dreams task deploy [<id>]        run the current task and runner revisions here; asks first
+dreams task disable <id>         pause the task on this vault; other vaults are not affected
 dreams task check <id>           one task in detail, plus the command it would run
-dreams task run <id> [--force]   fire now; --force also when the last run has not finished
-dreams task runs <id>            past runs, newest first
+dreams task run <id> [--force]   fire now; --force also when another run holds the task
+dreams task runs <id>            past runs from every vault, newest first
 dreams task rm <id>              delete the task; its runs stay
 ```
 
-To pause a task, edit it with `enabled: false`:
+An edit to a task or to its runner, made here or synced from a peer, runs only after the next `task deploy`. `task deploy` with no id deploys every task that is not deployed at its current revisions: tasks with edits, disabled tasks, and dormant tasks from peers. It asks once for all of them. A redeploy keeps the task's schedule and pending changes. `--yes` deploys without asking.
 
-```
-dreams doc get tasks/digest > t.md   # edit enabled: false
-dreams doc put t.md
-```
-
-A disabled task leaves `task list`; `task check` still shows it. `task add` on an existing id replaces it. An identical re-add writes nothing.
+`task add --no-deploy` writes the task but does not deploy it here. `task run` on a dormant task fires its current revision once and leaves it dormant. `task add` on an existing id replaces the template; the new revision runs after a deploy. An identical re-add writes nothing. `task rm` deletes the task document, so after a sync the task stops on every vault. A task with sync conflicts cannot deploy until you resolve them.
 
 ### Runners
 
@@ -430,13 +432,15 @@ dreams runner add runners/claude-fast --timeout 5m -- claude -p --model claude-s
 dreams runner rm runners/pi
 ```
 
-Runner commands are code. They enter only through the CLI, or from a vault that you [sync](#what-replicates) with. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted. `doc resolve --auto` also uses runners.
+Runner commands are code. They enter only through the CLI, or from a vault that you [sync](#what-replicates) with, and a runner revision runs only after you confirm it in a deploy. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted. `doc resolve --auto` also uses runners.
 
 The command inherits these variables: `DREAMS_DB`, `DREAMS_TASK`, `DREAMS_RUN`, `DREAMS_ACTOR` (the task id), `DREAMS_MCP` (a generated MCP config for this vault), and `DREAMS_OUT`. `PATH` starts with the directory of this binary.
 
 ### Runs
 
-Each firing writes a document typed `doc://schemas/run` at `runs/<task id>/<time>-<seq>`, tagged with the task id. Revision 1 is written before the agent starts and records `runner` as the pinned reference of the runner revision about to run. Revision 2 adds `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Run documents are the scheduler's only state. Tasks and runs stay in their own vault. A sync does not copy them. A run with no `finished_at` is in progress, or was cut off by a crash, and the task waits until the runner's timeout has passed before it fires again.
+Each firing writes a receipt when the agent finishes: a document typed `doc://schemas/run` at `runs/<task id>/<UUID v7>.md`, tagged with the task id. It records `task` and `runner` (the pinned references of the task and runner revisions that ran), `vault` (the id of the vault that ran it), `started_at`, `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Receipts replicate, so `task runs` shows runs from every vault.
+
+The schedule itself is local to the vault. Before the agent starts, the scheduler takes a lease on the task for the runner's timeout plus one minute. When the agent finishes, the receipt is written, the task's change cursor moves, and the lease is released, all in one transaction. If a run is cut off by a crash, it writes no receipt. The lease expires, and the task fires again with the same changes.
 
 ### The clock
 
@@ -446,7 +450,7 @@ dreams daemon                      keep ticking; every --interval (60s) and soon
 dreams daemon install | uninstall  start it at login (launchd on macOS, systemd on Linux)
 ```
 
-`daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. Logs go to `~/Library/Logs/dreams/<name>.log` on macOS and to `journalctl --user -u dreams-<name>` on Linux. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the run document is written before the agent starts, so the second one sees the task as running and skips it.
+`daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. Logs go to `~/Library/Logs/dreams/<name>.log` on macOS and to `journalctl --user -u dreams-<name>` on Linux. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the first one takes the lease before the agent starts, so the second one sees the task as running and skips it.
 
 ### When something goes wrong
 

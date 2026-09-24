@@ -1,7 +1,7 @@
 use dreams::runner::{RUNNER_TYPE, Runner};
 use dreams::seed;
 use dreams::sync::{pull, sync};
-use dreams::task::{RUN_TYPE, TASK_TYPE};
+use dreams::task::{self, RUN_TYPE, TASK_TYPE};
 use dreams::{Doc, PutInput, Store, StoreError};
 use serde_json::{Value, json};
 
@@ -35,7 +35,7 @@ fn pull_copies_everything_once_and_resumes() {
     put(&mut b, json!({"_id": "y", "title": "why", "content": "searchable words"}));
 
     let r = pull(&mut a, &b, "b").unwrap();
-    assert_eq!((r.read, r.written, r.present, r.excluded), (4, 4, 0, 0));
+    assert_eq!((r.read, r.written, r.present), (4, 4, 0));
     assert_eq!(count(&a), 4);
     assert!(matches!(a.get("x"), Err(StoreError::Deleted { .. })));
     let y = a.get("y").unwrap();
@@ -157,7 +157,7 @@ fn a_missing_parent_is_skipped() {
 }
 
 #[test]
-fn tasks_and_runs_do_not_replicate_but_runners_do() {
+fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
     let mut a = store();
     let mut b = store();
     seed::seed(&mut a).unwrap();
@@ -171,11 +171,15 @@ fn tasks_and_runs_do_not_replicate_but_runners_do() {
         &mut b,
         json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}),
     );
+    let b_vault = b.vault_id().unwrap();
     put(
         &mut b,
         json!({"_id": "runs/1", "_type": RUN_TYPE, "task": "doc://tasks/t", "runner": "doc://runners/claude",
-                       "started_at": "2026-09-23T10:00:00.000Z", "seq": 7, "tags": ["run"]}),
+                       "vault": b_vault, "started_at": "2026-09-23T10:00:00.000Z",
+                       "finished_at": "2026-09-23T10:01:00.000Z", "tags": ["tasks/t"]}),
     );
+    let plan = task::plan_deploy(&b, Some("tasks/t")).unwrap();
+    task::apply_deploy(&mut b, &plan).unwrap();
     let claude = b.get("runners/claude").unwrap();
     let mut body = Value::Object(claude.body.clone());
     body["_id"] = json!("runners/claude");
@@ -185,11 +189,51 @@ fn tasks_and_runs_do_not_replicate_but_runners_do() {
     put(&mut b, body);
 
     let r = pull(&mut a, &b, "b").unwrap();
-    assert_eq!((r.written, r.excluded), (1, 2));
-    assert!(matches!(a.get("tasks/t"), Err(StoreError::NotFound { .. })));
-    assert!(matches!(a.get("runs/1"), Err(StoreError::NotFound { .. })));
+    assert_eq!((r.written, r.missing_parent), (3, 0));
+    assert_eq!(a.get("runs/1").unwrap().body["vault"], b.vault_id().unwrap());
+    assert_ne!(a.vault_id().unwrap(), b.vault_id().unwrap());
     let runner = Runner::get(&a, "doc://runners/claude").unwrap();
     assert_eq!(runner.argv, ["claude", "-p", "--edited"]);
+
+    // deployed on b, dormant on a until a deploys it
+    let now = a.now().unwrap();
+    let e = task::evaluate(&a, &now, Some("tasks/t")).unwrap().remove(0);
+    assert!(e.state.is_none() && !e.due);
+    let deployed = task::state(&b, "tasks/t").unwrap().unwrap();
+    let plan = task::plan_deploy(&a, Some("tasks/t")).unwrap();
+    task::apply_deploy(&mut a, &plan).unwrap();
+    assert!(task::state(&a, "tasks/t").unwrap().unwrap().enabled);
+
+    // a synced edit runs on a only after a deploys it; a synced tombstone ends it everywhere
+    let head = b.get("tasks/t").unwrap();
+    let edit = put(
+        &mut b,
+        json!({"_id": "tasks/t", "_parent": head.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude",
+               "every": "1h", "prompt": "changed on b"}),
+    );
+    sync_ab(&mut a, &mut b);
+    let e = task::evaluate(&a, &now, Some("tasks/t")).unwrap().remove(0);
+    assert_eq!((e.task.rev.as_str(), e.drift), (deployed.task_rev.as_str(), true));
+    b.delete("tasks/t", &edit.rev).unwrap();
+    sync_ab(&mut a, &mut b);
+    assert!(task::state(&a, "tasks/t").unwrap().is_none());
+    assert!(task::state(&b, "tasks/t").unwrap().is_none());
+}
+
+#[test]
+fn a_document_that_changes_type_replicates_whole() {
+    let mut a = store();
+    let mut b = store();
+    seed::seed(&mut b).unwrap();
+    let note = put(&mut b, json!({"_id": "tasks/t", "title": "an idea"}));
+    put(
+        &mut b,
+        json!({"_id": "tasks/t", "_parent": note.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude",
+               "every": "1h", "prompt": "go"}),
+    );
+    let r = pull(&mut a, &b, "b").unwrap();
+    assert_eq!(r.missing_parent, 0);
+    assert_eq!(a.get("tasks/t").unwrap().type_path(), Some(TASK_TYPE));
 }
 
 #[test]

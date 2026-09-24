@@ -1,7 +1,10 @@
 //! Scheduled tasks: documents typed `doc://schemas/task` that wake an agent
-//! every interval, optionally only when watched documents changed. Runs are
-//! documents typed `doc://schemas/run` and the only state: the newest run
-//! holds the cursor.
+//! every interval, optionally only when watched documents changed. A task
+//! document is a template and replicates. Each vault keeps its own schedule
+//! in the local `task_state` table: a task with no row is dormant there.
+//! A deploy pins the task revision and the runner revision that run, so an
+//! edit, local or synced, runs only after the next deploy. Each run writes
+//! a receipt, a document typed `doc://schemas/run`, which also replicates.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::doc::{Doc, PutInput};
+use crate::doc::{Doc, DocRef, PutInput, new_id};
 use crate::error::StoreError;
+use crate::rev::short_rev;
 use crate::runner::{Context, Runner};
 use crate::store::{DOC_COLS, Store, row_to_doc, type_filter};
 
@@ -38,7 +42,6 @@ pub const TASK_SCHEMA: &str = r#"{
     "runner": {"type": "string", "pattern": "^doc://"},
     "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
     "prompt": {"type": "string"},
-    "enabled": {"type": "boolean"},
     "when": {
       "type": "object",
       "additionalProperties": false,
@@ -57,15 +60,15 @@ pub const TASK_SCHEMA: &str = r#"{
 /// The body of `schemas/run`.
 pub const RUN_SCHEMA: &str = r#"{
   "title": "Task run",
-  "description": "One firing of a task. Revision 1 is the claim, written before the agent starts; revision 2 adds the result. `seq` is the change-feed position the run consumed. `runner` is the pinned doc:// reference of the runner revision that ran.",
+  "description": "The receipt of one firing of a task, written when the agent finished. `task` and `runner` are the pinned doc:// references of the task and runner revisions that ran. `vault` is the id of the vault that ran it.",
   "type": "object",
-  "required": ["task", "runner", "started_at", "seq", "tags"],
+  "required": ["task", "runner", "vault", "started_at", "finished_at", "tags"],
   "properties": {
     "task": {"type": "string"},
     "runner": {"type": "string"},
+    "vault": {"type": "string"},
     "started_at": {"type": "string"},
     "finished_at": {"type": "string"},
-    "seq": {"type": "integer"},
     "exit_code": {"type": ["integer", "null"]},
     "error": {"type": "string"},
     "content": {"type": "string"},
@@ -134,7 +137,6 @@ pub struct Task {
     pub every_secs: u64,
     pub when: Option<When>,
     pub prompt: String,
-    pub enabled: bool,
 }
 
 impl Task {
@@ -153,7 +155,6 @@ impl Task {
             every_secs: parse_duration(&text("every"))?,
             when,
             prompt: text("prompt"),
-            enabled: doc.body.get("enabled").and_then(Value::as_bool).unwrap_or(true),
         })
     }
 }
@@ -167,17 +168,41 @@ pub struct Change {
     pub deleted: bool,
 }
 
+/// This vault's schedule for one task: its `task_state` row.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct TaskState {
+    pub task_id: String,
+    /// The deployed task revision.
+    pub task_rev: String,
+    /// The deployed runner, a pinned `doc://` reference.
+    pub runner: String,
+    pub enabled: bool,
+    /// The schedule counts from here until the first run.
+    pub enabled_at: String,
+    /// The change-feed position the last run consumed.
+    pub cursor: i64,
+    pub last_run_at: Option<String>,
+    /// Set while a run holds the task.
+    pub lease_until: Option<String>,
+}
+
 /// Everything `task check` shows and `tick` decides on.
 #[derive(Debug, Clone, Serialize)]
 pub struct Evaluation {
+    /// The revision that runs: the deployed one, or the head when dormant.
     pub task: Doc,
-    /// The change-feed head when evaluated. Becomes the run's `seq`.
+    /// The current revision of the template.
+    pub head_rev: String,
+    /// A deploy now would change what runs: the template or its runner changed.
+    pub drift: bool,
+    /// This vault's schedule. `None`: the task is dormant here.
+    pub state: Option<TaskState>,
+    /// The change-feed head when evaluated. Becomes the cursor when a run finishes.
     pub head: i64,
     /// The position the last run consumed.
     pub cursor: i64,
     pub last_run_at: Option<String>,
-    pub last_run: Option<String>,
-    /// The newest run has no result yet and is younger than its timeout.
+    /// A run holds the lease.
     pub running: bool,
     /// The interval has elapsed since the last run.
     pub time_due: bool,
@@ -201,16 +226,159 @@ fn elapsed_secs(conn: &Connection, from: &str, to: &str) -> Result<i64, StoreErr
     Ok(conn.query_row("SELECT unixepoch(?2) - unixepoch(?1)", [from, to], |r| r.get(0))?)
 }
 
-/// The run with the greatest `started_at` for a task, tombstones excluded.
-fn newest_run(conn: &Connection, task_id: &str) -> Result<Option<Doc>, StoreError> {
-    let sql = format!(
-        "SELECT {DOC_COLS} FROM doc_tags t
-           JOIN doc_heads h ON h._id = t._id
-           JOIN docs d ON d._local_seq = h.seq
-          WHERE t.tag = ?1 AND d._type_path = ?2
-          ORDER BY json_extract(d.body, '$.started_at') DESC LIMIT 1"
-    );
-    Ok(conn.query_row(&sql, params![task_id, RUN_TYPE], |r| row_to_doc(r, false)).optional()?)
+fn state_in(conn: &Connection, task_id: &str) -> Result<Option<TaskState>, StoreError> {
+    Ok(conn
+        .query_row(
+            "SELECT task_id, task_rev, runner, enabled, enabled_at, cursor, last_run_at, lease_until
+               FROM task_state WHERE task_id = ?1",
+            [task_id],
+            |r| {
+                Ok(TaskState {
+                    task_id: r.get(0)?,
+                    task_rev: r.get(1)?,
+                    runner: r.get(2)?,
+                    enabled: r.get(3)?,
+                    enabled_at: r.get(4)?,
+                    cursor: r.get(5)?,
+                    last_run_at: r.get(6)?,
+                    lease_until: r.get(7)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// This vault's schedule for a task, or `None` when it is dormant here.
+pub fn state(store: &Store, task_id: &str) -> Result<Option<TaskState>, StoreError> {
+    state_in(store.connection(), task_id)
+}
+
+/// One task to deploy: the revisions that would run, and what the person
+/// confirms.
+#[derive(Debug, Clone, Serialize)]
+pub struct Deploy {
+    pub task_id: String,
+    pub task_rev: String,
+    /// The pinned runner reference.
+    pub runner: String,
+    pub argv: Vec<String>,
+    pub every: String,
+    pub when: Option<When>,
+    pub prompt: String,
+    /// What is deployed now. `None`: dormant.
+    pub current: Option<TaskState>,
+}
+
+impl Deploy {
+    /// The text a person confirms: exactly what will run.
+    pub fn describe(&self) -> String {
+        let now = match &self.current {
+            None => "dormant".to_string(),
+            Some(s) if s.enabled => format!("deployed at {}", short_rev(&s.task_rev)),
+            Some(s) => format!("disabled at {}", short_rev(&s.task_rev)),
+        };
+        let mut text = format!("{}  rev {}  (now {now})\n", self.task_id, short_rev(&self.task_rev));
+        let _ = writeln!(text, "  every:   {}", self.every);
+        if let Some(w) = &self.when {
+            let _ = writeln!(text, "  when:    {}", w.summary());
+        }
+        let _ = writeln!(text, "  runner:  {}", self.runner);
+        let _ = writeln!(text, "  command: {}", self.argv.join(" "));
+        text.push_str("  prompt:\n");
+        for line in self.prompt.lines() {
+            let _ = writeln!(text, "    {line}");
+        }
+        text
+    }
+}
+
+/// The head of a live task, parsed, with its runner resolved and pinned.
+fn resolve(store: &Store, id: &str) -> Result<(Doc, Task, Runner), StoreError> {
+    let head = store.get(id)?;
+    let task = Task::from_doc(&head)?;
+    let runner = Runner::get(store, &task.runner)?;
+    Ok((head, task, runner))
+}
+
+/// What a deploy would change. With an id: that task, or nothing when it is
+/// deployed and enabled at its current heads. Without: every live task
+/// that is not. A task with conflicts cannot deploy.
+pub fn plan_deploy(store: &Store, id: Option<&str>) -> Result<Vec<Deploy>, StoreError> {
+    let ids: Vec<String> = match id {
+        Some(id) => vec![id.to_string()],
+        None => store.list_all(Some(TASK_TYPE))?.into_iter().map(|d| d.id).collect(),
+    };
+    let mut plan = Vec::new();
+    for id in ids {
+        let (head, task, runner) = resolve(store, &id)?;
+        if !head.conflicts.is_empty() {
+            return Err(StoreError::invalid(format!("{id} has conflicts; resolve them before a deploy")));
+        }
+        let current = state(store, &id)?;
+        let runner_ref = runner.pinned();
+        if current.as_ref().is_some_and(|s| s.enabled && s.task_rev == head.rev && s.runner == runner_ref) {
+            continue;
+        }
+        plan.push(Deploy {
+            task_id: id,
+            task_rev: head.rev.clone(),
+            runner: runner_ref,
+            argv: runner.argv,
+            every: head.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
+            when: task.when,
+            prompt: task.prompt,
+            current,
+        });
+    }
+    Ok(plan)
+}
+
+/// Whether each planned task and runner is still at the revision in `plan`.
+pub fn plan_is_current(store: &Store, plan: &[Deploy]) -> Result<bool, StoreError> {
+    for d in plan {
+        match resolve(store, &d.task_id) {
+            Ok((head, _, runner)) if head.rev == d.task_rev && runner.pinned() == d.runner => {}
+            Ok(_) | Err(StoreError::NotFound { .. } | StoreError::Deleted { .. }) => return Ok(false),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(true)
+}
+
+/// Deploy a confirmed plan, in one transaction. Fails when a task or runner
+/// changed since the plan was made. A task deployed for the first time
+/// starts its schedule now and its cursor at the change-feed head, so it
+/// does not replay history; a redeploy keeps its cursor.
+pub fn apply_deploy(store: &mut Store, plan: &[Deploy]) -> Result<Vec<TaskState>, StoreError> {
+    let now = store.now()?;
+    let tx = store.connection().unchecked_transaction()?;
+    if !plan_is_current(store, plan)? {
+        return Err(StoreError::invalid("a task or runner changed since you confirmed; deploy again"));
+    }
+    for d in plan {
+        tx.execute(
+            "INSERT INTO task_state(task_id, task_rev, runner, enabled, enabled_at, cursor)
+             VALUES (?1, ?2, ?3, 1, ?4, (SELECT COALESCE(MAX(_local_seq), 0) FROM docs))
+             ON CONFLICT(task_id) DO UPDATE SET task_rev = excluded.task_rev, runner = excluded.runner, enabled = 1",
+            params![d.task_id, d.task_rev, d.runner, now],
+        )?;
+    }
+    let states = plan
+        .iter()
+        .map(|d| Ok(state_in(&tx, &d.task_id)?.expect("the row was just written")))
+        .collect::<Result<Vec<_>, StoreError>>()?;
+    tx.commit()?;
+    Ok(states)
+}
+
+/// Stop running a task on this vault. It keeps its pins and cursor.
+pub fn disable(store: &mut Store, task_id: &str) -> Result<TaskState, StoreError> {
+    let conn = store.connection();
+    if conn.execute("UPDATE task_state SET enabled = 0 WHERE task_id = ?1", [task_id])? == 0 {
+        Task::from_doc(&store.get(task_id)?)?;
+        return Err(StoreError::invalid(format!("{task_id} is not deployed on this vault")));
+    }
+    Ok(state_in(conn, task_id)?.expect("the row exists"))
 }
 
 fn changes_since(
@@ -247,8 +415,10 @@ fn changes_since(
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-/// Evaluate every enabled task, or one task by id (enabled or not). All
-/// reads happen in one snapshot, so `head` bounds `changes` exactly.
+/// Evaluate every current task, or one task by id. A deployed task is
+/// evaluated at its pinned revisions, a dormant one at its heads. Only a
+/// task enabled on this vault can be due. All reads happen in one snapshot, so `head`
+/// bounds `changes` exactly.
 pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Evaluation>, StoreError> {
     let conn = store.connection();
     let tx = conn.unchecked_transaction()?;
@@ -270,40 +440,50 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
     }
     let head = head_seq(&tx)?;
     let mut out = Vec::new();
-    for doc in docs {
-        let parsed = Task::from_doc(&doc)?;
-        if only.is_none() && !parsed.enabled {
-            continue;
-        }
-        let runner = Runner::get(store, &parsed.runner).map_err(|e| e.to_string());
-        let newest = newest_run(&tx, &doc.id)?;
-        let (last_run_at, cursor, last_run, running) = match &newest {
-            Some(run) => {
-                let started = run.body.get("started_at").and_then(Value::as_str).unwrap_or_default().to_string();
-                let seq = run.body.get("seq").and_then(Value::as_i64).unwrap_or(0);
-                let unfinished = run.body.get("finished_at").is_none();
-                let timeout = runner
-                    .as_ref()
-                    .map(|r| r.timeout_secs)
-                    .unwrap_or_else(|_| parse_duration(crate::runner::DEFAULT_TIMEOUT).unwrap_or(600));
-                let young = elapsed_secs(&tx, &started, now)? < timeout as i64 + 60;
-                (Some(started), seq, Some(run.id.clone()), unfinished && young)
+    for head_doc in docs {
+        let state = state_in(&tx, &head_doc.id)?;
+        let head_rev = head_doc.rev.clone();
+        let (doc, runner, drift) = match &state {
+            None => {
+                let runner =
+                    Task::from_doc(&head_doc).and_then(|t| Runner::get(store, &t.runner)).map_err(|e| e.to_string());
+                (head_doc, runner, false)
             }
-            None => (None, doc.seq.unwrap_or(0), None, false),
+            Some(s) => {
+                let current = resolve(store, &head_doc.id).map(|(_, _, r)| r.pinned());
+                let drift = s.task_rev != head_rev || current.ok().as_deref() != Some(s.runner.as_str());
+                // The pinned runner, unless its document was deleted since: stopping needs no deploy.
+                let runner = Runner::get(store, &s.runner).and_then(|r| store.get(&r.id).map(|_| r));
+                (store.get_rev(&s.task_rev)?, runner.map_err(|e| e.to_string()), drift)
+            }
         };
-        let since = last_run_at.clone().unwrap_or_else(|| doc.created_at.clone());
-        let time_due = elapsed_secs(&tx, &since, now)? >= parsed.every_secs as i64;
-        let changes = match &parsed.when {
-            Some(when) => changes_since(&tx, &doc.id, when, cursor, head)?,
-            None => Vec::new(),
+        let parsed = Task::from_doc(&doc)?;
+        let (cursor, last_run_at, running, time_due, changes) = match &state {
+            None => (head, None, false, false, Vec::new()),
+            Some(s) => {
+                let running = match &s.lease_until {
+                    Some(until) => elapsed_secs(&tx, now, until)? > 0,
+                    None => false,
+                };
+                let since = s.last_run_at.as_deref().unwrap_or(&s.enabled_at);
+                let time_due = elapsed_secs(&tx, since, now)? >= parsed.every_secs as i64;
+                let changes = match &parsed.when {
+                    Some(when) => changes_since(&tx, &doc.id, when, s.cursor, head)?,
+                    None => Vec::new(),
+                };
+                (s.cursor, s.last_run_at.clone(), running, time_due, changes)
+            }
         };
-        let due = parsed.enabled && !running && time_due && (parsed.when.is_none() || !changes.is_empty());
+        let enabled = state.as_ref().is_some_and(|s| s.enabled);
+        let due = enabled && !running && time_due && (parsed.when.is_none() || !changes.is_empty());
         out.push(Evaluation {
             task: doc,
+            head_rev,
+            drift,
+            state,
             head,
             cursor,
             last_run_at,
-            last_run,
             running,
             time_due,
             due,
@@ -334,42 +514,62 @@ pub fn prompt_text(eval: &Evaluation) -> String {
     rows.sort_by_key(|c| c.seq);
     let _ = write!(text, "\n---\nChanged since last run (seq {} to {}):\n", eval.cursor, eval.head);
     for c in rows {
-        let rev = c.rev.split_once('-').map(|(g, h)| format!("{g}-{}", &h[..h.len().min(8)])).unwrap_or_default();
-        let _ = writeln!(text, "- {}  rev {rev}{}", c.id, if c.deleted { "  (deleted)" } else { "" });
+        let _ = writeln!(text, "- {}  rev {}{}", c.id, short_rev(&c.rev), if c.deleted { "  (deleted)" } else { "" });
     }
     text
 }
 
-/// `runs/<task>/<compact time>-<head>`.
-fn run_id(task_id: &str, now: &str, head: i64) -> String {
-    let compact: String = now.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
-    format!("runs/{task_id}/{compact}-{head}")
+/// A lease on a task, taken before the agent starts.
+#[derive(Debug, Clone)]
+pub struct Claim {
+    /// `runs/<task>/<UUID v7>.md`, the id of the receipt.
+    pub run_id: String,
+    pub task_id: String,
+    /// The task revision that runs.
+    pub task_rev: String,
+    /// The pinned runner revision when it loaded; the task's own reference when it did not.
+    pub runner: String,
+    pub started_at: String,
+    /// The change-feed head the run consumes.
+    pub head: i64,
 }
 
-/// Write run revision 1 before the agent starts. Fails the check, and
-/// returns `None`, when another process fired the task first.
-pub fn claim(store: &mut Store, eval: &Evaluation, now: &str) -> Result<Option<Doc>, StoreError> {
+/// Take the lease on a task for the runner's timeout plus a minute.
+/// Returns `None` when another process holds the lease, or finished a run
+/// since `eval`. `force` ignores both. A task with no state gets a disabled
+/// row pinned to its heads, so a manual run of a dormant task does not
+/// start its schedule.
+pub fn claim(store: &mut Store, eval: &Evaluation, now: &str, force: bool) -> Result<Option<Claim>, StoreError> {
     let task_id = eval.task.id.clone();
-    let expected = eval.last_run.clone();
-    // The pinned runner revision when it loaded; the task's own reference when it did not.
+    let lease_secs = eval.runner.as_ref().map(|r| r.timeout_secs).unwrap_or(0) as i64 + 60;
     let runner = match &eval.runner {
         Ok(r) => r.pinned(),
         Err(_) => eval.parsed.runner.clone(),
     };
-    let input: PutInput = serde_json::from_value(json!({
-        "_id": run_id(&task_id, now, eval.head),
-        "_type": RUN_TYPE,
-        "task": task_id,
-        "runner": runner,
-        "started_at": now,
-        "seq": eval.head,
-        "tags": [task_id],
-    }))?;
-    let check_task = eval.task.id.clone();
-    store.put_if(input, move |conn| {
-        let newest = newest_run(conn, &check_task)?;
-        Ok(newest.map(|d| d.id) == expected)
-    })
+    let tx = store.connection().unchecked_transaction()?;
+    tx.execute(
+        "INSERT OR IGNORE INTO task_state(task_id, task_rev, runner, enabled, enabled_at, cursor)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5)",
+        params![task_id, eval.task.rev, runner, now, eval.head],
+    )?;
+    let taken = tx.execute(
+        "UPDATE task_state SET lease_until = strftime('%Y-%m-%dT%H:%M:%fZ', unixepoch(?2) + ?3, 'unixepoch')
+          WHERE task_id = ?1
+            AND (?5 OR (last_run_at IS ?4 AND (lease_until IS NULL OR unixepoch(lease_until) <= unixepoch(?2))))",
+        params![task_id, now, lease_secs, eval.last_run_at, force],
+    )?;
+    tx.commit()?;
+    if taken == 0 {
+        return Ok(None);
+    }
+    Ok(Some(Claim {
+        run_id: format!("runs/{task_id}/{}.md", new_id()),
+        task_rev: eval.task.rev.clone(),
+        task_id,
+        runner,
+        started_at: now.to_string(),
+        head: eval.head,
+    }))
 }
 
 /// What came back from the command.
@@ -466,17 +666,26 @@ pub fn failures(outcome: &Outcome, timeout: Duration) -> Vec<String> {
     errors
 }
 
-/// Write run revision 2 with the result. `content` is the command's last message.
+/// Write the receipt, move the cursor, and release the lease, in one
+/// transaction. `content` is the command's last message.
 pub fn finish(
     store: &mut Store,
-    run: &Doc,
+    claim: &Claim,
     outcome: &Outcome,
     out_file: &Path,
     timeout: Duration,
     now: &str,
 ) -> Result<Doc, StoreError> {
-    let mut body = run.body.clone();
-    body.insert("finished_at".into(), Value::String(now.to_string()));
+    let Value::Object(mut body) = json!({
+        "task": DocRef::pinned(&claim.task_id, &claim.task_rev).to_string(),
+        "runner": claim.runner,
+        "vault": store.vault_id()?,
+        "started_at": claim.started_at,
+        "finished_at": now,
+        "tags": [claim.task_id],
+    }) else {
+        unreachable!("a JSON object")
+    };
     let (content, cut) = truncate_utf8(&last_message(out_file, &outcome.stdout), MAX_CONTENT_BYTES);
     let mut errors = failures(outcome, timeout);
     if cut {
@@ -489,13 +698,16 @@ pub fn finish(
     if !content.is_empty() {
         body.insert("content".into(), Value::String(content));
     }
-    store.put(PutInput {
-        id: Some(run.id.clone()),
-        parent: Some(run.rev.clone()),
-        // The claim's pinned type, so both revisions name the same schema revision.
-        type_id: run.type_id.clone(),
-        body,
-    })
+    let input = PutInput { id: Some(claim.run_id.clone()), parent: None, type_id: Some(RUN_TYPE.into()), body };
+    let receipt = store.put_if(input, |conn| {
+        // Not a check: the state update joins the receipt's transaction.
+        conn.execute(
+            "UPDATE task_state SET cursor = ?2, last_run_at = ?3, lease_until = NULL WHERE task_id = ?1",
+            params![claim.task_id, claim.head, claim.started_at],
+        )?;
+        Ok(true)
+    })?;
+    Ok(receipt.expect("the check always passes"))
 }
 
 /// The result of one firing, as `tick` reports it.
@@ -509,17 +721,30 @@ pub struct Fired {
 }
 
 /// Claim, spawn, record. Returns `None` when another process claimed the
-/// task first. Every failure after the claim lands in the run's `error`.
-pub async fn fire(store: &mut Store, db: &Path, eval: &Evaluation, now: &str) -> Result<Option<Fired>, StoreError> {
+/// task first; `force` claims anyway. Every failure after the claim lands
+/// in the receipt's `error`.
+pub async fn fire(
+    store: &mut Store,
+    db: &Path,
+    eval: &Evaluation,
+    now: &str,
+    force: bool,
+) -> Result<Option<Fired>, StoreError> {
     let previous_actor = store.actor().map(str::to_string);
     store.set_actor(Some(eval.task.id.clone()));
-    let result = fire_as_task(store, db, eval, now).await;
+    let result = fire_as_task(store, db, eval, now, force).await;
     store.set_actor(previous_actor);
     result
 }
 
-async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str) -> Result<Option<Fired>, StoreError> {
-    let Some(run) = claim(store, eval, now)? else {
+async fn fire_as_task(
+    store: &mut Store,
+    db: &Path,
+    eval: &Evaluation,
+    now: &str,
+    force: bool,
+) -> Result<Option<Fired>, StoreError> {
+    let Some(claim) = claim(store, eval, now, force)? else {
         return Ok(None);
     };
     let scratch = std::env::temp_dir().join(format!("dreams-{}", crate::doc::new_id()));
@@ -528,7 +753,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
     let ctx = Context {
         db: db.to_path_buf(),
         task: eval.task.id.clone(),
-        run: run.id.clone(),
+        run: claim.run_id.clone(),
         mcp: scratch.join("mcp.json"),
         out: scratch.join("last-message"),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
@@ -546,7 +771,7 @@ async fn fire_as_task(store: &mut Store, db: &Path, eval: &Evaluation, now: &str
         Err(e) => (Outcome { spawn_error: Some(e.clone()), ..Default::default() }, Duration::from_secs(0)),
     };
     let finished_at = store.now()?;
-    let done = finish(store, &run, &outcome.0, &ctx.out, outcome.1, &finished_at);
+    let done = finish(store, &claim, &outcome.0, &ctx.out, outcome.1, &finished_at);
     let _ = std::fs::remove_dir_all(&scratch);
     let done = done?;
     Ok(Some(Fired {
@@ -566,7 +791,7 @@ pub struct TickReport {
     pub errors: Vec<(String, String)>,
 }
 
-/// One pass over every enabled task. Sequential; one failure never stops
+/// One pass over every task enabled on this vault. Sequential; one failure never stops
 /// the others.
 pub async fn tick(store: &mut Store, db: &Path, now: &str) -> Result<TickReport, StoreError> {
     let mut report = TickReport::default();
@@ -574,7 +799,7 @@ pub async fn tick(store: &mut Store, db: &Path, now: &str) -> Result<TickReport,
         if !eval.due {
             continue;
         }
-        match fire(store, db, &eval, now).await {
+        match fire(store, db, &eval, now, false).await {
             Ok(Some(f)) => report.fired.push(f),
             Ok(None) => report.skipped.push(eval.task.id.clone()),
             Err(e) => report.errors.push((eval.task.id.clone(), e.to_string())),
@@ -615,10 +840,12 @@ mod tests {
         };
         Evaluation {
             task: doc,
+            head_rev: "1-a".into(),
+            drift: false,
+            state: None,
             head: 9,
             cursor: 4,
             last_run_at: None,
-            last_run: None,
             running: false,
             time_due: true,
             due: true,
@@ -629,7 +856,6 @@ mod tests {
                 every_secs: 60,
                 when,
                 prompt: prompt.into(),
-                enabled: true,
             },
             runner: Err("not loaded".into()),
         }
@@ -650,11 +876,6 @@ mod tests {
         );
         let empty = prompt_text(&eval("do it\n", Some(When::default()), vec![]));
         assert!(empty.ends_with("(seq 4 to 9):\n"), "{empty}");
-    }
-
-    #[test]
-    fn run_ids_are_compact() {
-        assert_eq!(run_id("tasks/t", "2026-09-23T10:11:12.345Z", 9), "runs/tasks/t/20260923T101112345Z-9");
     }
 
     #[test]

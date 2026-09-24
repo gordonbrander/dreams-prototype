@@ -1,3 +1,4 @@
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use dreams::{Changes, History, Page, cli};
@@ -5,13 +6,17 @@ use serde_json::{Value, json};
 
 struct Sandbox {
     dir: PathBuf,
+    /// The person's answer to a deploy confirmation. `None`: no terminal to ask on.
+    answer: Cell<Option<bool>>,
+    /// Every confirmation text shown.
+    asked: RefCell<Vec<String>>,
 }
 
 impl Sandbox {
     fn new() -> Self {
         let dir = std::env::temp_dir().join(format!("dreams-cli-{}", uuid::Uuid::now_v7()));
         std::fs::create_dir_all(&dir).unwrap();
-        Sandbox { dir }
+        Sandbox { dir, answer: Cell::new(Some(true)), asked: RefCell::new(Vec::new()) }
     }
 
     fn db(&self) -> String {
@@ -31,7 +36,12 @@ impl Sandbox {
         let mut input = stdin.as_bytes();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let code = cli::run(argv, &mut input, &mut out, &mut err);
+        let answer = self.answer.get();
+        let mut confirm = |text: &str| {
+            self.asked.borrow_mut().push(text.to_string());
+            answer.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no terminal"))
+        };
+        let code = cli::run(argv, &mut input, &mut out, &mut err, &mut confirm);
         (code, String::from_utf8(out).unwrap(), String::from_utf8(err).unwrap())
     }
 
@@ -437,6 +447,11 @@ fn task_lifecycle_with_change_trigger() {
 
     let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
     assert!(out.starts_with("created t1 1-"), "{out}");
+    assert!(out.contains("\ndeployed t1 1-"), "{out}");
+    // the person confirmed exactly what runs: the prompt and the command
+    let asked = sb.asked.borrow_mut().pop().unwrap();
+    assert!(asked.contains("Triage these.") && asked.contains("command: cat"), "{asked}");
+    assert!(asked.contains("(now dormant)"), "{asked}");
     let task = sb.json(&["doc", "get", "t1"], "");
     assert!(task["_type"].as_str().unwrap().starts_with("doc://schemas/task?rev=1-"), "{task}");
     assert_eq!(task["runner"], "doc://runners/cat");
@@ -446,24 +461,51 @@ fn task_lifecycle_with_change_trigger() {
     let out =
         sb.ok(&["task", "add", "t1", "--runner", "doc://runners/cat", "--every", "1h", "--tag", "inbox", &prompt], "");
     assert!(out.starts_with("unchanged t1 1-"), "{out}");
+    assert!(sb.asked.borrow().is_empty(), "nothing new to deploy, so nothing to confirm");
 
     let list: Value = sb.json(&["task", "list"], "");
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["task"]["_id"], "t1");
     assert_eq!(list[0]["due"], false);
+    assert_eq!(list[0]["state"]["enabled"], true, "task add deploys the task here");
     assert!(list[0]["last_run_at"].is_null());
     let text = sb.ok(&["task", "list"], "");
     assert!(text.lines().next().unwrap().starts_with("ID"), "{text}");
     assert!(text.contains("tag=inbox"), "{text}");
+    assert!(text.contains("deployed"), "{text}");
+
+    // disable and deploy change only this vault's state, not the document
+    assert_eq!(sb.ok(&["task", "disable", "t1"], ""), "disabled t1\n");
+    assert!(sb.ok(&["task", "list"], "").contains("disabled"));
+    let states = sb.json(&["task", "deploy", "t1"], "");
+    assert_eq!(states[0]["enabled"], true);
+    assert!(sb.asked.borrow_mut().pop().unwrap().contains("(now disabled at 1-"));
+    assert!(sb.json(&["doc", "get", "t1"], "")["_rev"].as_str().unwrap().starts_with("1-"));
+    assert_eq!(sb.ok(&["task", "deploy", "t1"], ""), "nothing to deploy\n");
+    let err = sb.fails(&["task", "deploy", "nope"], "");
+    assert_eq!(err["name"], "not_found");
+    let err = sb.fails(&["task", "disable", "runners/cat"], "");
+    assert_eq!(err["name"], "invalid_input");
+
+    // --no-deploy writes the task but leaves it dormant here, without asking
+    sb.ok(&["task", "add", "t2", "--runner", "runners/cat", "--every", "1h", "--no-deploy", &prompt], "");
+    assert!(sb.asked.borrow().is_empty());
+    let check = sb.json(&["task", "check", "t2"], "");
+    assert!(check["state"].is_null(), "{check}");
+    assert!(sb.ok(&["task", "check", "t2"], "").contains("state:     dormant"));
+    sb.ok(&["task", "rm", "t2"], "");
 
     // fire now: the runner echoes the prompt back, and the run records it
     let run = sb.json(&["task", "run", "t1"], "");
     assert!(run["_type"].as_str().unwrap().starts_with("doc://schemas/run?rev=1-"), "{run}");
     assert!(run["runner"].as_str().unwrap().starts_with("doc://runners/cat?rev=1-"), "{run}");
     assert_eq!(run["_actor"], "t1");
-    assert_eq!(run["task"], "t1");
+    assert!(run["task"].as_str().unwrap().starts_with("doc://t1?rev=1-"), "{run}");
     assert_eq!(run["exit_code"], 0);
-    assert!(run["_rev"].as_str().unwrap().starts_with("2-"));
+    assert!(run["_rev"].as_str().unwrap().starts_with("1-"), "a receipt has one revision");
+    assert!(run["_id"].as_str().unwrap().starts_with("runs/t1/") && run["_id"].as_str().unwrap().ends_with(".md"));
+    assert!(run["vault"].is_string(), "{run}");
+    assert!(run.get("seq").is_none(), "{run}");
     let content = run["content"].as_str().unwrap();
     assert!(content.starts_with("Triage these.\n\n---\nChanged since last run (seq"), "{content}");
     assert!(run.get("error").is_none(), "{run}");
@@ -500,7 +542,7 @@ fn task_lifecycle_with_change_trigger() {
     let in1 = sb.json(&["doc", "changes"], "");
     let in1_seq =
         in1["results"].as_array().unwrap().iter().find(|d| d["_id"] == "in1").unwrap()["_seq"].as_i64().unwrap();
-    assert!(newest.body["seq"].as_i64().unwrap() >= in1_seq);
+    assert!(sb.json(&["task", "check", "t1"], "")["cursor"].as_i64().unwrap() >= in1_seq);
 
     // nothing new since that run: a later tick fires nothing
     let report = sb.json(&["tick", "--now", FUTURE], "");
@@ -557,19 +599,65 @@ fn task_runs_record_failures_timeouts_and_environment() {
 }
 
 #[test]
+fn deploys_need_confirmation_and_pin_revisions() {
+    let sb = Sandbox::new();
+    add_test_runners(&sb);
+    let prompt = sb.file("p.txt", "first");
+
+    // a "no" leaves the template written and dormant
+    sb.answer.set(Some(false));
+    let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", &prompt], "");
+    assert!(out.contains("not deployed; t1 does not run on this vault"), "{out}");
+    assert!(sb.json(&["task", "check", "t1"], "")["state"].is_null());
+    let err = sb.fails(&["task", "deploy", "t1"], "");
+    assert!(err["message"].as_str().unwrap().contains("not deployed"), "{err}");
+
+    // with no terminal to ask on, a deploy fails unless --yes
+    sb.answer.set(None);
+    let err = sb.fails(&["task", "deploy", "t1"], "");
+    assert!(err["message"].as_str().unwrap().contains("--yes"), "{err}");
+    sb.asked.borrow_mut().clear();
+    assert!(sb.ok(&["task", "deploy", "t1", "--yes"], "").starts_with("deployed t1 1-"));
+    assert!(sb.asked.borrow().is_empty(), "--yes does not ask");
+    sb.answer.set(Some(true));
+
+    // an edit to the template does not run until the next deploy
+    let edited = sb.file("p.txt", "second");
+    sb.answer.set(Some(false));
+    let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", &edited], "");
+    assert!(out.contains("not deployed; this vault still runs t1 1-"), "{out}");
+    sb.answer.set(Some(true));
+    let out = sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", "--no-deploy", &edited], "");
+    assert_eq!(out.lines().count(), 1, "--no-deploy says nothing about deploys: {out}");
+    sb.ok(&["task", "add", "t2", "--runner", "runners/cat", "--every", "1h", "--no-deploy", &edited], "");
+    assert!(sb.ok(&["task", "list"], "").contains("deployed, changed"));
+    let check = sb.json(&["task", "check", "t1"], "");
+    assert_eq!(check["drift"], true);
+    assert!(check["task"]["_rev"].as_str().unwrap().starts_with("1-"));
+    assert!(check["head_rev"].as_str().unwrap().starts_with("2-"));
+    assert_eq!(sb.json(&["task", "run", "t1"], "")["content"], "first");
+
+    // deploy with no id: every task not deployed at its current revisions, in one confirmation
+    let out = sb.ok(&["task", "deploy"], "");
+    assert!(out.contains("deployed t1 2-") && out.contains("deployed t2 1-"), "{out}");
+    let asked = sb.asked.borrow_mut().pop().unwrap();
+    assert!(asked.contains("t1  rev 2-") && asked.contains("t2  rev 1-") && asked.contains("second"), "{asked}");
+    assert_eq!(sb.ok(&["task", "deploy"], ""), "nothing to deploy\n");
+    assert_eq!(sb.json(&["task", "run", "t1", "--force"], "")["content"], "second");
+}
+
+#[test]
 fn run_refuses_while_a_claim_is_open_unless_forced() {
     let sb = Sandbox::new();
     add_test_runners(&sb);
     let prompt = sb.file("p.txt", "hello");
     sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", &prompt], "");
-    // the CLI is trusted: it can write a claim by hand
-    let claim = format!(
-        r#"{{"_id":"runs/t1/manual","_type":"doc://schemas/run","task":"t1","runner":"doc://runners/cat","started_at":"{FUTURE}","seq":1,"tags":["t1"]}}"#
-    );
-    sb.json(&["doc", "put"], &claim);
+    // another process holds the lease
+    let conn = rusqlite::Connection::open(sb.db()).unwrap();
+    conn.execute("UPDATE task_state SET lease_until = ?1 WHERE task_id = 't1'", [FUTURE]).unwrap();
     let check = sb.json(&["task", "check", "t1"], "");
     assert_eq!(check["running"], true);
-    assert_eq!(check["last_run"], "runs/t1/manual");
+    assert_eq!(check["state"]["lease_until"], FUTURE);
     let err = sb.fails(&["task", "run", "t1"], "");
     assert!(err["message"].as_str().unwrap().contains("--force"), "{err}");
     let run = sb.json(&["task", "run", "t1", "--force"], "");

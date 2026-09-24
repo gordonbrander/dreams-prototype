@@ -403,7 +403,7 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.get("a").unwrap().body["title"], "persisted");
         let n: i64 = s.connection().query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 4);
+        assert_eq!(n, 5);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -550,6 +550,12 @@ fn seed_rewrites_edited_and_deleted_defaults() {
     assert_eq!(s.history("runners/claude", None).unwrap().revisions.len(), 3);
 }
 
+/// Deploy one task without a confirmation; the front ends ask.
+fn deploy(s: &mut Store, id: &str) -> task::TaskState {
+    let plan = task::plan_deploy(s, Some(id)).unwrap();
+    task::apply_deploy(s, &plan).unwrap().remove(0)
+}
+
 fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams::Doc {
     let mut body =
         json!({"_id": id, "_type": TASK_TYPE, "runner": "doc://runners/cat", "every": every, "prompt": "go"});
@@ -569,9 +575,18 @@ fn evaluate_time_and_change_rules() {
     let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));
     let created = watch.created_at.clone();
 
-    // before the interval: nothing is due, and the cursor is the task's own seq
-    let evals = task::evaluate(&s, &plus_secs(&s, &created, 60), None).unwrap();
+    // a task with no state is dormant: listed, never due
+    let evals = task::evaluate(&s, &plus_secs(&s, &created, 2 * 3600), None).unwrap();
     assert_eq!(evals.len(), 2);
+    assert!(evals.iter().all(|e| e.state.is_none() && !e.due && !e.time_due));
+
+    // a deploy starts the schedule now and the cursor at the head, pinned to the heads
+    let state = deploy(&mut s, "tasks/plain");
+    assert!(state.enabled && state.last_run_at.is_none() && state.lease_until.is_none());
+    assert_eq!(state.task_rev, plain.rev);
+    assert_eq!(state.runner, pinned("runners/cat", &cat.rev));
+    deploy(&mut s, "tasks/watch");
+    let evals = task::evaluate(&s, &plus_secs(&s, &created, 60), None).unwrap();
     let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
     let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
     assert!(!e_plain.time_due && !e_plain.due);
@@ -583,7 +598,7 @@ fn evaluate_time_and_change_rules() {
     // after the interval: the plain task is due; the watcher waits for changes
     let later = plus_secs(&s, &created, 2 * 3600);
     let evals = task::evaluate(&s, &later, None).unwrap();
-    let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
+    let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap().clone();
     let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
     assert!(e_plain.due);
     assert!(e_watch.time_due && !e_watch.due);
@@ -606,36 +621,174 @@ fn evaluate_time_and_change_rules() {
     let seen: Vec<(String, bool)> = e_watch.changes.iter().map(|c| (c.id.clone(), c.deleted)).collect();
     assert_eq!(seen, [("n1".to_string(), false), ("n1".to_string(), true)]);
 
-    // a claim marks the task running until its timeout, then it is stale
-    let run = task::claim(&mut s, &e_watch, &later).unwrap().unwrap();
-    assert_eq!(run.body["seq"], 13);
-    assert_eq!(run.body["tags"], json!(["tasks/watch"]));
-    assert_eq!(run.body["runner"], pinned("runners/cat", &cat.rev));
-    assert_eq!(run.type_path(), Some(RUN_TYPE));
+    // a claim takes the lease until the timeout plus a minute; no document is written
+    let docs_before = s.last_seq().unwrap();
+    let claim = task::claim(&mut s, &e_watch, &later, false).unwrap().unwrap();
+    assert_eq!(s.last_seq().unwrap(), docs_before);
+    assert!(claim.run_id.starts_with("runs/tasks/watch/") && claim.run_id.ends_with(".md"));
+    assert_eq!(claim.runner, pinned("runners/cat", &cat.rev));
+    assert_eq!(claim.head, 13);
+    let e_running = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
+    assert!(e_running.running && !e_running.due);
+    assert!(task::claim(&mut s, &e_watch, &later, false).unwrap().is_none(), "the lease is held");
+    let e_stale = task::evaluate(&s, &plus_secs(&s, &later, 121), Some("tasks/watch")).unwrap().remove(0);
+    assert!(!e_stale.running, "the lease expired");
+    assert_eq!(e_stale.cursor, 9, "the cursor moves only when a run finishes");
+
+    // finishing writes one receipt, moves the cursor, and releases the lease
+    let outcome = task::Outcome { exit_code: Some(0), stdout: b"done".to_vec(), ..Default::default() };
+    let finished_at = plus_secs(&s, &later, 5);
+    let receipt = task::finish(
+        &mut s,
+        &claim,
+        &outcome,
+        std::path::Path::new("/nonexistent"),
+        std::time::Duration::from_secs(60),
+        &finished_at,
+    )
+    .unwrap();
+    assert_eq!(receipt.id, claim.run_id);
+    assert_eq!(receipt.parent, None);
+    assert_eq!(receipt.type_path(), Some(RUN_TYPE));
+    assert_eq!(receipt.body["vault"], s.vault_id().unwrap());
+    assert_eq!(receipt.body["tags"], json!(["tasks/watch"]));
+    assert_eq!(receipt.body["content"], "done");
+    assert!(receipt.body.get("seq").is_none());
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
-    assert!(e_watch.running && !e_watch.due);
-    assert_eq!(e_watch.cursor, 13);
-    assert_eq!(e_watch.last_run.as_deref(), Some(run.id.as_str()));
-    let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 3600), Some("tasks/watch")).unwrap().remove(0);
     assert!(!e_watch.running);
-    // nothing changed since the claim's cursor, so it is not due even though time has passed
-    assert!(e_watch.time_due && !e_watch.due);
+    assert_eq!(e_watch.cursor, 13);
+    assert_eq!(e_watch.last_run_at.as_deref(), Some(later.as_str()));
+    // only the receipt changed since the cursor, and it is the watcher's own write
+    assert!(e_watch.changes.is_empty() && !e_watch.due);
 
-    // a second claim against the same evaluation fails once the newest run moved on
-    let fresh = task::evaluate(&s, &later, Some("tasks/plain")).unwrap().remove(0);
-    assert!(task::claim(&mut s, &fresh, &later).unwrap().is_some());
-    let e_plain_old = e_plain.clone();
-    assert!(task::claim(&mut s, &e_plain_old, &later).unwrap().is_none());
+    // a claim from an evaluation made before a finished run fails
+    assert!(task::claim(&mut s, &e_plain, &later, false).unwrap().is_some());
+    let plain_claim = task::claim(&mut s, &e_plain, &later, true).unwrap().unwrap();
+    task::finish(
+        &mut s,
+        &plain_claim,
+        &outcome,
+        std::path::Path::new("/nonexistent"),
+        std::time::Duration::from_secs(60),
+        &later,
+    )
+    .unwrap();
+    assert!(task::claim(&mut s, &e_plain, &later, false).unwrap().is_none(), "stale evaluation");
 
-    // disabled tasks are skipped by the full evaluation but visible by id
-    let plain_doc = s.get("tasks/plain").unwrap();
-    s.put(input(json!({"_id": "tasks/plain", "_parent": plain_doc.rev, "_type": TASK_TYPE,
-        "runner": "doc://runners/cat", "every": "1h", "prompt": "go", "enabled": false})))
-        .unwrap();
-    assert!(task::evaluate(&s, &later, None).unwrap().iter().all(|e| e.task.id != "tasks/plain"));
-    let e = task::evaluate(&s, &later, Some("tasks/plain")).unwrap().remove(0);
-    assert!(!e.due && !e.parsed.enabled);
+    // disabled tasks are listed but never due
+    task::disable(&mut s, "tasks/plain").unwrap();
+    let e = task::evaluate(&s, &plus_secs(&s, &later, 7200), Some("tasks/plain")).unwrap().remove(0);
+    assert!(!e.due && !e.state.as_ref().unwrap().enabled);
+    assert_eq!(e.cursor, plain_claim.head, "disabling keeps the cursor");
     assert!(matches!(task::evaluate(&s, &later, Some("nope")), Err(StoreError::NotFound { .. })));
     assert!(task::evaluate(&s, &later, Some("n2")).is_err());
-    let _ = plain;
+    assert!(task::plan_deploy(&s, Some("n2")).is_err());
+    assert!(task::disable(&mut s, "n2").is_err());
+}
+
+#[test]
+fn a_deploy_pins_the_task_and_runner_revisions() {
+    let mut s = store();
+    seed::seed_schemas(&mut s).unwrap();
+    let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    let v1 = add_task(&mut s, "tasks/t", "1h", None);
+    deploy(&mut s, "tasks/t");
+    let now = s.now().unwrap();
+
+    // edits to the template and to the runner do not change what runs
+    let v2 = s
+        .put(input(json!({"_id": "tasks/t", "_parent": v1.rev, "_type": TASK_TYPE,
+            "runner": "doc://runners/cat", "every": "1h", "prompt": "edited"})))
+        .unwrap();
+    let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
+    assert_eq!((e.task.rev.as_str(), e.head_rev.as_str(), e.drift), (v1.rev.as_str(), v2.rev.as_str(), true));
+    assert_eq!(e.parsed.prompt, "go");
+    let cat2 =
+        s.put(input(json!({"_id": "runners/cat", "_parent": cat.rev, "_type": RUNNER_TYPE, "argv": ["tac"]}))).unwrap();
+    let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
+    assert_eq!(e.runner.as_ref().unwrap().argv, ["cat"]);
+
+    // a plan made before an edit cannot be applied after it
+    let plan = task::plan_deploy(&s, None).unwrap();
+    assert_eq!(plan.len(), 1);
+    assert!(plan[0].describe().contains("edited") && plan[0].describe().contains("command: tac"));
+    let cursor = task::state(&s, "tasks/t").unwrap().unwrap().cursor;
+    let v3 = s
+        .put(input(json!({"_id": "tasks/t", "_parent": v2.rev, "_type": TASK_TYPE,
+            "runner": "doc://runners/cat", "every": "1h", "prompt": "again"})))
+        .unwrap();
+    assert!(!task::plan_is_current(&s, &plan).unwrap());
+    assert!(task::apply_deploy(&mut s, &plan).is_err());
+
+    // a redeploy runs the new revisions and keeps the cursor
+    let state = deploy(&mut s, "tasks/t");
+    assert_eq!((state.task_rev, state.runner, state.cursor), (v3.rev, pinned("runners/cat", &cat2.rev), cursor));
+    let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
+    assert!(!e.drift);
+    assert_eq!(e.parsed.prompt, "again");
+    assert!(task::plan_deploy(&s, None).unwrap().is_empty(), "nothing left to deploy");
+
+    // deploy-all covers dormant and disabled tasks too
+    add_task(&mut s, "tasks/new", "1h", None);
+    task::disable(&mut s, "tasks/t").unwrap();
+    let ids: Vec<String> = task::plan_deploy(&s, None).unwrap().into_iter().map(|d| d.task_id).collect();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"tasks/new".to_string()) && ids.contains(&"tasks/t".to_string()));
+}
+
+#[test]
+fn a_tombstone_ends_the_task_and_a_revived_task_is_dormant() {
+    let mut s = store();
+    seed::seed_schemas(&mut s).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    let t = add_task(&mut s, "tasks/t", "1h", None);
+    deploy(&mut s, "tasks/t");
+    let tomb = s.delete("tasks/t", &t.rev).unwrap();
+    assert!(task::state(&s, "tasks/t").unwrap().is_none());
+    s.put(input(json!({"_id": "tasks/t", "_parent": tomb.rev, "_type": TASK_TYPE,
+        "runner": "doc://runners/cat", "every": "1h", "prompt": "back"})))
+        .unwrap();
+    let now = s.now().unwrap();
+    let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
+    assert!(e.state.is_none() && !e.due);
+
+    // a type change ends it too
+    let t = s.get("tasks/t").unwrap();
+    deploy(&mut s, "tasks/t");
+    s.put(input(json!({"_id": "tasks/t", "_parent": t.rev, "title": "just a note"}))).unwrap();
+    assert!(task::state(&s, "tasks/t").unwrap().is_none());
+}
+
+#[test]
+fn a_manual_run_of_a_dormant_task_keeps_it_dormant() {
+    let mut s = store();
+    seed::seed_schemas(&mut s).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    add_task(&mut s, "tasks/t", "1h", None);
+    let now = s.now().unwrap();
+    let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
+    assert!(e.state.is_none());
+    let claim = task::claim(&mut s, &e, &now, false).unwrap().unwrap();
+    let state = task::state(&s, "tasks/t").unwrap().unwrap();
+    assert!(!state.enabled && state.lease_until.is_some());
+    assert_eq!(state.task_rev, e.task.rev);
+    let outcome = task::Outcome { exit_code: Some(0), ..Default::default() };
+    let receipt = task::finish(
+        &mut s,
+        &claim,
+        &outcome,
+        std::path::Path::new("/nonexistent"),
+        std::time::Duration::from_secs(60),
+        &now,
+    )
+    .unwrap();
+    assert_eq!(receipt.body["task"], pinned("tasks/t", &e.task.rev));
+}
+
+#[test]
+fn vault_id_is_made_once() {
+    let s = store();
+    let id = s.vault_id().unwrap();
+    assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 7);
+    assert_eq!(s.vault_id().unwrap(), id);
 }

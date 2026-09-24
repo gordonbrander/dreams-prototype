@@ -7,14 +7,19 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use rmcp::{
     ErrorData as McpError, Json, RoleServer, ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{
+        router::tool::ToolRouter,
+        tool::{InputResponses, RequestState},
+        wrapper::Parameters,
+    },
     model::{
-        CacheScope, CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, GetPromptRequestParams,
-        GetPromptResponse, GetPromptResult, Implementation, ListPromptsResult, ListResourceTemplatesResult,
+        CacheScope, CallToolResponse, CallToolResult, CustomRequest, CustomResult, ElicitRequest, ElicitRequestParams,
+        ErrorCode, ExtensionCapabilities, GetPromptRequestParams, GetPromptResponse, GetPromptResult, Implementation,
+        InputRequest, InputRequests, InputRequiredResult, ListPromptsResult, ListResourceTemplatesResult,
         ListResourcesResult, PaginatedRequestParams, Prompt, PromptMessage, ProtocolVersion, ReadResourceRequestParams,
         ReadResourceResponse, ReadResourceResult, Resource, ResourceContents, ResourceTemplate, Role,
         ServerCapabilities, ServerConfig, SubscriptionFilter,
@@ -27,12 +32,13 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
-use crate::doc::{Doc, DocRef, PutInput};
+use crate::doc::{Doc, DocRef, PutInput, new_id};
 use crate::error::StoreError;
 use crate::markdown;
 use crate::prompt;
 use crate::skill::{self, Skill};
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
+use crate::task::{self, Deploy, TaskState};
 
 /// How a host starts this server on the vault at `db`: the `command` and
 /// `args` of one entry in an MCP config's `mcpServers`.
@@ -113,6 +119,33 @@ pub struct DeleteParams {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TaskParams {
+    /// Id of a document typed doc://schemas/task.
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DeployParams {
+    /// Id of a document typed doc://schemas/task. Omit to deploy every task that is not
+    /// deployed at its current revisions.
+    pub id: Option<String>,
+}
+
+/// A deploy waiting for the person's answer. `requestState` carries only
+/// the key, because the client echoes it back without integrity.
+struct Pending {
+    plan: Vec<Deploy>,
+    id: Option<String>,
+    asked: Instant,
+}
+
+/// How long a person has to answer a deploy confirmation.
+const CONFIRM_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// The key of the confirmation in `inputRequests` and `inputResponses`.
+const CONFIRM_KEY: &str = "confirm";
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ResolveParams {
     /// Document id.
     pub id: String,
@@ -148,13 +181,86 @@ pub struct ChangesParams {
 #[derive(Clone)]
 pub struct Vault {
     store: Arc<Mutex<Store>>,
+    pending: Arc<Mutex<HashMap<String, Pending>>>,
     tool_router: ToolRouter<Self>,
 }
 
 #[tool_router]
 impl Vault {
     pub fn new(store: Store) -> Self {
-        Self { store: Arc::new(Mutex::new(store)), tool_router: Self::tool_router() }
+        Self { store: Arc::new(Mutex::new(store)), pending: Default::default(), tool_router: Self::tool_router() }
+    }
+
+    fn pending(&self) -> Result<MutexGuard<'_, HashMap<String, Pending>>, McpError> {
+        self.pending.lock().map_err(|e| McpError::internal_error(format!("pending lock poisoned: {e}"), None))
+    }
+
+    /// One round of `deploy_task`. The first round plans the deploy and asks
+    /// the person; the second deploys exactly what they confirmed. A client
+    /// that cannot ask never deploys.
+    fn deploy_round(
+        &self,
+        id: Option<String>,
+        state: Option<String>,
+        responses: Option<rmcp::model::InputResponses>,
+        can_ask: bool,
+    ) -> Result<CallToolResponse, McpError> {
+        if !can_ask {
+            return Err(McpError::new(
+                ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY,
+                "deploy_task asks the person to confirm, and this client cannot ask. \
+                 Ask the person to run `dreams task deploy` in a terminal.",
+                None,
+            ));
+        }
+        let Some(key) = state else {
+            return self.ask_deploy(id);
+        };
+        let pending =
+            self.pending()?.remove(&key).filter(|p| p.asked.elapsed() < CONFIRM_TIMEOUT).ok_or_else(|| {
+                McpError::invalid_params("this confirmation is unknown or expired; call deploy_task again", None)
+            })?;
+        let answer = responses.as_ref().and_then(|r| r.get(CONFIRM_KEY));
+        let confirmed = answer.is_some_and(|a| a["action"] == "accept" && a["content"]["deploy"] == true);
+        if !confirmed {
+            return Err(McpError::invalid_request("the person did not confirm; nothing was deployed", None));
+        }
+        let mut store = self.lock()?;
+        if !task::plan_is_current(&store, &pending.plan).map_err(to_mcp)? {
+            drop(store);
+            return self.ask_deploy(pending.id);
+        }
+        let states = task::apply_deploy(&mut store, &pending.plan).map_err(to_mcp)?;
+        Ok(CallToolResult::structured(json!({ "deployed": states })).into())
+    }
+
+    fn ask_deploy(&self, id: Option<String>) -> Result<CallToolResponse, McpError> {
+        let plan = task::plan_deploy(&*self.lock()?, id.as_deref()).map_err(to_mcp)?;
+        if plan.is_empty() {
+            return Ok(CallToolResult::structured(json!({ "deployed": [] })).into());
+        }
+        let mut message = String::from(
+            "An agent asks to deploy these tasks on this vault. Each runs on its schedule with exactly this \
+             prompt and command until you deploy again or disable it.\n\n",
+        );
+        message.push_str(&plan.iter().map(Deploy::describe).collect::<Vec<_>>().join("\n"));
+        let schema = json!({
+            "type": "object",
+            "properties": {"deploy": {"type": "boolean", "title": "Deploy", "description": "Run these tasks here"}},
+            "required": ["deploy"]
+        });
+        let request = InputRequest::Elicitation(ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
+            meta: None,
+            message,
+            requested_schema: serde_json::from_value(schema).expect("a valid elicitation schema"),
+        }));
+        let key = new_id();
+        let mut pending = self.pending()?;
+        pending.retain(|_, p| p.asked.elapsed() < CONFIRM_TIMEOUT);
+        pending.insert(key.clone(), Pending { plan, id, asked: Instant::now() });
+        let mut requests = InputRequests::new();
+        requests.insert(CONFIRM_KEY.to_string(), request);
+        Ok(InputRequiredResult::new(Some(requests), Some(key)).into())
     }
 
     fn lock(&self) -> Result<MutexGuard<'_, Store>, McpError> {
@@ -246,6 +352,30 @@ impl Vault {
         self.lock()?.history(&p.id, p.limit).map(Json).map_err(to_mcp)
     }
 
+    #[tool(description = "Run the current revision of a task, and of its runner, on this vault. Omit id to \
+        deploy every task that is not deployed at its current revisions. The person is asked to confirm; \
+        nothing runs without their yes. A task document that is not deployed never runs here, and an edit \
+        runs only after the next deploy. Returns this vault's state for each deployed task.")]
+    fn deploy_task(
+        &self,
+        Parameters(p): Parameters<DeployParams>,
+        RequestState(state): RequestState,
+        InputResponses(responses): InputResponses,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, McpError> {
+        let can_ask = context.client_capabilities().and_then(|c| c.elicitation).is_some_and(|e| {
+            // An empty elicitation capability means form mode.
+            e.form.is_some() || e.url.is_none()
+        });
+        self.deploy_round(p.id, state, responses, can_ask)
+    }
+
+    #[tool(description = "Stop running a task on this vault. The task document and other vaults are not affected. \
+        deploy_task starts it again.")]
+    fn disable_task(&self, Parameters(p): Parameters<TaskParams>) -> Result<Json<TaskState>, McpError> {
+        task::disable(&mut *self.lock()?, &p.id).map(Json).map_err(to_mcp)
+    }
+
     #[tool(description = "Change feed: every revision (including tombstones) committed after `since`, in order. \
         Each result carries _seq; continue from last_seq.")]
     fn changes(&self, Parameters(p): Parameters<ChangesParams>) -> Result<Json<Changes>, McpError> {
@@ -277,8 +407,11 @@ impl ServerHandler for Vault {
                  type=doc://<id> matches every pinned revision. Scheduled agent tasks are documents typed \
                  doc://schemas/task: `runner` is a doc:// reference to a runner document (list them with \
                  type=doc://schemas/runner), `every` is an interval like 15m, optional `when` {glob, tag, type, \
-                 ids} fires only on matching changes, `prompt` is the text the agent receives. Each firing writes a \
-                 document typed doc://schemas/run. Runner, run, and seeded schema documents are read-only over MCP. \
+                 ids} fires only on matching changes, `prompt` is the text the agent receives. A task document is a \
+                 template: it runs on this vault only after deploy_task, which asks the person to confirm the exact \
+                 task and runner revisions; an edit runs only after the next deploy. Each firing \
+                 writes a receipt typed doc://schemas/run, tagged with the task id, with `vault` naming the vault \
+                 that ran it. Runner, run, and seeded schema documents are read-only over MCP. \
                  Skills are documents typed doc://schemas/skill with `name` (lowercase-hyphenated), \
                  `description`, and `content`; each is served as skill://<name>/SKILL.md. \
                  Prompts are documents typed doc://schemas/prompt with `name`, `description`, and `content`; \
@@ -556,6 +689,75 @@ pub async fn serve(store: Store) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn vault_with_task() -> Vault {
+        let mut store = Store::open_in_memory().unwrap();
+        crate::seed::seed(&mut store).unwrap();
+        store.set_protected(crate::runner::PROTECTED_TYPES, crate::runner::PROTECTED_IDS);
+        let vault = Vault::new(store);
+        let task = json!({"_id": "tasks/t", "_type": task::TASK_TYPE,
+            "body": {"runner": "doc://runners/claude", "every": "1h", "prompt": "go"}});
+        vault.put_doc(Parameters(serde_json::from_value(task).unwrap())).unwrap();
+        vault
+    }
+
+    /// The handle and the confirmation text of an input-required response.
+    fn asked(r: CallToolResponse) -> (String, String) {
+        let CallToolResponse::InputRequired(r) = r else { panic!("expected input_required") };
+        let request = serde_json::to_value(&r.input_requests.unwrap()[CONFIRM_KEY]).unwrap();
+        (r.request_state.unwrap(), request["params"]["message"].as_str().unwrap().to_string())
+    }
+
+    fn answer(action: &str, deploy: bool) -> Option<rmcp::model::InputResponses> {
+        serde_json::from_value(json!({CONFIRM_KEY: {"action": action, "content": {"deploy": deploy}}})).unwrap()
+    }
+
+    fn deployed(vault: &Vault) -> Option<TaskState> {
+        task::state(&vault.lock().unwrap(), "tasks/t").unwrap()
+    }
+
+    #[test]
+    fn deploy_task_deploys_only_what_the_person_confirmed() {
+        let vault = vault_with_task();
+        let id = || Some("tasks/t".to_string());
+        assert!(deployed(&vault).is_none(), "a new task is dormant");
+
+        // a client that cannot ask never deploys
+        let err = vault.deploy_round(id(), None, None, false).unwrap_err();
+        assert_eq!(err.code, ErrorCode::MISSING_REQUIRED_CLIENT_CAPABILITY);
+
+        // first round asks with the exact task and command
+        let (key, message) = asked(vault.deploy_round(id(), None, None, true).unwrap());
+        assert!(message.contains("tasks/t  rev 1-") && message.contains("command: claude -p"), "{message}");
+        assert!(deployed(&vault).is_none());
+
+        // decline: nothing deployed, and the handle is spent
+        assert!(vault.deploy_round(id(), Some(key.clone()), answer("decline", false), true).is_err());
+        assert!(vault.deploy_round(id(), Some(key), answer("accept", true), true).is_err(), "handle reused");
+        assert!(vault.deploy_round(id(), Some("forged".into()), answer("accept", true), true).is_err());
+        assert!(deployed(&vault).is_none());
+
+        // an edit between the rounds asks again, with the new revision
+        let (key, _) = asked(vault.deploy_round(id(), None, None, true).unwrap());
+        let head = vault.lock().unwrap().get("tasks/t").unwrap();
+        let edit = json!({"_id": "tasks/t", "_parent": head.rev, "_type": task::TASK_TYPE,
+            "body": {"runner": "doc://runners/claude", "every": "1h", "prompt": "edited"}});
+        let edited = vault.put_doc(Parameters(serde_json::from_value(edit).unwrap())).unwrap().0;
+        let (key, message) = asked(vault.deploy_round(id(), Some(key), answer("accept", true), true).unwrap());
+        assert!(message.contains("edited"), "{message}");
+
+        // accept: deployed at the confirmed revision
+        let done = vault.deploy_round(id(), Some(key), answer("accept", true), true).unwrap();
+        assert!(matches!(done, CallToolResponse::Complete(_)));
+        let state = deployed(&vault).unwrap();
+        assert!(state.enabled);
+        assert_eq!(state.task_rev, edited.rev);
+
+        // nothing left to deploy completes at once; disable needs no confirmation
+        assert!(matches!(vault.deploy_round(None, None, None, true).unwrap(), CallToolResponse::Complete(_)));
+        let off = vault.disable_task(Parameters(TaskParams { id: "tasks/t".into() })).unwrap();
+        assert!(!off.0.enabled);
+    }
 
     #[test]
     fn doc_input_declares_body_as_an_object() {

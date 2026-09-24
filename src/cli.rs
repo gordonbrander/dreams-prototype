@@ -2,7 +2,7 @@
 //! same semantics. `run` is in-process so tests can drive it.
 
 use std::ffi::OsString;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -11,10 +11,11 @@ use serde_json::{Map, Value};
 
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::rev::short_rev;
 use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, Store};
 use crate::sync::{self, PullReport};
-use crate::task::{self, Evaluation, TickReport, When};
+use crate::task::{self, Deploy, Evaluation, TaskState, TickReport, When};
 use crate::{daemon, markdown, mcp, resolve, rev, seed};
 
 /// Dreams: a versioned document vault in SQLite, with a CLI and an MCP server.
@@ -89,8 +90,8 @@ enum Command {
     /// files are no-ops; edited files become the next revision.
     Import { dir: PathBuf },
     /// Copy every revision of the vault at PEER that this vault does not have.
-    /// Tasks and runs never replicate. Concurrent edits become conflicts:
-    /// see `_conflicts` in `doc get` and `doc resolve`.
+    /// A task that arrives is dormant here until `task enable`. Concurrent edits
+    /// become conflicts: see `_conflicts` in `doc get` and `doc resolve`.
     Pull { peer: PathBuf },
     /// Pull from the vault at PEER, then push to it. Afterwards both hold the same revisions.
     Sync { peer: PathBuf },
@@ -239,14 +240,28 @@ enum TaskCmd {
         ids: Vec<String>,
         #[arg(long)]
         title: Option<String>,
-        /// Create the task disabled.
+        /// Write the task but do not deploy it on this vault.
         #[arg(long)]
-        disabled: bool,
+        no_deploy: bool,
+        /// Deploy without asking for confirmation.
+        #[arg(long)]
+        yes: bool,
         /// Prompt text file. `-` or absent means stdin.
         prompt_file: Option<PathBuf>,
     },
-    /// Every enabled task with its last run and whether it is due.
+    /// Every task with its state on this vault, its last run, and whether it is due.
     List,
+    /// Run the current revision of a task, and of its runner, on this vault. Without an id,
+    /// every task that is not deployed at its current revisions. Asks for confirmation.
+    /// Edits and tasks that arrive by sync run only after a deploy.
+    Deploy {
+        task_id: Option<String>,
+        /// Deploy without asking for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop running a task on this vault. Other vaults are not affected. `task deploy` starts it again.
+    Disable { task_id: String },
     /// Delete a task (a tombstone; its runs stay).
     Rm { task_id: String },
     /// Evaluate one task: due or not, matched changes, the command it would run. Nothing runs.
@@ -255,10 +270,10 @@ enum TaskCmd {
         #[arg(long, hide = true)]
         now: Option<String>,
     },
-    /// Fire one task now, whatever its schedule says.
+    /// Fire one task now, whatever its schedule says. A dormant task stays dormant.
     Run {
         task_id: String,
-        /// Fire even if the newest run has not finished.
+        /// Fire even if another run holds the task.
         #[arg(long)]
         force: bool,
     },
@@ -302,9 +317,23 @@ enum DaemonCmd {
 
 // ---- entry point --------------------------------------------------------
 
+/// Asks a person to confirm `text`: true for yes.
+pub type Confirm<'a> = &'a mut dyn FnMut(&str) -> io::Result<bool>;
+
+/// Ask on the controlling terminal, not on stdin, which can hold a task prompt.
+pub fn tty_confirm(text: &str) -> io::Result<bool> {
+    let mut tty = std::fs::OpenOptions::new().read(true).write(true).open("/dev/tty")?;
+    write!(tty, "{text}\nDeploy? [y/N] ")?;
+    tty.flush()?;
+    let mut line = String::new();
+    io::BufReader::new(&tty).read_line(&mut line)?;
+    Ok(matches!(line.trim(), "y" | "Y" | "yes"))
+}
+
 /// Parse `args` (including argv[0]) and run. Returns the exit code. All
 /// output goes to the given writers; nothing here exits the process.
-pub fn run<I, T>(args: I, stdin: &mut dyn Read, stdout: &mut dyn Write, stderr: &mut dyn Write) -> i32
+/// `confirm` asks before a deploy.
+pub fn run<I, T>(args: I, stdin: &mut dyn Read, stdout: &mut dyn Write, stderr: &mut dyn Write, confirm: Confirm) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -317,7 +346,7 @@ where
             return e.exit_code();
         }
     };
-    match execute(cli, stdin, stdout) {
+    match execute(cli, stdin, stdout, confirm) {
         Ok(()) => 0,
         Err(err) => {
             if let Some(io_err) = err.downcast_ref::<io::Error>()
@@ -342,7 +371,7 @@ where
     }
 }
 
-fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
+fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm) -> anyhow::Result<()> {
     let json = cli.json;
     // Every entry point seeds a database it creates, before the actor is set
     // so the built-in documents never carry a task's id. The library never
@@ -418,7 +447,7 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         Command::Task(cmd) => {
             let mut store = open()?;
             let db = absolute(&cli.db)?;
-            task_cmd(&mut store, &db, cmd, json, stdin, out)?;
+            task_cmd(&mut store, &db, cmd, json, stdin, out, confirm)?;
         }
         Command::Runner(cmd) => {
             let mut store = open()?;
@@ -483,7 +512,7 @@ fn print_pulls(out: &mut dyn Write, json: bool, reports: &[(String, PullReport)]
     for (direction, r) in reports {
         let verb = if direction.starts_with("to ") { "pushed" } else { "pulled" };
         let noun = if r.written == 1 { "revision" } else { "revisions" };
-        let mut notes = vec![format!("{} present", r.present), format!("{} excluded", r.excluded)];
+        let mut notes = vec![format!("{} present", r.present)];
         if r.missing_parent > 0 {
             notes.push(format!("{} missing parent", r.missing_parent));
         }
@@ -529,9 +558,10 @@ fn task_cmd(
     json: bool,
     stdin: &mut dyn Read,
     out: &mut dyn Write,
+    confirm: Confirm,
 ) -> anyhow::Result<()> {
     match cmd {
-        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, disabled, prompt_file } => {
+        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, no_deploy, yes, prompt_file } => {
             id_to_relpath(&task_id)?;
             task::parse_duration(&every)?;
             let runner = DocRef::from_cli(&runner)?.to_string();
@@ -549,14 +579,25 @@ fn task_cmd(
             if let Some(t) = title {
                 map.insert("title".into(), Value::String(t));
             }
-            if disabled {
-                map.insert("enabled".into(), Value::Bool(false));
-            }
             let (doc, status) = upsert_unless_same(store, &task_id, map)?;
+            if !json {
+                writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+            }
+            let deployed = if no_deploy {
+                Some(Vec::new())
+            } else {
+                deploy(store, task::plan_deploy(store, Some(&task_id))?, yes, confirm)?
+            };
             if json {
                 print_json(out, &doc)?;
             } else {
-                writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+                match (deployed, task::state(store, &task_id)?) {
+                    (Some(states), _) => print_deployed(out, &states)?,
+                    (None, Some(s)) if s.enabled => {
+                        writeln!(out, "not deployed; this vault still runs {task_id} {}", short_rev(&s.task_rev))?
+                    }
+                    (None, _) => writeln!(out, "not deployed; {task_id} does not run on this vault")?,
+                }
             }
         }
         TaskCmd::List => {
@@ -570,6 +611,7 @@ fn task_cmd(
                     .map(|e| {
                         vec![
                             e.task.id.clone(),
+                            state_word(e),
                             e.parsed.runner.clone(),
                             e.task.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
                             e.parsed.when.as_ref().map(When::summary).unwrap_or_default(),
@@ -578,7 +620,28 @@ fn task_cmd(
                         ]
                     })
                     .collect();
-                table(out, &["ID", "RUNNER", "EVERY", "WHEN", "LAST RUN", "DUE"], &rows)?;
+                table(out, &["ID", "STATE", "RUNNER", "EVERY", "WHEN", "LAST RUN", "DUE"], &rows)?;
+            }
+        }
+        TaskCmd::Deploy { task_id, yes } => {
+            let plan = task::plan_deploy(store, task_id.as_deref())?;
+            if plan.is_empty() && !json {
+                writeln!(out, "nothing to deploy")?;
+                return Ok(());
+            }
+            let states = deploy(store, plan, yes, confirm)?.ok_or_else(|| StoreError::invalid("not deployed"))?;
+            if json {
+                print_json(out, &states)?;
+            } else {
+                print_deployed(out, &states)?;
+            }
+        }
+        TaskCmd::Disable { task_id } => {
+            let state = task::disable(store, &task_id)?;
+            if json {
+                print_json(out, &state)?;
+            } else {
+                writeln!(out, "disabled {task_id}")?;
             }
         }
         TaskCmd::Rm { task_id } => {
@@ -620,7 +683,11 @@ fn task_cmd(
                 if let Some(w) = &eval.parsed.when {
                     writeln!(out, "when:      {}", w.summary())?;
                 }
-                writeln!(out, "enabled:   {}", eval.parsed.enabled)?;
+                writeln!(out, "state:     {}", state_word(&eval))?;
+                writeln!(out, "runs:      {}", short_rev(&eval.task.rev))?;
+                if eval.head_rev != eval.task.rev {
+                    writeln!(out, "head:      {}", short_rev(&eval.head_rev))?;
+                }
                 writeln!(out, "last run:  {}", eval.last_run_at.as_deref().unwrap_or("never"))?;
                 writeln!(out, "cursor:    {} (head {})", eval.cursor, eval.head)?;
                 writeln!(out, "status:    {}", due_word(&eval))?;
@@ -647,14 +714,14 @@ fn task_cmd(
             let now = store.now()?;
             let eval = task::evaluate(store, &now, Some(&task_id))?.remove(0);
             if eval.running && !force {
+                let until = eval.state.as_ref().and_then(|s| s.lease_until.as_deref()).unwrap_or("?");
                 return Err(StoreError::invalid(format!(
-                    "{task_id} is running ({}); pass --force to fire anyway",
-                    eval.last_run.as_deref().unwrap_or("?")
+                    "{task_id} is running (lease until {until}); pass --force to fire anyway"
                 ))
                 .into());
             }
             let fired = tokio::runtime::Runtime::new()?
-                .block_on(task::fire(store, db, &eval, &now))?
+                .block_on(task::fire(store, db, &eval, &now, force))?
                 .ok_or_else(|| StoreError::invalid(format!("{task_id} was fired by another process; try again")))?;
             let run = store.get(&fired.run)?;
             if json {
@@ -686,12 +753,12 @@ fn task_cmd(
                             field(d, "started_at"),
                             field(d, "finished_at"),
                             d.body.get("exit_code").and_then(Value::as_i64).map(|c| c.to_string()).unwrap_or_default(),
-                            d.body.get("seq").and_then(Value::as_i64).map(|s| s.to_string()).unwrap_or_default(),
+                            field(d, "vault"),
                             clip(&field(d, "error"), 60),
                         ]
                     })
                     .collect();
-                table(out, &["STARTED", "FINISHED", "EXIT", "SEQ", "ERROR"], &rows)?;
+                table(out, &["STARTED", "FINISHED", "EXIT", "VAULT", "ERROR"], &rows)?;
                 if let Some(next) = page.next {
                     writeln!(out, "next: {next}")?;
                 }
@@ -715,9 +782,43 @@ fn upsert_unless_same(store: &mut Store, id: &str, map: Map<String, Value>) -> R
     upsert(store, id, map, None)
 }
 
+/// Confirm a plan (unless `yes`) and apply it. `None` when the person said no.
+fn deploy(store: &mut Store, plan: Vec<Deploy>, yes: bool, confirm: Confirm) -> anyhow::Result<Option<Vec<TaskState>>> {
+    if plan.is_empty() {
+        return Ok(Some(Vec::new()));
+    }
+    if !yes {
+        let text = plan.iter().map(Deploy::describe).collect::<Vec<_>>().join("\n");
+        let answer = confirm(&text).map_err(|e| {
+            StoreError::invalid(format!("cannot ask for confirmation ({e}); pass --yes to deploy without asking"))
+        })?;
+        if !answer {
+            return Ok(None);
+        }
+    }
+    Ok(Some(task::apply_deploy(store, &plan)?))
+}
+
+fn print_deployed(out: &mut dyn Write, states: &[TaskState]) -> io::Result<()> {
+    for s in states {
+        writeln!(out, "deployed {} {}", s.task_id, short_rev(&s.task_rev))?;
+    }
+    Ok(())
+}
+
+/// A task's state on this vault, and whether a deploy would change it.
+fn state_word(e: &Evaluation) -> String {
+    let word = match &e.state {
+        None => "dormant",
+        Some(s) if s.enabled => "deployed",
+        Some(_) => "disabled",
+    };
+    if e.drift { format!("{word}, changed") } else { word.to_string() }
+}
+
 fn due_word(e: &Evaluation) -> &'static str {
-    if !e.parsed.enabled {
-        "disabled"
+    if !e.state.as_ref().is_some_and(|s| s.enabled) {
+        ""
     } else if e.running {
         "running"
     } else if e.due {
@@ -1288,13 +1389,6 @@ fn render_doc(doc: &Doc) -> String {
         Some(Format::Json) => format!("{}\n", serde_json::to_string_pretty(doc).expect("store types serialize")),
         Some(Format::Yaml) => serde_yaml_ng::to_string(doc).expect("store types serialize"),
         Some(Format::Md) | None => markdown::render(doc),
-    }
-}
-
-fn short_rev(rev: &str) -> String {
-    match rev.split_once('-') {
-        Some((g, h)) => format!("{g}-{}", &h[..h.len().min(8)]),
-        None => rev.to_string(),
     }
 }
 

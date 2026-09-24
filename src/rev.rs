@@ -106,6 +106,14 @@ pub fn rev_of(
     Ok(format(generation, &hash(id, parent, type_id, deleted, body)))
 }
 
+/// `3-9f2a1c0e`: the generation and the first 8 characters of the hash.
+pub fn short_rev(rev: &str) -> String {
+    match rev.split_once('-') {
+        Some((g, h)) => format!("{g}-{}", &h[..h.len().min(8)]),
+        None => rev.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

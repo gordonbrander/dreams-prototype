@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::db;
-use crate::doc::{Doc, DocRef, Draft, PutInput, check_body, check_id};
+use crate::doc::{Doc, DocRef, Draft, PutInput, check_body, check_id, new_id};
 use crate::error::StoreError;
 use crate::rev;
 use crate::schema;
@@ -584,6 +584,12 @@ impl Store {
             .conn
             .query_row("SELECT seq, rev FROM checkpoints WHERE peer = ?1", [peer], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?)
+    }
+
+    /// This vault's id, a UUID v7 made on first use. Local; never replicates.
+    pub fn vault_id(&self) -> Result<String, StoreError> {
+        self.conn.execute("INSERT INTO vault(id) SELECT ?1 WHERE NOT EXISTS (SELECT 1 FROM vault)", [new_id()])?;
+        Ok(self.conn.query_row("SELECT id FROM vault", [], |r| r.get(0))?)
     }
 
     /// The revision committed at change-feed position `seq`.

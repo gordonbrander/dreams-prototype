@@ -7,7 +7,33 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
+
+/// Local state that never replicates. `vault` holds this vault's id, one
+/// row, made on first use. `task_state` is the schedule of each task this
+/// vault runs: a task document with no row is dormant here. A row pins the
+/// deployed task revision and runner reference; `cursor` is the change-feed
+/// position the last run consumed; `lease_until` is set while a run holds
+/// the task. A row lives only while its document is a live task: the
+/// trigger drops it on a tombstone or a type change, local or replicated.
+const MIGRATION_5: &str = r#"
+CREATE TABLE vault (id TEXT NOT NULL);
+CREATE TABLE task_state (
+  task_id     TEXT PRIMARY KEY,
+  task_rev    TEXT NOT NULL,
+  runner      TEXT NOT NULL,
+  enabled     INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  enabled_at  TEXT NOT NULL,
+  cursor      INTEGER NOT NULL,
+  last_run_at TEXT,
+  lease_until TEXT
+);
+CREATE TRIGGER task_state_follows_doc AFTER INSERT ON docs BEGIN
+  DELETE FROM task_state WHERE task_id = new._id
+    AND NOT EXISTS (SELECT 1 FROM docs_winners w
+                     WHERE w._id = new._id AND w._deleted = 0 AND w._type_path = 'doc://schemas/task');
+END;
+"#;
 
 /// Replication checkpoints, one per source vault this vault pulls from.
 /// `rev` is the source's revision at `seq`; a mismatch means the source was
@@ -205,5 +231,31 @@ mod tests {
         conn.execute("INSERT INTO checkpoints(peer, seq, rev) VALUES ('/a.db', 3, '1-ab')", []).unwrap();
         let seq: i64 = conn.query_row("SELECT seq FROM checkpoints WHERE peer = '/a.db'", [], |r| r.get(0)).unwrap();
         assert_eq!(seq, 3);
+    }
+
+    #[test]
+    fn migration_5_adds_vault_and_task_state() {
+        let conn = open_in_memory().unwrap();
+        conn.execute("INSERT INTO vault(id) VALUES ('v')", []).unwrap();
+        let row = "INSERT INTO task_state(task_id, task_rev, runner, enabled, enabled_at, cursor)
+                   VALUES (?1, '1-a', 'doc://r?rev=1-b', ?2, 'now', 0)";
+        assert!(conn.execute(row, rusqlite::params!["bad", 2]).is_err());
+        let state = |id: &str| -> i64 {
+            conn.query_row("SELECT count(*) FROM task_state WHERE task_id = ?1", [id], |r| r.get(0)).unwrap()
+        };
+        // a live task keeps its row; a tombstone or a type change drops it
+        conn.execute_batch(
+            "INSERT INTO docs(_rev,_id,_type,body) VALUES ('1-t','t','doc://schemas/task?rev=1-s','{}'),
+                                                        ('1-u','u','doc://schemas/task?rev=1-s','{}');",
+        )
+        .unwrap();
+        conn.execute(row, rusqlite::params!["t", 1]).unwrap();
+        conn.execute(row, rusqlite::params!["u", 1]).unwrap();
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,_type,body) VALUES ('2-t','t','1-t','doc://schemas/task?rev=1-s','{\"a\":1}')", []).unwrap();
+        assert_eq!(state("t"), 1);
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,_deleted,_type,body) VALUES ('3-t','t','2-t',1,'doc://schemas/task?rev=1-s','{}')", []).unwrap();
+        assert_eq!(state("t"), 0);
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,body) VALUES ('2-u','u','1-u','{}')", []).unwrap();
+        assert_eq!(state("u"), 0);
     }
 }
