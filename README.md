@@ -102,8 +102,8 @@ dreams [--db PATH] [--json] <command>
   doc get     <id | doc://id[?rev=REV]> [--deleted-conflicts]
                                                   current revision, or one revision
   doc delete  <id> [--parent REV]                 write a tombstone
-  doc list    [--type T] [--tag G] [--limit N] [--before SEQ]
-  doc search  <query> [--type T] [--tag G] [--limit N]
+  doc list    [--type T] [--tag G] [--prefix P] [--limit N] [--before SEQ]
+  doc search  <query> [--type T] [--tag G] [--prefix P] [--limit N]
   doc conflicts [--limit N] [--after ID]          documents with conflicts
   doc resolve <id> [FILE]                         keep FILE (or the winner) and tombstone the conflicts
   doc resolve <id> --auto [--runner R] [--dry-run]
@@ -507,7 +507,7 @@ Each store operation is one tool:
 | `delete_doc` | Tombstone with `id` and `parent`. |
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
 | `resolve_doc` | Tombstone every conflict of `id`, after it writes `merged` on the winner if given. Pass the `conflicts` you read to fail if they changed. |
-| `list_docs` | Current documents, newest first, with `type`, `tag`, `before`, `limit`. |
+| `list_docs` | Current documents, newest first, with `type`, `tag`, `prefix` (of `_id`), `before`, `limit`. |
 | `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
@@ -575,7 +575,7 @@ Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's no
 
 ### Bookmarks
 
-Every vault is also seeded with the skill `skills/bookmark` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<slug>.md`, and the agent makes the slug from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. The agent gets the page with its own web fetch tool, so the host must give it one.
+Every vault is also seeded with the skill `skills/bookmark` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<origin-slug>/<path-slug>.md`, and the agent makes the slugs from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. All bookmarks from one site share a prefix, so `list_docs` with `prefix` set to `bookmarks/example-com/` lists them. The agent gets the page with its own web fetch tool, so the host must give it one.
 
 The seeded prompt `/dreams:bookmark <url> [notes]` saves a bookmark.
 

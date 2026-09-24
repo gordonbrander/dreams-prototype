@@ -40,7 +40,7 @@ pub const DAILY_SCHEMA: &str = r#"{
 /// The body of `schemas/bookmark`: one saved web page, see `seed/bookmark.md`.
 pub const BOOKMARK_SCHEMA: &str = r#"{
   "title": "Bookmark",
-  "description": "A saved web page. The _id is bookmarks/<slug>.md, with the slug made from url. content is a summary of the page and any notes from the user.",
+  "description": "A saved web page. The _id is bookmarks/<origin-slug>/<path-slug>.md, with the slugs made from url. content is a summary of the page and any notes from the user.",
   "type": "object",
   "required": ["url"],
   "properties": {

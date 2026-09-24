@@ -122,6 +122,9 @@ struct Filter {
     /// Only documents whose current revision has this tag.
     #[arg(long)]
     tag: Option<String>,
+    /// Only documents whose _id starts with this text.
+    #[arg(long)]
+    prefix: Option<String>,
     /// Page size (1..=1000, default 50).
     #[arg(long)]
     limit: Option<usize>,
@@ -749,7 +752,7 @@ fn task_cmd(
             }
         }
         TaskCmd::Runs { task_id, limit } => {
-            let q = ListQuery { type_id: Some(task::RUN_TYPE.into()), tag: Some(task_id), limit, before: None };
+            let q = ListQuery { type_id: Some(task::RUN_TYPE.into()), tag: Some(task_id), limit, ..Default::default() };
             let page = store.list(&q)?;
             if json {
                 print_json(out, &page)?;
@@ -1044,7 +1047,7 @@ fn doc_cmd(
 
 impl From<Filter> for ListQuery {
     fn from(f: Filter) -> Self {
-        ListQuery { type_id: f.type_id, tag: f.tag, before: None, limit: f.limit }
+        ListQuery { type_id: f.type_id, tag: f.tag, prefix: f.prefix, before: None, limit: f.limit }
     }
 }
 

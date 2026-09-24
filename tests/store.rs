@@ -316,6 +316,25 @@ fn type_filters_match_by_path_or_pin() {
 }
 
 #[test]
+fn prefix_filters_match_the_start_of_the_id() {
+    let mut s = store();
+    for id in ["bookmarks/example-com/a.md", "bookmarks/example-com/b.md", "bookmarks/example-com-x/c.md"] {
+        s.put(input(json!({"_id": id, "title": id, "content": "findable", "tags": ["bookmark"]}))).unwrap();
+    }
+    let prefix = Some("bookmarks/example-com/".to_string());
+
+    let listed = s.list(&ListQuery { prefix: prefix.clone(), ..Default::default() }).unwrap();
+    assert_eq!(ids(&listed), vec!["bookmarks/example-com/b.md", "bookmarks/example-com/a.md"]);
+    let tagged =
+        s.list(&ListQuery { prefix: prefix.clone(), tag: Some("bookmark".into()), ..Default::default() }).unwrap();
+    assert_eq!(ids(&tagged), vec!["bookmarks/example-com/b.md", "bookmarks/example-com/a.md"]);
+    let searched = s.search("findable", &ListQuery { prefix, ..Default::default() }).unwrap();
+    let mut searched = hit_ids(&searched);
+    searched.sort();
+    assert_eq!(searched, vec!["bookmarks/example-com/a.md", "bookmarks/example-com/b.md"]);
+}
+
+#[test]
 fn changes_feed() {
     let mut s = store();
     let a = s.put(input(json!({"_id": "a", "title": "a"}))).unwrap();
@@ -354,7 +373,9 @@ fn search_sees_only_current_revisions() {
     assert!(s.search("hello AND", &ListQuery::default()).is_ok());
     assert!(s.search("\"unbalanced (", &ListQuery::default()).is_ok());
     // filters
-    assert!(s.search("second", &ListQuery { tag: Some("blue".into()), ..Default::default() }).unwrap().results.is_empty());
+    assert!(
+        s.search("second", &ListQuery { tag: Some("blue".into()), ..Default::default() }).unwrap().results.is_empty()
+    );
     // empty query lists, with no matches
     let listed = s.search("   ", &ListQuery::default()).unwrap();
     assert_eq!(listed.results.len(), 2);
@@ -364,7 +385,8 @@ fn search_sees_only_current_revisions() {
 #[test]
 fn search_results_carry_metadata_and_matches() {
     let mut s = store();
-    let a = s.put(input(json!({"_id": "a", "title": "Alpha", "content": "the first draft", "tags": ["blue"]}))).unwrap();
+    let a =
+        s.put(input(json!({"_id": "a", "title": "Alpha", "content": "the first draft", "tags": ["blue"]}))).unwrap();
 
     let page = s.search("first", &ListQuery::default()).unwrap();
     let hit = &page.results[0];

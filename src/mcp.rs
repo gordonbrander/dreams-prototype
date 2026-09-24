@@ -335,7 +335,7 @@ impl Vault {
     }
 
     #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \
-        reference; without ?rev= it matches every pinned revision of that schema) and/or tag. \
+        reference; without ?rev= it matches every pinned revision of that schema), tag, and/or `prefix` of _id. \
         Page with `before` = previous page's `next`.")]
     fn list_docs(&self, Parameters(q): Parameters<ListQuery>) -> Result<Json<Page>, McpError> {
         self.lock()?.list(&q).map(Json).map_err(to_mcp)
@@ -343,7 +343,7 @@ impl Vault {
 
     #[tool(description = "Full-text search over title, content and tags of current documents, best match first. \
         Each result has the document's metadata, title, and `content_matches`: a snippet of the best-matching \
-        field with matched terms in **. Call get_doc for the full document. Optional type and tag filters. \
+        field with matched terms in **. Call get_doc for the full document. Optional type, tag, and prefix filters. \
         An empty query lists instead, with no content_matches; page it with `before` = previous page's `next`.")]
     fn search_docs(&self, Parameters(p): Parameters<SearchParams>) -> Result<Json<SearchPage>, McpError> {
         self.lock()?.search(&p.query, &p.filter).map(Json).map_err(to_mcp)
@@ -455,7 +455,7 @@ impl ServerHandler for Vault {
             }));
         }
         let page =
-            store.list(&ListQuery { type_id: None, tag: None, before, limit: Some(RESOURCE_PAGE) }).map_err(to_mcp)?;
+            store.list(&ListQuery { before, limit: Some(RESOURCE_PAGE), ..Default::default() }).map_err(to_mcp)?;
         resources.extend(page.docs.iter().map(doc_resource));
         let mut result =
             ListResourcesResult::with_all_items(resources).with_ttl_ms(0).with_cache_scope(CacheScope::Private);

@@ -51,6 +51,9 @@ pub struct ListQuery {
     /// Only docs whose current revision carries this tag.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
+    /// Only docs whose `_id` starts with this text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
     /// Keyset cursor: only heads with a sequence below this (from a previous page's `next`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<i64>,
@@ -421,9 +424,8 @@ impl Store {
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         // SQLite creates a missing file but not a missing folder.
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlite {
-                message: format!("unable to create {}: {e}", dir.display()),
-            })?;
+            std::fs::create_dir_all(dir)
+                .map_err(|e| StoreError::Sqlite { message: format!("unable to create {}: {e}", dir.display()) })?;
         }
         Ok(Store::new(db::open(path)?))
     }
@@ -740,18 +742,20 @@ impl Store {
                    JOIN doc_heads h ON h._id = t._id
                    JOIN docs d ON d._local_seq = h.seq
                   WHERE t.tag = ?3 AND (?1 IS NULL OR d._type = ?1) AND (?2 IS NULL OR d._type_path = ?2)
-                    AND (?4 IS NULL OR h.seq < ?4)
+                    AND (?4 IS NULL OR h.seq < ?4) AND (?6 IS NULL OR substr(d._id, 1, length(?6)) = ?6)
                   ORDER BY h.seq DESC LIMIT ?5"
             ),
             None => format!(
                 "SELECT {DOC_COLS} FROM doc_heads h JOIN docs d ON d._local_seq = h.seq
                   WHERE d._deleted = 0 AND (?1 IS NULL OR d._type = ?1) AND (?2 IS NULL OR d._type_path = ?2)
                     AND ?3 IS NULL AND (?4 IS NULL OR h.seq < ?4)
+                    AND (?6 IS NULL OR substr(d._id, 1, length(?6)) = ?6)
                   ORDER BY h.seq DESC LIMIT ?5"
             ),
         };
         let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![exact, path, q.tag, q.before, limit as i64], |r| row_to_doc(r, true))?;
+        let rows =
+            stmt.query_map(params![exact, path, q.tag, q.before, limit as i64, q.prefix], |r| row_to_doc(r, true))?;
         let mut docs = rows.collect::<Result<Vec<_>, _>>()?;
         let next = if docs.len() == limit { docs.last().and_then(|d| d.seq) } else { None };
         for d in &mut docs {
@@ -766,8 +770,12 @@ impl Store {
         let mut docs = Vec::new();
         let mut before = None;
         loop {
-            let page =
-                self.list(&ListQuery { type_id: type_id.map(Into::into), tag: None, before, limit: Some(1000) })?;
+            let page = self.list(&ListQuery {
+                type_id: type_id.map(Into::into),
+                before,
+                limit: Some(1000),
+                ..Default::default()
+            })?;
             docs.extend(page.docs);
             match page.next {
                 Some(next) => before = Some(next),
@@ -791,9 +799,10 @@ impl Store {
               WHERE docs_fts MATCH ?1
                 AND (?2 IS NULL OR d._type = ?2) AND (?3 IS NULL OR d._type_path = ?3)
                 AND (?4 IS NULL OR EXISTS (SELECT 1 FROM doc_tags t WHERE t.tag = ?4 AND t._id = d._id))
+                AND (?6 IS NULL OR substr(d._id, 1, length(?6)) = ?6)
               ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?5";
         let mut stmt = self.conn.prepare_cached(sql)?;
-        let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64], |r| {
+        let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64, q.prefix], |r| {
             Ok(SearchResult {
                 id: r.get(0)?,
                 rev: r.get(1)?,

@@ -10,20 +10,21 @@ A bookmark has these fields:
 
 ## Make the id
 
-The `_id` of a bookmark is `bookmarks/<slug>.md`. Make the slug from the URL with these steps:
+The `_id` of a bookmark is `bookmarks/<origin-slug>/<path-slug>.md`. All bookmarks from one site thus share the prefix `bookmarks/<origin-slug>/`. Make the slugs from the URL with these steps:
 
 1. Make all letters lowercase.
 2. Remove the scheme, for example `https://`.
 3. Remove `www.` at the start.
 4. Remove the query and the fragment: all text from the first `?` or `#`.
-5. Remove `/` at the end.
-6. Replace each sequence of characters that are not `a`-`z` or `0`-`9` with one `-`.
-7. Remove `-` at the start and at the end.
+5. Divide the rest at the first `/`. The text before it is the origin: the host and the port. The text after it is the path.
+6. In the origin and in the path, replace each sequence of characters that are not `a`-`z` or `0`-`9` with one `-`. Then remove `-` at the start and at the end.
+7. If the path slug is empty, use `index`.
 
 Examples:
-- `https://www.example.com/foo/bar?x=1` gives `bookmarks/example-com-foo-bar.md`.
-- `http://Example.com/` gives `bookmarks/example-com.md`.
-- `https://blog.example.org/2026/09/my_post.html#part-2` gives `bookmarks/blog-example-org-2026-09-my-post-html.md`.
+- `https://www.example.com/foo/bar?x=1` gives `bookmarks/example-com/foo-bar.md`.
+- `http://Example.com/` gives `bookmarks/example-com/index.md`.
+- `https://blog.example.org/2026/09/my_post.html#part-2` gives `bookmarks/blog-example-org/2026-09-my-post-html.md`.
+- `http://localhost:8080/docs` gives `bookmarks/localhost-8080/docs.md`.
 
 ## Save a bookmark
 
@@ -47,4 +48,5 @@ Examples:
 
 - To find the bookmark for a URL, make the id from the URL. Then call `get_doc` with `href` set to the id.
 - To list bookmarks, call `list_docs` with `tag` set to `bookmark`. The newest changes come first.
+- To list the bookmarks from one site, make the origin slug from its URL. Then call `list_docs` with `prefix` set to `bookmarks/<origin-slug>/`.
 - To find bookmarks about a subject, call `search_docs`. It searches `title`, `content`, and `tags`. It does not search `url`.
