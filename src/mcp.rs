@@ -9,7 +9,7 @@ use rmcp::{
     ErrorData as McpError, Json, ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, Implementation, ListResourcesResult,
+        CacheScope, CustomRequest, CustomResult, ErrorCode, ExtensionCapabilities, Implementation, ListResourcesResult,
         PaginatedRequestParams, ProtocolVersion, ReadResourceRequestParams, ReadResourceResponse,
         ReadResourceResult, Resource, ResourceContents, ServerCapabilities, ServerConfig,
     },
@@ -304,7 +304,9 @@ impl ServerHandler for Vault {
                     .with_size(s.text.len() as u64)
             })
             .collect();
-        Ok(ListResourcesResult::with_all_items(resources))
+        Ok(ListResourcesResult::with_all_items(resources)
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private))
     }
 
     async fn read_resource(
@@ -314,7 +316,10 @@ impl ServerHandler for Vault {
     ) -> Result<ReadResourceResponse, McpError> {
         let skill = self.skill(&request.uri)?;
         let contents = ResourceContents::text(skill.text, skill.uri).with_mime_type("text/markdown");
-        Ok(ReadResourceResult::new(vec![contents]).into())
+        Ok(ReadResourceResult::new(vec![contents])
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Private)
+            .into())
     }
 
     /// Accept only the stateless 2026-07-28 protocol.
