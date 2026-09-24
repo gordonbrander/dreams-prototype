@@ -497,7 +497,7 @@ fn protected_types_are_read_only() {
 }
 
 #[test]
-fn seed_is_idempotent_and_respects_deletions() {
+fn seed_is_idempotent() {
     let mut s = store();
     let first = seed::seed(&mut s).unwrap();
     assert_eq!(
@@ -523,9 +523,6 @@ fn seed_is_idempotent_and_respects_deletions() {
     let runner_schema = s.get("schemas/runner").unwrap();
     assert_eq!(pi.type_id.as_deref(), Some(pinned("schemas/runner", &runner_schema.rev).as_str()));
     assert_eq!(runner_schema.type_id, None);
-    s.delete("runners/pi", &pi.rev).unwrap();
-    assert!(seed::seed(&mut s).unwrap().is_empty());
-    assert!(matches!(s.get("runners/pi"), Err(StoreError::Deleted { .. })));
 
     // a vault from before doc:// types is refused
     let mut old = store();
@@ -536,7 +533,7 @@ fn seed_is_idempotent_and_respects_deletions() {
 }
 
 #[test]
-fn restore_rewrites_edited_and_deleted_defaults() {
+fn seed_rewrites_edited_and_deleted_defaults() {
     let mut s = store();
     seed::seed(&mut s).unwrap();
     let claude = s.get("runners/claude").unwrap();
@@ -545,16 +542,12 @@ fn restore_rewrites_edited_and_deleted_defaults() {
     let skill = s.get("skills/daily-note").unwrap();
     s.delete("skills/daily-note", &skill.rev).unwrap();
 
-    assert_eq!(seed::restore(&mut s).unwrap(), ["runners/claude", "skills/daily-note"]);
+    assert_eq!(seed::seed(&mut s).unwrap(), ["runners/claude", "skills/daily-note"]);
     assert_eq!(s.get("runners/claude").unwrap().body, claude.body);
     assert_eq!(s.get("skills/daily-note").unwrap().body, skill.body);
-    assert!(seed::restore(&mut s).unwrap().is_empty());
+    assert!(seed::seed(&mut s).unwrap().is_empty());
     // the edit stays in history
     assert_eq!(s.history("runners/claude", None).unwrap().revisions.len(), 3);
-
-    // a fresh vault is seeded and reports what it wrote
-    let mut fresh = store();
-    assert_eq!(seed::restore(&mut fresh).unwrap().len(), 12);
 }
 
 fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams::Doc {

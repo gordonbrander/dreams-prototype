@@ -39,7 +39,7 @@ pub struct Cli {
 enum Command {
     /// Create the database if needed, apply migrations, and seed the built-in schemas, runners, skills, and prompts.
     Init,
-    /// Restore the built-in schemas, runners, skills, and prompts. Writes each one whose current
+    /// Seed the built-in schemas, runners, skills, and prompts. Writes each one whose current
     /// revision differs from the default, and revives deleted ones. Earlier revisions stay in history.
     Seed,
     /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
@@ -344,15 +344,18 @@ where
 
 fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Result<()> {
     let json = cli.json;
-    // Every entry point seeds the built-in documents, before the actor is
-    // set so they never carry a task's id. The library never writes on open.
-    let open = || -> Result<(Store, Vec<String>), StoreError> {
+    // Every entry point seeds a database it creates, before the actor is set
+    // so the built-in documents never carry a task's id. The library never
+    // writes on open.
+    let open = || -> Result<Store, StoreError> {
+        let created = !cli.db.exists();
         let mut store = Store::open(&cli.db)?;
-        let seeded = seed::seed(&mut store)?;
+        if created {
+            seed::seed(&mut store)?;
+        }
         store.set_actor(cli.actor.clone());
-        Ok((store, seeded))
+        Ok(store)
     };
-    let open = || open().map(|(store, _)| store);
     match cli.command {
         Command::Init => {
             let mut store = Store::open(&cli.db)?;
@@ -364,14 +367,14 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write) -> anyhow::Resul
         }
         Command::Seed => {
             let mut store = Store::open(&cli.db)?;
-            let restored = seed::restore(&mut store)?;
+            let seeded = seed::seed(&mut store)?;
             if json {
-                writeln!(out, "{}", serde_json::json!({ "restored": restored }))?;
-            } else if restored.is_empty() {
-                writeln!(out, "nothing to restore")?;
+                writeln!(out, "{}", serde_json::json!({ "seeded": seeded }))?;
+            } else if seeded.is_empty() {
+                writeln!(out, "nothing to seed")?;
             } else {
-                for id in restored {
-                    writeln!(out, "restored {id}")?;
+                for id in seeded {
+                    writeln!(out, "seeded {id}")?;
                 }
             }
         }

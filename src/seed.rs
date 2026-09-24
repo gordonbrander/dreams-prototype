@@ -1,7 +1,7 @@
 //! Seeding: the built-in documents every vault starts with. `seed` writes
-//! each one only when its id has never existed, so an edited or deleted
-//! default stays as the user left it. `restore` writes the defaults again
-//! over whatever is there; earlier revisions stay in history.
+//! each default whose current revision differs from it, as the next
+//! revision, and revives deleted ones. Earlier revisions stay in history.
+//! The CLI seeds on `init`, on `seed`, and when it creates a database.
 
 use serde_json::{Value, json};
 
@@ -119,8 +119,8 @@ pub fn defaults() -> Vec<PutInput> {
         .collect()
 }
 
-/// Write each built-in document whose id has never existed. Every product
-/// entry point calls this; the library never writes on open. Returns the
+/// Write every built-in document whose current revision differs from the
+/// default, as the next revision. A deleted default revives. Returns the
 /// ids written.
 pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
     let legacy: bool = store.connection().query_row(
@@ -131,41 +131,25 @@ pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
     if legacy {
         return Err(StoreError::invalid("this vault predates doc:// types; delete it and start again"));
     }
-    write_missing(store, defaults())
+    write_defaults(store, defaults())
 }
 
 /// Seed only the schema documents.
 pub fn seed_schemas(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    write_missing(store, defaults().into_iter().take(SCHEMAS.len()).collect())
+    write_defaults(store, defaults().into_iter().take(SCHEMAS.len()).collect())
 }
 
-fn write_missing(store: &mut Store, docs: Vec<PutInput>) -> Result<Vec<String>, StoreError> {
+fn write_defaults(store: &mut Store, docs: Vec<PutInput>) -> Result<Vec<String>, StoreError> {
     let mut written = Vec::new();
-    for input in docs {
+    for mut input in docs {
         let id = input.id.clone().expect("seeded documents have ids");
-        if store.exists(&id)? {
-            continue;
-        }
-        store.put(input)?;
-        written.push(id);
-    }
-    Ok(written)
-}
-
-/// Write every built-in document whose current revision differs from the
-/// default, as the next revision. A deleted default revives. Returns the
-/// ids written.
-pub fn restore(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    let mut written = seed(store)?;
-    for mut input in defaults() {
-        let id = input.id.clone().expect("seeded documents have ids");
-        let parent = match store.get(&id) {
+        input.parent = match store.get(&id) {
             Ok(head) if head.type_path() == input.type_id.as_deref() && head.body == input.body => continue,
-            Ok(head) => head.rev,
-            Err(StoreError::Deleted { rev, .. }) => rev,
+            Ok(head) => Some(head.rev),
+            Err(StoreError::Deleted { rev, .. }) => Some(rev),
+            Err(StoreError::NotFound { .. }) => None,
             Err(e) => return Err(e),
         };
-        input.parent = Some(parent);
         store.put(input)?;
         written.push(id);
     }
