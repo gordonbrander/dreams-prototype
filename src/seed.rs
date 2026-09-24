@@ -56,14 +56,19 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
     (
         "runners/claude",
         "Claude Code, headless",
-        // Not `--bare`: bare mode skips the stored login.
+        // Not `--bare`: bare mode skips the stored login. Bash runs in the
+        // sandbox: it writes only in the cwd and has no network, and
+        // `dreams` runs outside it to write the vault. `Edit(./**)` covers
+        // every file-writing tool.
         &[
             "claude",
             "-p",
             "--permission-mode",
             "dontAsk",
             "--allowedTools",
-            "Bash(dreams:*),mcp__dreams",
+            "Bash,Read,Glob,Grep,Edit(./**),WebSearch,WebFetch,mcp__dreams",
+            "--settings",
+            r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"excludedCommands":["dreams"]}}"#,
             "--mcp-config",
             "{mcp}",
             "--strict-mcp-config",
@@ -73,11 +78,14 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
         "runners/codex",
         "Codex CLI, non-interactive",
         // `-c approval_policy=never` works on every Codex version; `-a` does not.
+        // The workspace-write sandbox writes only in the cwd.
         &[
             "codex",
             "exec",
             "-c",
             "approval_policy=never",
+            "-c",
+            "tools.web_search=true",
             "--sandbox",
             "workspace-write",
             "--skip-git-repo-check",
@@ -117,6 +125,14 @@ pub fn defaults() -> Vec<PutInput> {
                 Use when the user wants to bookmark, clip, or save a link, or find saved links.",
             "content": include_str!("seed/bookmark.md"),
         }),
+        json!({
+            "_id": "skills/brief",
+            "_type": SKILL_TYPE,
+            "name": "brief",
+            "description": "Make a daily brief: food for thought that brings back ideas from the user's notes, \
+                with today's intention as its theme. Use when the user asks for a brief or a daily review.",
+            "content": include_str!("seed/brief.md"),
+        }),
     ];
     let prompts = [
         json!({
@@ -143,11 +159,32 @@ pub fn defaults() -> Vec<PutInput> {
             "content": "Use the bookmark skill. Save the URL the user gave with this command. Use the other \
                 text the user gave as notes. If the user gave no URL, ask for one.",
         }),
+        json!({
+            "_id": "prompts/brief",
+            "_type": PROMPT_TYPE,
+            "name": "brief",
+            "description": "Make today's brief and show it.",
+            "content": "Use the brief skill. Make today's brief and show it to the user. \
+                Do not write it to the vault.",
+        }),
     ];
+    // Seeded tasks are templates: each runs only where the user deploys it.
+    let tasks = [json!({
+        "_id": "tasks/brief",
+        "_type": task::TASK_TYPE,
+        "title": "Daily brief",
+        "runner": "doc://runners/claude",
+        "every": "1d",
+        "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content \
+            already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \
+            \"## Brief\", an empty line, and the brief to the end of the note's content, \
+            with the steps in \"Add to a daily note\".",
+    })];
     schemas
         .chain(runners)
         .chain(skills)
         .chain(prompts)
+        .chain(tasks)
         .map(|v| serde_json::from_value(v).expect("seeded documents are valid put input"))
         .collect()
 }

@@ -13,7 +13,7 @@ use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::rev::short_rev;
 use crate::runner::{self, Runner};
-use crate::store::{Changes, History, ListQuery, Page, Store};
+use crate::store::{Changes, History, ListQuery, Page, SearchPage, Store};
 use crate::sync::{self, PullReport};
 use crate::task::{self, Deploy, Evaluation, TaskState, TickReport, When};
 use crate::{daemon, markdown, mcp, resolve, rev, seed};
@@ -240,6 +240,10 @@ enum TaskCmd {
         ids: Vec<String>,
         #[arg(long)]
         title: Option<String>,
+        /// The folder the agent runs in. A relative DIR is relative to the vault's folder.
+        /// Default: workspace.
+        #[arg(long, value_name = "DIR")]
+        cwd: Option<String>,
         /// Write the task but do not deploy it on this vault.
         #[arg(long)]
         no_deploy: bool,
@@ -561,7 +565,7 @@ fn task_cmd(
     confirm: Confirm,
 ) -> anyhow::Result<()> {
     match cmd {
-        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, no_deploy, yes, prompt_file } => {
+        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, cwd, no_deploy, yes, prompt_file } => {
             id_to_relpath(&task_id)?;
             task::parse_duration(&every)?;
             let runner = DocRef::from_cli(&runner)?.to_string();
@@ -578,6 +582,9 @@ fn task_cmd(
             }
             if let Some(t) = title {
                 map.insert("title".into(), Value::String(t));
+            }
+            if let Some(c) = cwd {
+                map.insert("cwd".into(), Value::String(c));
             }
             let (doc, status) = upsert_unless_same(store, &task_id, map)?;
             if !json {
@@ -667,9 +674,11 @@ fn task_cmd(
                 Ok(r) => r.argv.clone(),
                 Err(e) => vec![format!("(runner error: {e})")],
             };
+            let cwd = task::work_dir(db, eval.parsed.cwd.as_deref());
             if json {
                 let mut v = serde_json::to_value(&eval)?;
                 v["argv"] = json_array(&argv);
+                v["cwd"] = Value::String(cwd.to_string_lossy().into_owned());
                 v["prompt"] = Value::String(task::prompt_text(&eval));
                 print_json(out, &v)?;
             } else {
@@ -707,7 +716,8 @@ fn task_cmd(
                         .collect();
                     table(out, &["SEQ", "ID", "REV", "DELETED"], &rows)?;
                 }
-                writeln!(out, "\ncommand:   {}", argv.join(" "))?;
+                writeln!(out, "\ncwd:       {}", cwd.display())?;
+                writeln!(out, "command:   {}", argv.join(" "))?;
             }
         }
         TaskCmd::Run { task_id, force } => {
@@ -967,7 +977,7 @@ fn doc_cmd(
         }
         DocCmd::Search { query, filter } => {
             let page = store.search(&query, &filter.into())?;
-            print_page(out, json, &page)?;
+            print_search(out, json, &page)?;
         }
         DocCmd::Resolve { id, auto: true, runner, dry_run, .. } => {
             let proposal = tokio::runtime::Runtime::new()?.block_on(resolve::propose(store, db, &id, &runner))?;
@@ -1432,6 +1442,30 @@ fn print_page(out: &mut dyn Write, json: bool, page: &Page) -> io::Result<()> {
         })
         .collect();
     table(out, &["ID", "REV", "TYPE", "TITLE", "TAGS"], &rows)?;
+    if let Some(next) = page.next {
+        writeln!(out, "next: {next}")?;
+    }
+    Ok(())
+}
+
+fn print_search(out: &mut dyn Write, json: bool, page: &SearchPage) -> io::Result<()> {
+    if json {
+        return print_json(out, page);
+    }
+    let rows: Vec<Vec<String>> = page
+        .results
+        .iter()
+        .map(|r| {
+            vec![
+                r.id.clone(),
+                short_rev(&r.rev),
+                r.type_id.as_deref().map(DocRef::path_of).unwrap_or_default().to_string(),
+                r.title.as_deref().map(|t| clip(t, 60)).unwrap_or_default(),
+                r.content_matches.as_deref().map(|m| clip(m, 80)).unwrap_or_default(),
+            ]
+        })
+        .collect();
+    table(out, &["ID", "REV", "TYPE", "TITLE", "MATCH"], &rows)?;
     if let Some(next) = page.next {
         writeln!(out, "next: {next}")?;
     }

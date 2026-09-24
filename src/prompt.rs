@@ -101,11 +101,12 @@ mod tests {
     }
 
     #[test]
-    fn a_seeded_vault_has_the_daily_intention_and_bookmark_prompts() {
+    fn a_seeded_vault_has_the_daily_intention_bookmark_and_brief_prompts() {
         let store = store();
         assert!(find(&store, "daily").unwrap().unwrap().content.contains("daily-note skill"));
         assert!(find(&store, "intention").unwrap().unwrap().content.contains("intention"));
         assert!(find(&store, "bookmark").unwrap().unwrap().content.contains("bookmark skill"));
+        assert!(find(&store, "brief").unwrap().unwrap().content.contains("brief skill"));
     }
 
     #[test]

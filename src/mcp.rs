@@ -37,7 +37,7 @@ use crate::error::StoreError;
 use crate::markdown;
 use crate::prompt;
 use crate::skill::{self, Skill};
-use crate::store::{Changes, ConflictPage, History, ListQuery, Page, Store};
+use crate::store::{Changes, ConflictPage, History, ListQuery, Page, SearchPage, Store};
 use crate::task::{self, Deploy, TaskState};
 
 /// How a host starts this server on the vault at `db`: the `command` and
@@ -342,8 +342,10 @@ impl Vault {
     }
 
     #[tool(description = "Full-text search over title, content and tags of current documents, best match first. \
-        Optional type and tag filters. An empty query lists instead.")]
-    fn search_docs(&self, Parameters(p): Parameters<SearchParams>) -> Result<Json<Page>, McpError> {
+        Each result has the document's metadata, title, and `content_matches`: a snippet of the best-matching \
+        field with matched terms in **. Call get_doc for the full document. Optional type and tag filters. \
+        An empty query lists instead, with no content_matches; page it with `before` = previous page's `next`.")]
+    fn search_docs(&self, Parameters(p): Parameters<SearchParams>) -> Result<Json<SearchPage>, McpError> {
         self.lock()?.search(&p.query, &p.filter).map(Json).map_err(to_mcp)
     }
 
@@ -753,8 +755,8 @@ mod tests {
         assert!(state.enabled);
         assert_eq!(state.task_rev, edited.rev);
 
-        // nothing left to deploy completes at once; disable needs no confirmation
-        assert!(matches!(vault.deploy_round(None, None, None, true).unwrap(), CallToolResponse::Complete(_)));
+        // a task already deployed completes at once; disable needs no confirmation
+        assert!(matches!(vault.deploy_round(id(), None, None, true).unwrap(), CallToolResponse::Complete(_)));
         let off = vault.disable_task(Parameters(TaskParams { id: "tasks/t".into() })).unwrap();
         assert!(!off.0.enabled);
     }

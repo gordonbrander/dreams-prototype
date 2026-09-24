@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use dreams::{Changes, History, Page, cli, seed};
+use dreams::{Changes, History, Page, SearchPage, cli, seed};
 use serde_json::{Value, json};
 
 struct Sandbox {
@@ -223,8 +223,13 @@ fn lists_tables_and_json_shapes() {
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
     assert!(text.trim_end().ends_with(&format!("next: {}", page.next.unwrap())));
 
-    let page: Page = serde_json::from_value(sb.json(&["doc", "search", "searchable"], "")).unwrap();
-    assert_eq!(page.docs[0].id, "b");
+    let page: SearchPage = serde_json::from_value(sb.json(&["doc", "search", "searchable"], "")).unwrap();
+    assert_eq!(page.results[0].id, "b");
+    assert_eq!(page.results[0].content_matches.as_deref(), Some("**searchable** words"));
+    let text = sb.ok(&["doc", "search", "searchable"], "");
+    let header = text.lines().next().unwrap();
+    assert_eq!(header.split_whitespace().collect::<Vec<_>>(), ["ID", "REV", "TYPE", "TITLE", "MATCH"]);
+    assert!(text.contains("**searchable** words"), "{text}");
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
@@ -463,12 +468,16 @@ fn task_lifecycle_with_change_trigger() {
     assert!(out.starts_with("unchanged t1 1-"), "{out}");
     assert!(sb.asked.borrow().is_empty(), "nothing new to deploy, so nothing to confirm");
 
+    // the seeded tasks/brief is listed too, dormant
     let list: Value = sb.json(&["task", "list"], "");
-    assert_eq!(list.as_array().unwrap().len(), 1);
-    assert_eq!(list[0]["task"]["_id"], "t1");
-    assert_eq!(list[0]["due"], false);
-    assert_eq!(list[0]["state"]["enabled"], true, "task add deploys the task here");
-    assert!(list[0]["last_run_at"].is_null());
+    let list = list.as_array().unwrap();
+    assert_eq!(list.len(), 2);
+    let brief = list.iter().find(|t| t["task"]["_id"] == "tasks/brief").unwrap();
+    assert!(brief["state"].is_null(), "{brief}");
+    let list = list.iter().find(|t| t["task"]["_id"] == "t1").unwrap();
+    assert_eq!(list["due"], false);
+    assert_eq!(list["state"]["enabled"], true, "task add deploys the task here");
+    assert!(list["last_run_at"].is_null());
     let text = sb.ok(&["task", "list"], "");
     assert!(text.lines().next().unwrap().starts_with("ID"), "{text}");
     assert!(text.contains("tag=inbox"), "{text}");
@@ -550,7 +559,7 @@ fn task_lifecycle_with_change_trigger() {
 
     let out = sb.ok(&["task", "rm", "t1"], "");
     assert_eq!(out, "removed t1\n");
-    assert!(sb.json(&["task", "list"], "").as_array().unwrap().is_empty());
+    assert_eq!(sb.json(&["task", "list"], "").as_array().unwrap().len(), 1, "only tasks/brief is left");
     let err = sb.fails(&["task", "rm", "runners/cat"], "");
     assert_eq!(err["name"], "invalid_input");
 }
@@ -596,6 +605,26 @@ fn task_runs_record_failures_timeouts_and_environment() {
     assert!(out.contains("fired  t-env"), "{out}");
     let runs: Page = serde_json::from_value(sb.json(&["task", "runs", "t-env"], "")).unwrap();
     assert!(runs.docs.iter().all(|d| d.body["content"] == expected), "{:?}", runs.docs);
+}
+
+#[test]
+fn tasks_run_in_workspace_or_their_cwd() {
+    let sb = Sandbox::new();
+    sb.ok(&["runner", "add", "runners/pwd", "--", "pwd", "-P"], "");
+    let prompt = sb.file("p.txt", "hello");
+    sb.ok(&["task", "add", "t-default", "--runner", "runners/pwd", "--every", "1h", &prompt], "");
+    sb.ok(&["task", "add", "t-own", "--runner", "runners/pwd", "--every", "1h", "--cwd", "repos/a", &prompt], "");
+    let physical = |p: PathBuf| format!("{}\n", p.canonicalize().unwrap().display());
+
+    // the folder is made on the first run
+    let run = sb.json(&["task", "run", "t-default"], "");
+    assert_eq!(run["content"], physical(sb.dir.join("workspace")));
+    let run = sb.json(&["task", "run", "t-own"], "");
+    assert_eq!(run["content"], physical(sb.dir.join("repos/a")));
+
+    let check = sb.json(&["task", "check", "t-own"], "");
+    assert_eq!(check["cwd"], sb.dir.join("repos/a").to_string_lossy().as_ref());
+    assert!(sb.ok(&["task", "check", "t-default"], "").contains("cwd:       "));
 }
 
 #[test]

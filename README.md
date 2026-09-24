@@ -185,11 +185,11 @@ dreams --db laptop.db init
 dreams --db desktop.db init
 dreams --db laptop.db doc put notes/plan.md
 dreams --db laptop.db sync desktop.db
-pulled 0 revisions from /Users/me/desktop.db (8 present)
-pushed 1 revision to /Users/me/desktop.db (8 present)
+pulled 0 revisions from /Users/me/desktop.db (15 present)
+pushed 1 revision to /Users/me/desktop.db (15 present)
 ```
 
-Two vaults made by the same binary seed the same eight built-in documents with identical revisions, so the first sync copies none of them.
+Two vaults made by the same binary seed the same fifteen built-in documents with identical revisions, so the first sync copies none of them.
 
 ### How a pull works
 
@@ -405,6 +405,18 @@ An agent that uses the MCP server creates a task by writing a document, then ask
 
 It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It cannot write runner or run documents, or the seeded schemas. Those are read-only over MCP.
 
+### Where an agent runs, and what it can use
+
+An agent runs in the folder `workspace`, next to the vault, and tasks share it. To use another folder, give the task a `cwd`: `task add --cwd DIR`, or the `cwd` field in the task document. A relative path is relative to the vault's folder, and `~/` is your home folder. The folder is made when the task first runs. `task check` shows it.
+
+The seeded runners give the agent these tools:
+
+- `runners/claude`: web search, web fetch, Bash, and the file tools. Bash runs in Claude Code's sandbox: it writes only in the cwd and has no network, so the agent uses web fetch for the web. The file tools write only in the cwd, and read anywhere. `dreams` runs outside the sandbox, so it can write the vault. On Linux, the sandbox needs `bubblewrap` and `socat`.
+- `runners/codex`: web search, and a shell in Codex's `workspace-write` sandbox: it writes only in the cwd and has no network.
+- `runners/pi`: Pi's own tools. Pi has no web tools without extensions, and no sandbox.
+
+All of them can read and write the vault over MCP. A vault made before these tools gets them with `dreams restore-defaults`. A deployed task keeps the runner revision it has until you run `dreams task deploy` again.
+
 ### Managing tasks
 
 ```
@@ -496,7 +508,7 @@ Each store operation is one tool:
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
 | `resolve_doc` | Tombstone every conflict of `id`, after it writes `merged` on the winner if given. Pass the `conflicts` you read to fail if they changed. |
 | `list_docs` | Current documents, newest first, with `type`, `tag`, `before`, `limit`. |
-| `search_docs` | Full-text search with `query` and the same filters. |
+| `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
 
@@ -567,6 +579,26 @@ Every vault is also seeded with the skill `skills/bookmark` (`skill://bookmark/S
 
 The seeded prompt `/dreams:bookmark <url> [notes]` saves a bookmark.
 
+### Daily brief
+
+A brief is a short page of food for thought for the day. It brings back ideas from your own notes, with today's intention as its theme. If there is no intention, the agent finds a theme in your recent notes. A brief has four sections:
+
+- **Theme**: the theme, and where it came from.
+- **Review**: excerpts from 3 notes that relate to the theme, with links.
+- **Prompt**: one provocation to find new ideas, in the style of Oblique Strategies, SCAMPER, or the questions at the end of a textbook chapter.
+- **Collider**: a draft for a new note that joins two far-apart notes, found with the Zettelkasten Compass, and a prompt to continue it.
+
+The seeded skill `skills/brief` (`skill://brief/SKILL.md`) tells the agent how to make a brief. Two seeded documents use it:
+
+- `/dreams:brief` makes today's brief and shows it. It writes nothing.
+- The task `tasks/brief` makes a brief once a day and adds it to the end of today's daily note, under `## Brief`. If the note already has a `## Brief` heading, the run stops.
+
+Like every task, `tasks/brief` is dormant until you deploy it. Deploy it on one vault only, because each vault that deploys it writes a brief. `every: 1d` counts from the time of deploy, so deploy it at the time of day that you want the brief:
+
+```
+dreams task deploy tasks/brief
+```
+
 ## Storage
 
 One SQLite file in WAL mode. Migrations run on open.
@@ -575,11 +607,11 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, the three default runners, the `skills/daily-note` and `skills/bookmark` skills, and the `prompts/daily`, `prompts/intention`, and `prompts/bookmark` prompts.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, the three default runners, the `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` task.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 
-Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
+Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content. A search result does not contain the document body. It contains the metadata, the title, and `content_matches`: a snippet of the field that matches best, with the matched terms in `**`. An empty query lists the documents newest first, with no `content_matches`.
 
 ## Development
 

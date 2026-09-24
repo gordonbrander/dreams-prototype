@@ -30,6 +30,10 @@ fn ids(page: &dreams::Page) -> Vec<&str> {
     page.docs.iter().map(|d| d.id.as_str()).collect()
 }
 
+fn hit_ids(page: &dreams::SearchPage) -> Vec<&str> {
+    page.results.iter().map(|r| r.id.as_str()).collect()
+}
+
 /// Write the note schema as the document `schemas/note`.
 fn put_note_schema(s: &mut Store) -> dreams::Doc {
     let mut body = note_schema();
@@ -125,7 +129,7 @@ fn delete_tombstone_and_undelete() {
     assert!(matches!(s.delete("a", &tomb.rev), Err(StoreError::Deleted { .. })));
     assert_eq!(ids(&s.list(&ListQuery::default()).unwrap()), vec!["schemas/note"]);
     assert!(s.list(&ListQuery { tag: Some("x".into()), ..Default::default() }).unwrap().docs.is_empty());
-    assert!(s.search("t", &ListQuery::default()).unwrap().docs.is_empty());
+    assert!(s.search("t", &ListQuery::default()).unwrap().results.is_empty());
 
     let back =
         s.put(input(json!({"_id": "a", "_parent": tomb.rev, "_type": NOTE, "title": "back", "tags": ["x"]}))).unwrap();
@@ -306,9 +310,9 @@ fn type_filters_match_by_path_or_pin() {
     let by_pin = s.list(&ListQuery { type_id: a.type_id.clone(), ..Default::default() }).unwrap();
     assert_eq!(ids(&by_pin), vec!["a"]);
     let searched = s.search("findable", &ListQuery { type_id: b.type_id.clone(), ..Default::default() }).unwrap();
-    assert_eq!(ids(&searched), vec!["b"]);
+    assert_eq!(hit_ids(&searched), vec!["b"]);
     let searched = s.search("findable", &ListQuery { type_id: Some(NOTE.into()), ..Default::default() }).unwrap();
-    assert_eq!(searched.docs.len(), 2);
+    assert_eq!(searched.results.len(), 2);
 }
 
 #[test]
@@ -337,22 +341,45 @@ fn search_sees_only_current_revisions() {
     let mut s = store();
     let d1 = s.put(input(json!({"_id": "a", "title": "Alpha", "content": "first draft", "tags": ["blue"]}))).unwrap();
     s.put(input(json!({"_id": "b", "title": "Beta", "content": "unrelated"}))).unwrap();
-    assert_eq!(ids(&s.search("first", &ListQuery::default()).unwrap()), vec!["a"]);
-    assert_eq!(ids(&s.search("blue", &ListQuery::default()).unwrap()), vec!["a"]);
+    assert_eq!(hit_ids(&s.search("first", &ListQuery::default()).unwrap()), vec!["a"]);
+    assert_eq!(hit_ids(&s.search("blue", &ListQuery::default()).unwrap()), vec!["a"]);
 
     s.put(input(json!({"_id": "a", "_parent": d1.rev, "title": "Alpha", "content": "second draft"}))).unwrap();
-    assert!(s.search("first", &ListQuery::default()).unwrap().docs.is_empty());
-    assert_eq!(ids(&s.search("second", &ListQuery::default()).unwrap()), vec!["a"]);
-    assert!(s.search("blue", &ListQuery::default()).unwrap().docs.is_empty());
+    assert!(s.search("first", &ListQuery::default()).unwrap().results.is_empty());
+    assert_eq!(hit_ids(&s.search("second", &ListQuery::default()).unwrap()), vec!["a"]);
+    assert!(s.search("blue", &ListQuery::default()).unwrap().results.is_empty());
 
     // stemming and operators in user input do not error
-    assert_eq!(ids(&s.search("drafts", &ListQuery::default()).unwrap()), vec!["a"]);
+    assert_eq!(hit_ids(&s.search("drafts", &ListQuery::default()).unwrap()), vec!["a"]);
     assert!(s.search("hello AND", &ListQuery::default()).is_ok());
     assert!(s.search("\"unbalanced (", &ListQuery::default()).is_ok());
     // filters
-    assert!(s.search("second", &ListQuery { tag: Some("blue".into()), ..Default::default() }).unwrap().docs.is_empty());
-    // empty query lists
-    assert_eq!(s.search("   ", &ListQuery::default()).unwrap().docs.len(), 2);
+    assert!(s.search("second", &ListQuery { tag: Some("blue".into()), ..Default::default() }).unwrap().results.is_empty());
+    // empty query lists, with no matches
+    let listed = s.search("   ", &ListQuery::default()).unwrap();
+    assert_eq!(listed.results.len(), 2);
+    assert!(listed.results.iter().all(|r| r.content_matches.is_none() && r.title.is_some()));
+}
+
+#[test]
+fn search_results_carry_metadata_and_matches() {
+    let mut s = store();
+    let a = s.put(input(json!({"_id": "a", "title": "Alpha", "content": "the first draft", "tags": ["blue"]}))).unwrap();
+
+    let page = s.search("first", &ListQuery::default()).unwrap();
+    let hit = &page.results[0];
+    assert_eq!(hit.rev, a.rev);
+    assert_eq!(hit.created_at, a.created_at);
+    assert_eq!(hit.title.as_deref(), Some("Alpha"));
+    assert_eq!(hit.content_matches.as_deref(), Some("the **first** draft"));
+
+    let page = s.search("alpha", &ListQuery::default()).unwrap();
+    assert_eq!(page.results[0].content_matches.as_deref(), Some("**Alpha**"));
+
+    let json = serde_json::to_value(&page.results[0]).unwrap();
+    for key in ["content", "tags", "_seq", "_conflicts", "_parent"] {
+        assert!(json.get(key).is_none(), "{key} in {json}");
+    }
 }
 
 #[test]
