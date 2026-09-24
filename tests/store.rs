@@ -500,23 +500,8 @@ fn protected_types_are_read_only() {
 fn seed_is_idempotent() {
     let mut s = store();
     let first = seed::seed(&mut s).unwrap();
-    assert_eq!(
-        first,
-        [
-            "schemas/task",
-            "schemas/run",
-            "schemas/runner",
-            "schemas/skill",
-            "schemas/prompt",
-            "schemas/daily",
-            "runners/claude",
-            "runners/codex",
-            "runners/pi",
-            "skills/daily-note",
-            "prompts/daily",
-            "prompts/intention",
-        ]
-    );
+    let ids: Vec<String> = seed::defaults().into_iter().map(|d| d.id.unwrap()).collect();
+    assert_eq!(first, ids);
     assert!(seed::seed(&mut s).unwrap().is_empty());
     let pi = s.get("runners/pi").unwrap();
     assert_eq!(pi.type_path(), Some(RUNNER_TYPE));
@@ -568,7 +553,8 @@ fn add_task(s: &mut Store, id: &str, every: &str, when: Option<Value>) -> dreams
 #[test]
 fn evaluate_time_and_change_rules() {
     let mut s = store();
-    seed::seed_schemas(&mut s).unwrap(); // seqs 1..=6
+    seed::seed_schemas(&mut s).unwrap();
+    let base = s.last_seq().unwrap();
     let cat =
         s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
     let plain = add_task(&mut s, "tasks/plain", "1h", None);
@@ -590,8 +576,8 @@ fn evaluate_time_and_change_rules() {
     let e_plain = evals.iter().find(|e| e.task.id == "tasks/plain").unwrap();
     let e_watch = evals.iter().find(|e| e.task.id == "tasks/watch").unwrap();
     assert!(!e_plain.time_due && !e_plain.due);
-    assert_eq!(e_watch.cursor, 9);
-    assert_eq!(e_watch.head, 9);
+    assert_eq!(e_watch.cursor, base + 3);
+    assert_eq!(e_watch.head, base + 3);
     assert!(e_watch.changes.is_empty());
     assert_eq!(e_watch.runner.as_ref().unwrap().rev, cat.rev);
 
@@ -613,7 +599,7 @@ fn evaluate_time_and_change_rules() {
     let ids: Vec<&str> = e_watch.changes.iter().map(|c| c.id.as_str()).collect();
     assert_eq!(ids, ["n1"]);
     assert!(e_watch.due);
-    assert_eq!(e_watch.head, 12);
+    assert_eq!(e_watch.head, base + 6);
 
     // a tombstone of a tagged document counts as a change to that tag
     s.delete("n1", &note.rev).unwrap();
@@ -627,13 +613,13 @@ fn evaluate_time_and_change_rules() {
     assert_eq!(s.last_seq().unwrap(), docs_before);
     assert!(claim.run_id.starts_with("runs/tasks/watch/") && claim.run_id.ends_with(".md"));
     assert_eq!(claim.runner, pinned("runners/cat", &cat.rev));
-    assert_eq!(claim.head, 13);
+    assert_eq!(claim.head, base + 7);
     let e_running = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
     assert!(e_running.running && !e_running.due);
     assert!(task::claim(&mut s, &e_watch, &later, false).unwrap().is_none(), "the lease is held");
     let e_stale = task::evaluate(&s, &plus_secs(&s, &later, 121), Some("tasks/watch")).unwrap().remove(0);
     assert!(!e_stale.running, "the lease expired");
-    assert_eq!(e_stale.cursor, 9, "the cursor moves only when a run finishes");
+    assert_eq!(e_stale.cursor, base + 3, "the cursor moves only when a run finishes");
 
     // finishing writes one receipt, moves the cursor, and releases the lease
     let outcome = task::Outcome { exit_code: Some(0), stdout: b"done".to_vec(), ..Default::default() };
@@ -656,7 +642,7 @@ fn evaluate_time_and_change_rules() {
     assert!(receipt.body.get("seq").is_none());
     let e_watch = task::evaluate(&s, &plus_secs(&s, &later, 30), Some("tasks/watch")).unwrap().remove(0);
     assert!(!e_watch.running);
-    assert_eq!(e_watch.cursor, 13);
+    assert_eq!(e_watch.cursor, base + 7);
     assert_eq!(e_watch.last_run_at.as_deref(), Some(later.as_str()));
     // only the receipt changed since the cursor, and it is the watcher's own write
     assert!(e_watch.changes.is_empty() && !e_watch.due);

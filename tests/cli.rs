@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use dreams::{Changes, History, Page, cli};
+use dreams::{Changes, History, Page, cli, seed};
 use serde_json::{Value, json};
 
 struct Sandbox {
@@ -137,7 +137,7 @@ fn markdown_round_trip_unchanged_then_edited() {
     let again = sb.ok(&["doc", "update", "n1", "--format", "md"], &fetched);
     assert_eq!(again, fetched);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 12 + 2, "twelve seeded documents, the schema, the note");
+    assert_eq!(changes.results.len(), seeded() + 2, "the seeded documents, the schema, the note");
 
     // edited: update yields gen 2 with parent = rev 1
     let edited = fetched.replace("first draft", "second draft");
@@ -217,7 +217,7 @@ fn lists_tables_and_json_shapes() {
     assert_eq!(&cells[2..], ["Alpha", "x"]);
 
     let page: Page = serde_json::from_value(sb.json(&["doc", "list"], "")).unwrap();
-    assert_eq!(page.docs.len(), 12 + 2, "twelve seeded documents plus a and b");
+    assert_eq!(page.docs.len(), seeded() + 2, "the seeded documents plus a and b");
     let page: Page = serde_json::from_value(sb.json(&["doc", "list", "--limit", "1"], "")).unwrap();
     assert!(page.next.is_some());
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
@@ -228,7 +228,7 @@ fn lists_tables_and_json_shapes() {
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));
-    assert!(text.trim_end().ends_with("last_seq: 14"));
+    assert!(text.trim_end().ends_with(&format!("last_seq: {}", seeded() + 2)));
 
     // type filters: a path matches every pinned revision, the TYPE column shows the path
     let schema = sb.file("note.yaml", SCHEMA_YAML);
@@ -291,7 +291,7 @@ fn export_then_import_round_trip() {
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("17 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with(&format!("{} exported, 0 errors", seeded() + 5)), "{out}");
     assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
@@ -318,7 +318,7 @@ fn export_then_import_round_trip() {
     assert_eq!(statuses, ["unchanged"; 4]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 12 + 7);
+    assert_eq!(changes.results.len(), seeded() + 7);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
@@ -674,6 +674,11 @@ fn serve_protects_runner_and_run_documents() {
     assert_eq!(tomb["_deleted"], true);
 }
 
+/// The number of built-in documents a new vault has.
+fn seeded() -> usize {
+    seed::defaults().len()
+}
+
 // ---- sync -----------------------------------------------------------------
 
 #[test]
@@ -693,7 +698,7 @@ fn pull_and_sync_between_two_vaults() {
     b.ok(&["doc", "put", "-"], r#"{"_id": "x", "title": "from b"}"#);
     let out = a.ok(&["pull", &b_db], "");
     assert!(out.starts_with("pulled 1 revision from "), "{out}");
-    assert!(out.contains("12 present"), "{out}");
+    assert!(out.contains(&format!("{} present", seeded())), "{out}");
     assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
 
     a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);

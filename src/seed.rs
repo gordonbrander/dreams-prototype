@@ -21,6 +21,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("schemas/skill", skill::SKILL_SCHEMA),
     ("schemas/prompt", prompt::PROMPT_SCHEMA),
     ("schemas/daily", DAILY_SCHEMA),
+    ("schemas/bookmark", BOOKMARK_SCHEMA),
 ];
 
 /// The body of `schemas/daily`: one note per day, see `seed/daily-note.md`.
@@ -33,6 +34,20 @@ pub const DAILY_SCHEMA: &str = r#"{
     "content": {"type": "string"},
     "tags": {"type": "array", "items": {"type": "string"}},
     "intention": {"type": "string"}
+  }
+}"#;
+
+/// The body of `schemas/bookmark`: one saved web page, see `seed/bookmark.md`.
+pub const BOOKMARK_SCHEMA: &str = r#"{
+  "title": "Bookmark",
+  "description": "A saved web page. The _id is bookmarks/<slug>.md, with the slug made from url. content is a summary of the page and any notes from the user.",
+  "type": "object",
+  "required": ["url"],
+  "properties": {
+    "title": {"type": "string"},
+    "url": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
   }
 }"#;
 
@@ -85,14 +100,24 @@ pub fn defaults() -> Vec<PutInput> {
     let runners = RUNNERS.iter().map(|(id, title, argv)| {
         json!({"_id": id, "_type": RUNNER_TYPE, "title": title, "argv": argv, "timeout": runner::DEFAULT_TIMEOUT})
     });
-    let skills = [json!({
-        "_id": "skills/daily-note",
-        "_type": SKILL_TYPE,
-        "name": "daily-note",
-        "description": "Create, add to, or find daily notes: one document per day, with the date as its id. \
-            Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
-        "content": include_str!("seed/daily-note.md"),
-    })];
+    let skills = [
+        json!({
+            "_id": "skills/daily-note",
+            "_type": SKILL_TYPE,
+            "name": "daily-note",
+            "description": "Create, add to, or find daily notes: one document per day, with the date as its id. \
+                Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
+            "content": include_str!("seed/daily-note.md"),
+        }),
+        json!({
+            "_id": "skills/bookmark",
+            "_type": SKILL_TYPE,
+            "name": "bookmark",
+            "description": "Save a web page as a bookmark: fetch it, summarize it, and tag it. \
+                Use when the user wants to bookmark, clip, or save a link, or find saved links.",
+            "content": include_str!("seed/bookmark.md"),
+        }),
+    ];
     let prompts = [
         json!({
             "_id": "prompts/daily",
@@ -109,6 +134,14 @@ pub fn defaults() -> Vec<PutInput> {
             "description": "Set today's intention in the daily note.",
             "content": "Use the daily-note skill. Set today's intention to the text the user gave with this \
                 command. If the user gave no text, ask for the intention.",
+        }),
+        json!({
+            "_id": "prompts/bookmark",
+            "_type": PROMPT_TYPE,
+            "name": "bookmark",
+            "description": "Save a URL as a bookmark.",
+            "content": "Use the bookmark skill. Save the URL the user gave with this command. Use the other \
+                text the user gave as notes. If the user gave no URL, ask for one.",
         }),
     ];
     schemas

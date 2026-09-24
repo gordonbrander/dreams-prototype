@@ -21,8 +21,15 @@ pub const RUNNER_TYPE: &str = "doc://schemas/runner";
 pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
 
 /// Seeded schema documents that MCP clients may not change.
-pub const PROTECTED_IDS: &[&str] =
-    &["schemas/task", "schemas/run", "schemas/runner", "schemas/skill", "schemas/prompt", "schemas/daily"];
+pub const PROTECTED_IDS: &[&str] = &[
+    "schemas/task",
+    "schemas/run",
+    "schemas/runner",
+    "schemas/skill",
+    "schemas/prompt",
+    "schemas/daily",
+    "schemas/bookmark",
+];
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
 
