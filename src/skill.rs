@@ -151,6 +151,18 @@ mod tests {
     }
 
     #[test]
+    fn a_seeded_vault_has_the_bookmark_skill() {
+        let skill = find(&store(), "skill://bookmark/SKILL.md").unwrap().unwrap();
+        assert!(skill.text.contains("tag `bookmark`"), "{}", skill.text);
+    }
+
+    #[test]
+    fn a_seeded_vault_has_the_brief_skill() {
+        let skill = find(&store(), "skill://brief/SKILL.md").unwrap().unwrap();
+        assert!(skill.text.contains("## Brief sections"), "{}", skill.text);
+    }
+
+    #[test]
     fn schema_rejects_a_bad_name() {
         let mut store = store();
         let input = serde_json::from_value(json!({

@@ -569,9 +569,15 @@ A write that changes nothing a host sees sends nothing. A deleted resource sends
 
 ### Daily notes
 
-Every vault is seeded with one skill, `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
+Every vault is seeded with the skill `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
 
 Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
+
+### Bookmarks
+
+Every vault is also seeded with the skill `skills/bookmark` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<slug>.md`, and the agent makes the slug from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. The agent gets the page with its own web fetch tool, so the host must give it one.
+
+The seeded prompt `/dreams:bookmark <url> [notes]` saves a bookmark.
 
 ### Daily brief
 
@@ -601,7 +607,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, the three default runners, the `skills/daily-note` and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, and `prompts/brief` prompts, and the dormant `tasks/brief` task.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, the three default runners, the `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` task.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 
