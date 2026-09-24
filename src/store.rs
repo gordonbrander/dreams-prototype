@@ -419,6 +419,12 @@ fn put_draft_in(
 impl Store {
     /// Open, or create, and migrate. Never writes a document.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
+        // SQLite creates a missing file but not a missing folder.
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| StoreError::Sqlite {
+                message: format!("unable to create {}: {e}", dir.display()),
+            })?;
+        }
         Ok(Store::new(db::open(path)?))
     }
 

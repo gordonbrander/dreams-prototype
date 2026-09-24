@@ -435,6 +435,15 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[test]
+fn opening_creates_missing_folders() {
+    let dir = std::env::temp_dir().join(format!("dreams-test-{}", uuid::Uuid::now_v7()));
+    let path = dir.join("nested").join("vault.db");
+    Store::open(&path).unwrap();
+    assert!(path.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---- scheduled tasks ------------------------------------------------------
 
 use dreams::runner::{PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
