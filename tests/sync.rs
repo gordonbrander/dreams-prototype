@@ -41,7 +41,7 @@ fn pull_copies_everything_once_and_resumes() {
     let y = a.get("y").unwrap();
     assert_eq!(y.rev, b.get("y").unwrap().rev);
     assert_eq!(y.created_at, b.get("y").unwrap().created_at, "keeps the source's time");
-    assert_eq!(a.search("searchable", &Default::default()).unwrap().docs.len(), 1, "projections follow");
+    assert_eq!(a.search("searchable", &Default::default()).unwrap().results.len(), 1, "projections follow");
 
     let again = pull(&mut a, &b, "b").unwrap();
     assert_eq!((again.read, again.written), (0, 0));

@@ -27,5 +27,5 @@ pub mod task;
 
 pub use doc::{Doc, DocRef, PutInput};
 pub use error::StoreError;
-pub use store::{BatchReport, Changes, History, ListQuery, Page, Store};
+pub use store::{BatchReport, Changes, History, ListQuery, Page, SearchPage, SearchResult, Store};
 pub use sync::PullReport;

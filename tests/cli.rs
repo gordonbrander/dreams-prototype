@@ -1,7 +1,7 @@
 use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
-use dreams::{Changes, History, Page, cli};
+use dreams::{Changes, History, Page, SearchPage, cli};
 use serde_json::{Value, json};
 
 struct Sandbox {
@@ -223,8 +223,13 @@ fn lists_tables_and_json_shapes() {
     let text = sb.ok(&["doc", "list", "--limit", "1"], "");
     assert!(text.trim_end().ends_with(&format!("next: {}", page.next.unwrap())));
 
-    let page: Page = serde_json::from_value(sb.json(&["doc", "search", "searchable"], "")).unwrap();
-    assert_eq!(page.docs[0].id, "b");
+    let page: SearchPage = serde_json::from_value(sb.json(&["doc", "search", "searchable"], "")).unwrap();
+    assert_eq!(page.results[0].id, "b");
+    assert_eq!(page.results[0].content_matches.as_deref(), Some("**searchable** words"));
+    let text = sb.ok(&["doc", "search", "searchable"], "");
+    let header = text.lines().next().unwrap();
+    assert_eq!(header.split_whitespace().collect::<Vec<_>>(), ["ID", "REV", "TYPE", "TITLE", "MATCH"]);
+    assert!(text.contains("**searchable** words"), "{text}");
 
     let text = sb.ok(&["doc", "changes"], "");
     assert!(text.starts_with("SEQ"));

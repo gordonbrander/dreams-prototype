@@ -67,6 +67,51 @@ pub struct Page {
     pub next: Option<i64>,
 }
 
+/// One search hit: a current document's metadata and where the query matched.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchResult {
+    #[serde(rename = "_id")]
+    pub id: String,
+    #[serde(rename = "_rev")]
+    pub rev: String,
+    #[serde(rename = "_type", default, skip_serializing_if = "Option::is_none")]
+    pub type_id: Option<String>,
+    #[serde(rename = "_created_at")]
+    pub created_at: String,
+    #[serde(rename = "_actor", default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// Snippet of the best-matching field, matched terms in `**`. Absent
+    /// when an empty query listed instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_matches: Option<String>,
+}
+
+impl From<Doc> for SearchResult {
+    fn from(d: Doc) -> Self {
+        let title = d.body.get("title").and_then(Value::as_str).map(str::to_string);
+        SearchResult {
+            id: d.id,
+            rev: d.rev,
+            type_id: d.type_id,
+            created_at: d.created_at,
+            actor: d.actor,
+            title,
+            content_matches: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct SearchPage {
+    pub results: Vec<SearchResult>,
+    /// Pass as `before` to fetch the next page. Set only when an empty query
+    /// listed and more remain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct History {
     /// Revisions from the current head back to genesis, newest first.
@@ -726,24 +771,35 @@ impl Store {
     }
 
     /// Full-text search over title, content and tags of current documents.
-    /// An empty query degrades to `list`.
-    pub fn search(&self, text: &str, q: &ListQuery) -> Result<Page, StoreError> {
+    /// An empty query degrades to `list`, with no `content_matches`.
+    pub fn search(&self, text: &str, q: &ListQuery) -> Result<SearchPage, StoreError> {
         let Some(match_expr) = fts_query(text) else {
-            return self.list(q);
+            let page = self.list(q)?;
+            return Ok(SearchPage { results: page.docs.into_iter().map(Into::into).collect(), next: page.next });
         };
         let limit = clamp_limit(q.limit);
         let (exact, path) = type_filter(q.type_id.as_deref());
-        let sql = format!(
-            "SELECT {DOC_COLS} FROM docs_fts f JOIN docs d ON d._local_seq = f.rowid
+        let sql = "SELECT d._id, d._rev, d._type, d._created_at, d.actor, d.title,
+                    snippet(docs_fts, -1, '**', '**', '…', 16)
+               FROM docs_fts f JOIN docs d ON d._local_seq = f.rowid
               WHERE docs_fts MATCH ?1
                 AND (?2 IS NULL OR d._type = ?2) AND (?3 IS NULL OR d._type_path = ?3)
                 AND (?4 IS NULL OR EXISTS (SELECT 1 FROM doc_tags t WHERE t.tag = ?4 AND t._id = d._id))
-              ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?5"
-        );
-        let mut stmt = self.conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64], |r| row_to_doc(r, false))?;
-        let docs = rows.collect::<Result<Vec<_>, _>>()?;
-        Ok(Page { docs, next: None })
+              ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?5";
+        let mut stmt = self.conn.prepare_cached(sql)?;
+        let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64], |r| {
+            Ok(SearchResult {
+                id: r.get(0)?,
+                rev: r.get(1)?,
+                type_id: r.get(2)?,
+                created_at: r.get(3)?,
+                actor: r.get(4)?,
+                title: r.get(5)?,
+                content_matches: r.get(6)?,
+            })
+        })?;
+        let results = rows.collect::<Result<Vec<_>, _>>()?;
+        Ok(SearchPage { results, next: None })
     }
 
     /// Every revision committed after `since`, in commit order.
