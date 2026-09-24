@@ -26,7 +26,7 @@ pub const SCHEMAS: &[(&str, &str)] = &[
 /// The body of `schemas/daily`: one note per day, see `seed/daily-note.md`.
 pub const DAILY_SCHEMA: &str = r#"{
   "title": "Daily note",
-  "description": "One document per day. The _id is the local date as YYYY-MM-DD. content is the log for the day; intention is the one intention for the day.",
+  "description": "One document per day. The _id is the local date as YYYY-MM-DD.md. content is the log for the day; intention is the one intention for the day.",
   "type": "object",
   "properties": {
     "title": {"type": "string"},
