@@ -12,7 +12,9 @@ A daily note has two parts:
 2. Call `get_doc` with `href` set to the date.
 3. If the document is not found, create it. Call `put_doc` with `_id` set to the date, `_type` set to `doc://schemas/daily`, and no `_parent`. Use this body: `{"title": "<date>", "content": "<text>", "tags": ["daily"]}`.
 4. If the document is found, update it. Call `put_doc` with `_id` set to the date, `_type` set to `doc://schemas/daily`, and `_parent` set to its `_rev`. Send the full body:
-   - Add the new text to the end of `content`.
+   - Add the new text to the end of `content`. Put one empty line between entries:
+     - If `content` is empty or missing, set `content` to the new text.
+     - If not, remove the newlines at the end of `content`. Then add `\n\n`, then the new text.
    - Keep all other fields, including `intention`.
    - Make sure that `tags` contains `daily`. If it does not, add it. Keep the other tags.
 5. If the document is deleted, the error gives the `_rev` of the tombstone. Call `put_doc` with `_parent` set to that `_rev`, and the body from step 3.
