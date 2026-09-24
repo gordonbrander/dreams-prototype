@@ -78,11 +78,11 @@ pub struct Doc {
     pub id: String,
     #[serde(rename = "_rev")]
     pub rev: String,
-    #[serde(rename = "_parent")]
+    #[serde(rename = "_parent", default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
-    #[serde(rename = "_type")]
+    #[serde(rename = "_type", default, skip_serializing_if = "Option::is_none")]
     pub type_id: Option<String>,
-    #[serde(rename = "_deleted")]
+    #[serde(rename = "_deleted", default, skip_serializing_if = "is_false")]
     pub deleted: bool,
     #[serde(rename = "_created_at")]
     pub created_at: String,
@@ -106,6 +106,10 @@ pub struct Doc {
     pub body: Map<String, Value>,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Doc {
     /// `_type` without its `?rev=` pin: the schema's `doc://` path.
     pub fn type_path(&self) -> Option<&str> {
@@ -118,7 +122,7 @@ impl Doc {
 /// create. Everything else is the body.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 pub struct PutInput {
-    /// Document id. Omit to create a new document with a generated UUID v7.
+    /// Document id. Omit to create a new document with a generated id, `<UUID v7>.md`.
     #[serde(rename = "_id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
     /// The current `_rev` of the document being updated. Omit for a create.
@@ -201,7 +205,7 @@ impl PutInput {
                 check_id(&id)?;
                 id
             }
-            None => new_id(),
+            None => format!("{}.md", new_id()),
         };
         let type_ref = match &self.type_id {
             Some(t) => Some(DocRef::parse(t).map_err(|e| StoreError::invalid(format!("_type: {e}")))?),
@@ -227,7 +231,7 @@ mod tests {
     #[test]
     fn generates_uuid_v7_when_id_omitted() {
         let d = input(json!({"title": "x"})).into_draft().unwrap();
-        let u = Uuid::parse_str(&d.id).unwrap();
+        let u = Uuid::parse_str(d.id.strip_suffix(".md").unwrap()).unwrap();
         assert_eq!(u.get_version_num(), 7);
     }
 

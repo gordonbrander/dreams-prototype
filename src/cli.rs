@@ -73,7 +73,8 @@ enum Command {
         #[arg(long, default_value = "2s")]
         poll: String,
     },
-    /// Write current documents as Markdown files at <dir>/<_id>.
+    /// Write current documents as files at <dir>/<_id>. The _id extension picks the
+    /// format: .json is JSON, .yaml/.yml is YAML, and anything else is Markdown.
     Export {
         dir: PathBuf,
         /// Only documents of this type: a doc:// reference, matching every pinned revision unless it has ?rev=.
@@ -83,9 +84,9 @@ enum Command {
         #[arg(long)]
         tag: Option<String>,
     },
-    /// Import every *.md file under <dir>. The relative path is the _id (a frontmatter
-    /// _id that differs is ignored). Unchanged exported files are no-ops; edited files
-    /// become the next revision.
+    /// Import every .md, .markdown, .json, .yaml, and .yml file under <dir>. The relative
+    /// path is the _id (an _id in the file that differs is ignored). Unchanged exported
+    /// files are no-ops; edited files become the next revision.
     Import { dir: PathBuf },
     /// Copy every revision of the vault at PEER that this vault does not have.
     /// Tasks and runs never replicate. Concurrent edits become conflicts:
@@ -1002,22 +1003,21 @@ pub fn id_to_relpath(id: &str) -> Result<PathBuf, StoreError> {
 }
 
 /// The `_id` for a file at `rel` (relative to the import root): the path
-/// components joined with `/`, extension included. `None` unless it is `.md`.
+/// components joined with `/`, extension included. `None` unless the
+/// extension names a format.
 pub fn relpath_to_id(rel: &Path) -> Option<String> {
-    if rel.extension()?.to_str()? != "md" {
-        return None;
-    }
+    detect_format(rel)?;
     let parts: Vec<String> = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect();
     Some(parts.join("/"))
 }
 
-fn walk_md(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<(), StoreError> {
+fn walk_docs(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<(), StoreError> {
     let entries = std::fs::read_dir(dir).map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
         let path = entry.path();
         if path.is_dir() {
-            walk_md(&path, root, files)?;
+            walk_docs(&path, root, files)?;
         } else if relpath_to_id(path.strip_prefix(root).unwrap_or(&path)).is_some() {
             files.push(path);
         }
@@ -1097,7 +1097,7 @@ fn export(store: &Store, dir: &Path, filter: ListQuery, json: bool, out: &mut dy
                 .parent()
                 .map(std::fs::create_dir_all)
                 .unwrap_or(Ok(()))
-                .and_then(|_| std::fs::write(&path, markdown::render(doc)));
+                .and_then(|_| std::fs::write(&path, render_doc(doc)));
             results.push(FileResult {
                 path: rel.to_string_lossy().into_owned(),
                 id: Some(doc.id.clone()),
@@ -1117,16 +1117,17 @@ fn export(store: &Store, dir: &Path, filter: ListQuery, json: bool, out: &mut dy
 
 fn import(store: &mut Store, dir: &Path, json: bool, out: &mut dyn Write) -> anyhow::Result<()> {
     let mut files = Vec::new();
-    walk_md(dir, dir, &mut files)?;
+    walk_docs(dir, dir, &mut files)?;
     files.sort();
     let mut results = Vec::new();
     for path in files {
         let rel = path.strip_prefix(dir).unwrap_or(&path).to_path_buf();
         let rel_text = rel.to_string_lossy().into_owned();
-        let id = relpath_to_id(&rel).expect("walk_md only collects .md files");
+        let id = relpath_to_id(&rel).expect("walk_docs only collects files with a format");
+        let format = detect_format(&rel).expect("walk_docs only collects files with a format");
         let outcome = std::fs::read_to_string(&path)
             .map_err(|e| StoreError::invalid(format!("reading {}: {e}", path.display())))
-            .and_then(|text| markdown::parse(&text))
+            .and_then(|text| parse_input(&text, format))
             .and_then(|mut map| {
                 // The path is the id. A file copied or moved from elsewhere carries
                 // another document's _id and _rev: drop them and write fresh.
@@ -1161,6 +1162,12 @@ mod tests {
         }
         assert_eq!(relpath_to_id(Path::new("a.md")).as_deref(), Some("a.md"));
         assert_eq!(relpath_to_id(Path::new("notes/2026/a.md")).as_deref(), Some("notes/2026/a.md"));
+        for ext in ["md", "markdown", "json", "yaml", "yml"] {
+            let rel = format!("notes/a.{ext}");
+            assert_eq!(relpath_to_id(Path::new(&rel)), Some(rel.clone()));
+        }
+        assert_eq!(relpath_to_id(Path::new("A.MD")), None);
+        assert_eq!(relpath_to_id(Path::new("a.JSON")), None);
         assert_eq!(relpath_to_id(Path::new("a.txt")), None);
         assert_eq!(relpath_to_id(Path::new("README")), None);
     }
@@ -1169,7 +1176,7 @@ mod tests {
 // ---- input --------------------------------------------------------------
 
 fn detect_format(path: &Path) -> Option<Format> {
-    match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
+    match path.extension()?.to_str()? {
         "json" => Some(Format::Json),
         "yaml" | "yml" => Some(Format::Yaml),
         "md" | "markdown" => Some(Format::Md),
@@ -1270,6 +1277,15 @@ fn print_json<T: Serialize>(out: &mut dyn Write, value: &T) -> io::Result<()> {
 
 fn print_doc(out: &mut dyn Write, json: bool, doc: &Doc) -> io::Result<()> {
     if json { print_json(out, doc) } else { write!(out, "{}", markdown::render(doc)) }
+}
+
+/// A document in the format its `_id` extension names; Markdown by default.
+fn render_doc(doc: &Doc) -> String {
+    match detect_format(Path::new(&doc.id)) {
+        Some(Format::Json) => format!("{}\n", serde_json::to_string_pretty(doc).expect("store types serialize")),
+        Some(Format::Yaml) => serde_yaml_ng::to_string(doc).expect("store types serialize"),
+        Some(Format::Md) | None => markdown::render(doc),
+    }
 }
 
 fn short_rev(rev: &str) -> String {

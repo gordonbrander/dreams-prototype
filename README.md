@@ -40,7 +40,7 @@ A document is a JSON object. Reserved fields start with an underscore.
 
 | Field | Meaning |
 |---|---|
-| `_id` | The document id. Any string up to 512 bytes. Generated as a UUID v7 when omitted. |
+| `_id` | The document id. Any string up to 512 bytes. Generated as `<UUID v7>.md` when omitted. |
 | `_rev` | The revision id, `<generation>-<sha256>`. Computed from the content. |
 | `_parent` | The revision this one replaced. Absent on the first revision. |
 | `_type` | A `doc://` reference to a schema document, pinned to one revision: `doc://schemas/note?rev=3-9f2a…`. Optional. |
@@ -130,7 +130,7 @@ dreams [--db PATH] [--json] <command>
   daemon install | uninstall                      start it at login (launchd or systemd)
 
   export <dir> [--type T] [--tag G]               write current documents to <dir>/<_id>
-  import <dir>                                    read every *.md file under <dir>
+  import <dir>                                    read every .md/.json/.yaml file under <dir>
 ```
 
 Every command also takes `--actor NAME`, or the `DREAMS_ACTOR` variable, to name the writer of the revisions it creates. `--db` also reads `DREAMS_DB`.
@@ -159,9 +159,9 @@ dreams doc put hello.md
 
 ### Export and import
 
-`export` writes every current document to `<dir>/<_id>` as Markdown with frontmatter. Nested ids make nested folders. Tombstones are skipped.
+`export` writes every current document to `<dir>/<_id>`. The `_id` extension picks the format: `.json` is JSON, `.yaml` and `.yml` are YAML, and all other ids are Markdown with frontmatter. Nested ids make nested folders. Tombstones are skipped.
 
-`import` reads every `.md` file under a folder. The path relative to the folder, extension included, is the `_id`. So `notes/foo.md` becomes the document `notes/foo.md`. A frontmatter `_id` that differs from the path is ignored. Files that came from `export` and were not changed are no-ops. Edited files become the next revision. New files are created.
+`import` reads every `.md`, `.markdown`, `.json`, `.yaml`, and `.yml` file under a folder. The extension picks the parser. Only lowercase extensions match. The path relative to the folder, extension included, is the `_id`. So `notes/foo.md` becomes the document `notes/foo.md`, and `data/bar.json` becomes `data/bar.json`. An `_id` in the file that differs from the path is ignored. Files that came from `export` and were not changed are no-ops. Edited files become the next revision. New files are created.
 
 Both commands continue past a failing file, report every file, and exit 1 if any failed.
 

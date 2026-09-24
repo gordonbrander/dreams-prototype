@@ -274,12 +274,14 @@ fn export_then_import_round_trip() {
     sb.json(&["doc", "put"], r#"{"_id":"a.md","title":"Alpha","content":"alpha body\n","tags":["x"]}"#);
     sb.json(&["doc", "put"], r#"{"_id":"notes/2026/b.md","title":"Bee","content":"bee body\n"}"#);
     sb.json(&["doc", "put"], r#"{"_id":"plain","title":"No extension"}"#);
+    sb.json(&["doc", "put"], r#"{"_id":"data/c.json","title":"Sea","n":1}"#);
+    sb.json(&["doc", "put"], r#"{"_id":"conf/d.yaml","title":"Dee","content":"dee body\n"}"#);
     let del = sb.json(&["doc", "put"], r#"{"_id":"gone.md","title":"Gone"}"#);
     sb.json(&["doc", "delete", "gone.md", "--parent", del["_rev"].as_str().unwrap()], "");
 
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
-    assert!(out.trim_end().ends_with("15 exported, 0 errors"), "{out}");
+    assert!(out.trim_end().ends_with("17 exported, 0 errors"), "{out}");
     assert!(out_dir.join("schemas/task").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
@@ -288,26 +290,44 @@ fn export_then_import_round_trip() {
     let text = std::fs::read_to_string(out_dir.join("a.md")).unwrap();
     assert!(text.starts_with("---\n_id: a.md\n_rev: 1-"), "{text}");
     assert!(text.ends_with("---\nalpha body\n"), "{text}");
+    let c: Value = serde_json::from_str(&std::fs::read_to_string(out_dir.join("data/c.json")).unwrap()).unwrap();
+    assert_eq!(c["_id"], "data/c.json");
+    assert_eq!(c["n"], 1);
+    // empty reserved fields are left out, as in Markdown
+    for key in ["_parent", "_type", "_deleted"] {
+        assert!(c.get(key).is_none(), "{key}: {c}");
+    }
+    let d: Value = serde_yaml_ng::from_str(&std::fs::read_to_string(out_dir.join("conf/d.yaml")).unwrap()).unwrap();
+    assert_eq!(d["_id"], "conf/d.yaml");
+    assert_eq!(d["content"], "dee body\n");
 
-    // exported and unchanged: every .md file is a no-op; `plain` is not a .md file and is skipped
+    // exported and unchanged: every file is a no-op; `plain` has no format extension and is skipped
     let report = sb.json(&["import", out_dir.to_str().unwrap()], "");
     let statuses: Vec<&str> =
         report["results"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
-    assert_eq!(statuses, ["unchanged", "unchanged"]);
+    assert_eq!(statuses, ["unchanged"; 4]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
-    assert_eq!(changes.results.len(), 12 + 5);
+    assert_eq!(changes.results.len(), 12 + 7);
 
     // edit one, add one, and drop a copied file whose frontmatter names another doc
     std::fs::write(out_dir.join("a.md"), text.replace("alpha body", "alpha edited")).unwrap();
     std::fs::write(out_dir.join("notes/new.md"), "---\ntitle: New\n---\nfresh\n").unwrap();
     std::fs::copy(out_dir.join("notes/2026/b.md"), out_dir.join("copy.md")).unwrap();
+    let c_text = std::fs::read_to_string(out_dir.join("data/c.json")).unwrap();
+    std::fs::write(out_dir.join("data/c.json"), c_text.replace("\"n\": 1", "\"n\": 2")).unwrap();
+    std::fs::write(out_dir.join("notes/new.yml"), "title: Yam\n").unwrap();
     let out = sb.ok(&["import", out_dir.to_str().unwrap()], "");
     assert!(out.contains("updated    a.md 2-"), "{out}");
     assert!(out.contains("created    notes/new.md 1-"), "{out}");
     assert!(out.contains("created    copy.md 1-"), "{out}");
+    assert!(out.contains("updated    data/c.json 2-"), "{out}");
+    assert!(out.contains("created    notes/new.yml 1-"), "{out}");
     assert!(out.contains("unchanged  notes/2026/b.md"), "{out}");
-    assert!(out.trim_end().ends_with("2 created, 1 updated, 1 unchanged, 0 errors"), "{out}");
+    assert!(out.contains("unchanged  conf/d.yaml"), "{out}");
+    assert!(out.trim_end().ends_with("3 created, 2 updated, 2 unchanged, 0 errors"), "{out}");
+    assert_eq!(sb.json(&["doc", "get", "data/c.json"], "")["n"], 2);
+    assert_eq!(sb.json(&["doc", "get", "notes/new.yml"], "")["title"], "Yam");
     assert_eq!(sb.json(&["doc", "get", "a.md"], "")["content"], "alpha edited\n");
     assert_eq!(sb.json(&["doc", "get", "notes/new.md"], "")["title"], "New");
     let copy = sb.json(&["doc", "get", "copy.md"], "");

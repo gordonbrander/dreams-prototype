@@ -12,6 +12,7 @@
 //! Delimiter lines carry their own newline, so `render` then `parse` is a
 //! bijection on content. Nothing is appended after the content.
 
+use serde::Serialize;
 use serde_json::{Map, Value};
 use serde_yaml_ng::{Mapping, Value as Yaml};
 
@@ -69,66 +70,33 @@ pub fn parse(text: &str) -> Result<Map<String, Value>, StoreError> {
     Ok(map)
 }
 
-fn yaml_str(s: &str) -> Yaml {
-    Yaml::String(s.to_string())
-}
-
-/// Render a document. Reserved fields first, then body fields in key order.
-/// A non-empty string `content` becomes the body; anything else stays in
-/// the frontmatter.
+/// Render a document: its serialized fields as frontmatter, in serialization
+/// order (reserved fields first, then body fields in key order). A non-empty
+/// string `content` becomes the text after the frontmatter.
 pub fn render(doc: &Doc) -> String {
-    let mut fm = Mapping::new();
-    fm.insert(yaml_str("_id"), yaml_str(&doc.id));
-    fm.insert(yaml_str("_rev"), yaml_str(&doc.rev));
-    if let Some(p) = &doc.parent {
-        fm.insert(yaml_str("_parent"), yaml_str(p));
-    }
-    if let Some(t) = &doc.type_id {
-        fm.insert(yaml_str("_type"), yaml_str(t));
-    }
-    if doc.deleted {
-        fm.insert(yaml_str("_deleted"), Yaml::Bool(true));
-    }
-    fm.insert(yaml_str("_created_at"), yaml_str(&doc.created_at));
-    if let Some(a) = &doc.actor {
-        fm.insert(yaml_str("_actor"), yaml_str(a));
-    }
-    if let Some(seq) = doc.seq {
-        fm.insert(yaml_str("_seq"), Yaml::Number(seq.into()));
-    }
-    for (key, revs) in [("_conflicts", &doc.conflicts), ("_deleted_conflicts", &doc.deleted_conflicts)] {
-        if !revs.is_empty() {
-            fm.insert(yaml_str(key), Yaml::Sequence(revs.iter().map(|r| yaml_str(r)).collect()));
-        }
-    }
-    with_body(fm, &doc.body)
+    frontmatter_and_content(doc)
 }
 
 /// Render a write that has not happened yet, as valid `put` input.
 pub fn render_input(input: &PutInput) -> String {
-    let mut fm = Mapping::new();
-    for (key, value) in [("_id", &input.id), ("_parent", &input.parent), ("_type", &input.type_id)] {
-        if let Some(v) = value {
-            fm.insert(yaml_str(key), yaml_str(v));
-        }
-    }
-    with_body(fm, &input.body)
+    frontmatter_and_content(input)
 }
 
-/// Frontmatter, then body fields in key order. A non-empty string
-/// `content` becomes the text after the frontmatter.
-fn with_body(mut fm: Mapping, body: &Map<String, Value>) -> String {
-    let mut content = "";
-    for (key, value) in body {
-        if key == "content"
-            && let Value::String(s) = value
+fn frontmatter_and_content(value: &impl Serialize) -> String {
+    let Yaml::Mapping(fields) = serde_yaml_ng::to_value(value).expect("documents serialize") else {
+        unreachable!("documents serialize as mappings")
+    };
+    let mut fm = Mapping::new();
+    let mut content = String::new();
+    for (key, value) in fields {
+        if key.as_str() == Some("content")
+            && let Yaml::String(s) = &value
             && !s.is_empty()
         {
-            content = s;
+            content = s.clone();
             continue;
         }
-        let yaml = serde_yaml_ng::to_value(value).expect("JSON values convert to YAML");
-        fm.insert(yaml_str(key), yaml);
+        fm.insert(key, value);
     }
     let yaml = serde_yaml_ng::to_string(&fm).expect("a mapping serializes");
     format!("---\n{yaml}---\n{content}")
@@ -196,6 +164,20 @@ mod tests {
         for key in ["title", "n", "flag", "tags", "meta", "content"] {
             assert_eq!(parsed[key], body[key], "{key}");
         }
+    }
+
+    #[test]
+    fn set_reserved_fields_render_in_order() {
+        let mut d = doc(json!({"title": "t"}));
+        d.parent = Some("1-abc".into());
+        d.deleted = true;
+        d.conflicts = vec!["2-x".into()];
+        let text = render(&d);
+        assert!(
+            text.starts_with("---\n_id: '007'\n_rev: 1-abc\n_parent: 1-abc\n_type: note/v1\n_deleted: true\n"),
+            "{text}"
+        );
+        assert!(text.ends_with("_conflicts:\n- 2-x\ntitle: t\n---\n"), "{text}");
     }
 
     #[test]

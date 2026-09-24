@@ -94,10 +94,10 @@ fn idempotent_replay() {
 }
 
 #[test]
-fn generated_ids_are_uuid_v7() {
+fn generated_ids_are_uuid_v7_markdown() {
     let mut s = store();
     let d = s.put(input(json!({"title": "x"}))).unwrap();
-    let u = uuid::Uuid::parse_str(&d.id).unwrap();
+    let u = uuid::Uuid::parse_str(d.id.strip_suffix(".md").unwrap()).unwrap();
     assert_eq!(u.get_version_num(), 7);
 }
 
