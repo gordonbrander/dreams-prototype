@@ -164,7 +164,7 @@ fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
     seed::seed(&mut b).unwrap();
     let fresh = sync(&mut a, "a", &mut b, "b").unwrap();
     for r in &fresh {
-        assert_eq!((r.written, r.present), (0, 12), "seeded documents are identical");
+        assert_eq!((r.written, r.present), (0, 15), "seeded documents are identical");
     }
 
     put(

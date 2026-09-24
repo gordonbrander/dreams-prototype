@@ -540,8 +540,11 @@ fn seed_is_idempotent() {
             "runners/codex",
             "runners/pi",
             "skills/daily-note",
+            "skills/brief",
             "prompts/daily",
             "prompts/intention",
+            "prompts/brief",
+            "tasks/brief",
         ]
     );
     assert!(seed::seed(&mut s).unwrap().is_empty());

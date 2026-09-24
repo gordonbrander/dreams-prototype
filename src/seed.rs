@@ -93,14 +93,24 @@ pub fn defaults() -> Vec<PutInput> {
     let runners = RUNNERS.iter().map(|(id, title, argv)| {
         json!({"_id": id, "_type": RUNNER_TYPE, "title": title, "argv": argv, "timeout": runner::DEFAULT_TIMEOUT})
     });
-    let skills = [json!({
-        "_id": "skills/daily-note",
-        "_type": SKILL_TYPE,
-        "name": "daily-note",
-        "description": "Create, add to, or find daily notes: one document per day, with the date as its id. \
-            Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
-        "content": include_str!("seed/daily-note.md"),
-    })];
+    let skills = [
+        json!({
+            "_id": "skills/daily-note",
+            "_type": SKILL_TYPE,
+            "name": "daily-note",
+            "description": "Create, add to, or find daily notes: one document per day, with the date as its id. \
+                Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
+            "content": include_str!("seed/daily-note.md"),
+        }),
+        json!({
+            "_id": "skills/brief",
+            "_type": SKILL_TYPE,
+            "name": "brief",
+            "description": "Make a daily brief: food for thought that brings back ideas from the user's notes, \
+                with today's intention as its theme. Use when the user asks for a brief or a daily review.",
+            "content": include_str!("seed/brief.md"),
+        }),
+    ];
     let prompts = [
         json!({
             "_id": "prompts/daily",
@@ -118,11 +128,32 @@ pub fn defaults() -> Vec<PutInput> {
             "content": "Use the daily-note skill. Set today's intention to the text the user gave with this \
                 command. If the user gave no text, ask for the intention.",
         }),
+        json!({
+            "_id": "prompts/brief",
+            "_type": PROMPT_TYPE,
+            "name": "brief",
+            "description": "Make today's brief and show it.",
+            "content": "Use the brief skill. Make today's brief and show it to the user. \
+                Do not write it to the vault.",
+        }),
     ];
+    // Seeded tasks are templates: each runs only where the user deploys it.
+    let tasks = [json!({
+        "_id": "tasks/brief",
+        "_type": task::TASK_TYPE,
+        "title": "Daily brief",
+        "runner": "doc://runners/claude",
+        "every": "1d",
+        "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content \
+            already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \
+            \"## Brief\", an empty line, and the brief to the end of the note's content, \
+            with the steps in \"Add to a daily note\".",
+    })];
     schemas
         .chain(runners)
         .chain(skills)
         .chain(prompts)
+        .chain(tasks)
         .map(|v| serde_json::from_value(v).expect("seeded documents are valid put input"))
         .collect()
 }
