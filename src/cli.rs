@@ -13,7 +13,7 @@ use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::rev::short_rev;
 use crate::runner::{self, Runner};
-use crate::store::{Changes, History, ListQuery, Page, Store};
+use crate::store::{Changes, History, ListQuery, Page, SearchPage, Store};
 use crate::sync::{self, PullReport};
 use crate::task::{self, Deploy, Evaluation, TaskState, TickReport, When};
 use crate::{daemon, markdown, mcp, resolve, rev, seed};
@@ -967,7 +967,7 @@ fn doc_cmd(
         }
         DocCmd::Search { query, filter } => {
             let page = store.search(&query, &filter.into())?;
-            print_page(out, json, &page)?;
+            print_search(out, json, &page)?;
         }
         DocCmd::Resolve { id, auto: true, runner, dry_run, .. } => {
             let proposal = tokio::runtime::Runtime::new()?.block_on(resolve::propose(store, db, &id, &runner))?;
@@ -1432,6 +1432,30 @@ fn print_page(out: &mut dyn Write, json: bool, page: &Page) -> io::Result<()> {
         })
         .collect();
     table(out, &["ID", "REV", "TYPE", "TITLE", "TAGS"], &rows)?;
+    if let Some(next) = page.next {
+        writeln!(out, "next: {next}")?;
+    }
+    Ok(())
+}
+
+fn print_search(out: &mut dyn Write, json: bool, page: &SearchPage) -> io::Result<()> {
+    if json {
+        return print_json(out, page);
+    }
+    let rows: Vec<Vec<String>> = page
+        .results
+        .iter()
+        .map(|r| {
+            vec![
+                r.id.clone(),
+                short_rev(&r.rev),
+                r.type_id.as_deref().map(DocRef::path_of).unwrap_or_default().to_string(),
+                r.title.as_deref().map(|t| clip(t, 60)).unwrap_or_default(),
+                r.content_matches.as_deref().map(|m| clip(m, 80)).unwrap_or_default(),
+            ]
+        })
+        .collect();
+    table(out, &["ID", "REV", "TYPE", "TITLE", "MATCH"], &rows)?;
     if let Some(next) = page.next {
         writeln!(out, "next: {next}")?;
     }

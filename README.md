@@ -496,7 +496,7 @@ Each store operation is one tool:
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
 | `resolve_doc` | Tombstone every conflict of `id`, after it writes `merged` on the winner if given. Pass the `conflicts` you read to fail if they changed. |
 | `list_docs` | Current documents, newest first, with `type`, `tag`, `before`, `limit`. |
-| `search_docs` | Full-text search with `query` and the same filters. |
+| `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
 
@@ -573,7 +573,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 
-Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content.
+Search uses FTS5 with the porter tokenizer. Title matches rank highest, then tags, then content. A search result does not contain the document body. It contains the metadata, the title, and `content_matches`: a snippet of the field that matches best, with the matched terms in `**`. An empty query lists the documents newest first, with no `content_matches`.
 
 ## Development
 
