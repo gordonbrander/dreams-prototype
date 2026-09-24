@@ -240,6 +240,10 @@ enum TaskCmd {
         ids: Vec<String>,
         #[arg(long)]
         title: Option<String>,
+        /// The folder the agent runs in. A relative DIR is relative to the vault's folder.
+        /// Default: workspace.
+        #[arg(long, value_name = "DIR")]
+        cwd: Option<String>,
         /// Write the task but do not deploy it on this vault.
         #[arg(long)]
         no_deploy: bool,
@@ -561,7 +565,7 @@ fn task_cmd(
     confirm: Confirm,
 ) -> anyhow::Result<()> {
     match cmd {
-        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, no_deploy, yes, prompt_file } => {
+        TaskCmd::Add { task_id, runner, every, glob, tag, type_id, ids, title, cwd, no_deploy, yes, prompt_file } => {
             id_to_relpath(&task_id)?;
             task::parse_duration(&every)?;
             let runner = DocRef::from_cli(&runner)?.to_string();
@@ -578,6 +582,9 @@ fn task_cmd(
             }
             if let Some(t) = title {
                 map.insert("title".into(), Value::String(t));
+            }
+            if let Some(c) = cwd {
+                map.insert("cwd".into(), Value::String(c));
             }
             let (doc, status) = upsert_unless_same(store, &task_id, map)?;
             if !json {
@@ -667,9 +674,11 @@ fn task_cmd(
                 Ok(r) => r.argv.clone(),
                 Err(e) => vec![format!("(runner error: {e})")],
             };
+            let cwd = task::work_dir(db, eval.parsed.cwd.as_deref());
             if json {
                 let mut v = serde_json::to_value(&eval)?;
                 v["argv"] = json_array(&argv);
+                v["cwd"] = Value::String(cwd.to_string_lossy().into_owned());
                 v["prompt"] = Value::String(task::prompt_text(&eval));
                 print_json(out, &v)?;
             } else {
@@ -707,7 +716,8 @@ fn task_cmd(
                         .collect();
                     table(out, &["SEQ", "ID", "REV", "DELETED"], &rows)?;
                 }
-                writeln!(out, "\ncommand:   {}", argv.join(" "))?;
+                writeln!(out, "\ncwd:       {}", cwd.display())?;
+                writeln!(out, "command:   {}", argv.join(" "))?;
             }
         }
         TaskCmd::Run { task_id, force } => {

@@ -107,8 +107,8 @@ pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Res
         out: scratch.join("last-message"),
         exe: std::env::current_exe().unwrap_or_else(|_| PathBuf::from("dreams")),
     };
-    let cwd =
-        db.parent().filter(|p| !p.as_os_str().is_empty()).map(Path::to_path_buf).unwrap_or_else(|| PathBuf::from("."));
+    let cwd = task::work_dir(db, None);
+    std::fs::create_dir_all(&cwd).map_err(|e| StoreError::invalid(format!("creating {}: {e}", cwd.display())))?;
     let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
     let timeout = std::time::Duration::from_secs(runner.timeout_secs);
     let outcome = task::spawn(&ctx.resolve(&runner.argv), &ctx.env(), &cwd, prompt, timeout).await;
