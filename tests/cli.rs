@@ -958,22 +958,36 @@ fn feeds_pull_only_new_items() {
     let rss_url = format!("{base}/rss");
 
     // The default id comes from the origin.
-    let doc = sb.json(&["feed", "add", &rss_url, "--title", "Local"], "");
+    let advice = "This source leans one way; look for the other side.";
+    let doc = sb.json(&["feed", "add", &rss_url, "--title", "Local", "--instructions", advice], "");
     let rss_id = format!("feeds/{}.md", dreams::feed::origin_slug(&base));
     assert_eq!(doc["_id"], rss_id.as_str());
-    assert!(sb.ok(&["feed", "add", &rss_url, "--title", "Local"], "").starts_with("unchanged "));
+    assert_eq!(doc["kind"], "rss");
+    // A second add with no flags keeps the fields that it does not give.
+    assert!(sb.ok(&["feed", "add", &rss_url], "").starts_with("unchanged "));
     // A second feed on the same origin needs its own id.
     let err = sb.fails(&["feed", "add", &format!("{base}/page")], "");
     assert_eq!(err["name"], "invalid_input");
     assert!(err["message"].as_str().unwrap().contains("--id"), "{err}");
     sb.ok(&["feed", "add", &format!("{base}/page"), "--kind", "html", "--id", "feeds/page.md"], "");
+    assert_eq!(sb.json(&["feed", "add", &format!("{base}/page"), "--id", "feeds/page.md"], "")["kind"], "html");
     let list = sb.ok(&["feed", "list"], "");
     assert!(list.contains(&rss_id) && list.contains("feeds/page.md"), "{list}");
 
+    // New items are grouped by feed, with each feed's instructions.
     let report = sb.json(&["feed", "pull"], "");
-    let items = report["items"].as_array().unwrap();
-    assert_eq!(items.len(), FEED_RSS.matches("<item>").count() + 1, "{report}");
     assert_eq!(report["errors"], json!([]));
+    let group = |report: &Value, id: &str| {
+        report["feeds"].as_array().unwrap().iter().find(|f| f["feed"] == format!("doc://{id}")).cloned()
+    };
+    let rss = group(&report, &rss_id).expect("the rss feed has new items");
+    assert_eq!(rss["title"], "Local");
+    assert_eq!(rss["instructions"], advice);
+    let items = rss["items"].as_array().unwrap();
+    assert_eq!(items.len(), FEED_RSS.matches("<item>").count(), "{report}");
+    let page = group(&report, "feeds/page.md").expect("the page is new");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page.get("instructions").is_none(), "{page}");
     let one = items.iter().find(|i| i["title"] == "One").unwrap();
     assert_eq!(one["description"], "The first item");
     let doc = sb.json(&["doc", "get", one["href"].as_str().unwrap()], "");
@@ -981,14 +995,14 @@ fn feeds_pull_only_new_items() {
     assert_eq!(doc["feed"], format!("doc://{rss_id}"));
     assert!(doc["_id"].as_str().unwrap().starts_with(rss_id.trim_end_matches(".md")));
 
-    assert_eq!(sb.json(&["feed", "pull"], "")["items"], json!([]), "a second pull sees nothing new");
+    assert_eq!(sb.json(&["feed", "pull"], "")["feeds"], json!([]), "a second pull sees nothing new");
     assert!(sb.ok(&["feed", "pull"], "").contains("no new items"));
 
     // A page whose text changed is new again.
     pages.lock().unwrap().insert("/page".into(), "<p>Version two</p>".into());
     let report = sb.json(&["feed", "pull", "feeds/page.md"], "");
-    assert_eq!(report["items"].as_array().unwrap().len(), 1, "{report}");
-    assert_eq!(report["items"][0]["description"], "Version two");
+    assert_eq!(report["feeds"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["feeds"][0]["items"][0]["description"], "Version two");
 
     // One broken feed fails the command, but the others are still pulled.
     pages.lock().unwrap().insert("/page".into(), "<p>Version three</p>".into());
@@ -998,7 +1012,12 @@ fn feeds_pull_only_new_items() {
     let report: Value = serde_json::from_str(&out).unwrap();
     assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
     assert_eq!(report["errors"][0]["feed"], "feeds/missing.md");
-    assert_eq!(report["items"].as_array().unwrap().len(), 1, "{report}");
+    assert!(group(&report, "feeds/page.md").is_some(), "{report}");
+
+    // An empty text removes the instructions.
+    let doc = sb.json(&["feed", "add", &rss_url, "--instructions", ""], "");
+    assert!(doc.get("instructions").is_none(), "{doc}");
+    assert_eq!(doc["title"], "Local");
 
     sb.ok(&["feed", "rm", "feeds/missing.md"], "");
     assert_eq!(sb.json(&["feed", "pull"], "")["errors"], json!([]));

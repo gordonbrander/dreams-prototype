@@ -320,16 +320,21 @@ enum RunnerCmd {
 #[derive(Subcommand)]
 enum FeedCmd {
     /// Create or update a feed. A pull writes its items under the feed's id without `.md`.
+    /// On an existing feed, fields that are not given stay as they are.
     Add {
         url: String,
         /// Feed id. Default: feeds/<origin-slug>.md, for example feeds/example-com.md.
         #[arg(long)]
         id: Option<String>,
-        /// rss reads RSS or Atom, one item per entry. html reads one page as text.
-        #[arg(long, default_value = "rss", value_parser = ["rss", "html"])]
-        kind: String,
+        /// rss reads RSS or Atom, one item per entry. html reads one page as text. Default for a new feed: rss.
+        #[arg(long, value_parser = ["rss", "html"])]
+        kind: Option<String>,
         #[arg(long)]
         title: Option<String>,
+        /// Instructions for the agent that processes the items, for example to correct
+        /// for a known bias of the source. An empty TEXT removes them.
+        #[arg(long, value_name = "TEXT")]
+        instructions: Option<String>,
     },
     /// Every feed.
     List,
@@ -953,11 +958,13 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
 
 fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) -> anyhow::Result<()> {
     match cmd {
-        FeedCmd::Add { url, id, kind, title } => {
+        FeedCmd::Add { url, id, kind, title, instructions } => {
             let id = match id {
                 Some(id) => id,
                 None => feed::default_id(&url)?,
             };
+            // An existing feed keeps the fields that are not given.
+            let mut map = Map::new();
             if let Ok(head) = store.get(&id) {
                 let old = feed::Feed::from_doc(&head)
                     .map_err(|_| StoreError::invalid(format!("{id} exists and is not a feed; pass another --id")))?;
@@ -968,13 +975,29 @@ fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) ->
                     ))
                     .into());
                 }
+                map = head.body;
             }
-            let mut map = Map::new();
             map.insert("_type".into(), Value::String(feed::FEED_TYPE.into()));
             map.insert("url".into(), Value::String(url));
-            map.insert("kind".into(), Value::String(kind));
+            match kind {
+                Some(k) => {
+                    map.insert("kind".into(), Value::String(k));
+                }
+                None => {
+                    map.entry("kind").or_insert_with(|| Value::String("rss".into()));
+                }
+            }
             if let Some(t) = title {
                 map.insert("title".into(), Value::String(t));
+            }
+            match instructions {
+                Some(i) if i.is_empty() => {
+                    map.remove("instructions");
+                }
+                Some(i) => {
+                    map.insert("instructions".into(), Value::String(i));
+                }
+                None => {}
             }
             let (doc, status) = upsert_unless_same(store, &id, map)?;
             if json {
@@ -1000,12 +1023,18 @@ fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) ->
             if json {
                 print_json(out, &report)?;
             } else {
-                if report.items.is_empty() {
+                if report.feeds.is_empty() {
                     writeln!(out, "no new items")?;
                 } else {
-                    let rows: Vec<Vec<String>> =
-                        report.items.iter().map(|i| vec![i.href.clone(), clip(&i.title, 60)]).collect();
-                    table(out, &["HREF", "TITLE"], &rows)?;
+                    let rows: Vec<Vec<String>> = report
+                        .feeds
+                        .iter()
+                        .flat_map(|f| {
+                            let feed = f.feed.trim_start_matches(DocRef::SCHEME).to_string();
+                            f.items.iter().map(move |i| vec![feed.clone(), i.href.clone(), clip(&i.title, 60)])
+                        })
+                        .collect();
+                    table(out, &["FEED", "HREF", "TITLE"], &rows)?;
                 }
                 for e in &report.errors {
                     writeln!(out, "failed {}: {}", e.feed, e.error)?;

@@ -127,7 +127,7 @@ dreams [--db PATH] [--json] <command>
   runner list
   runner rm   <id>
 
-  feed add    <url> [--id ID] [--kind rss|html] [--title T]
+  feed add    <url> [--id ID] [--kind rss|html] [--title T] [--instructions TEXT]
                                                   default id feeds/<origin-slug>.md
   feed list
   feed pull   [<id>]                              fetch one feed, or all; print only the new items
@@ -486,7 +486,7 @@ dreams feed add https://news.ycombinator.com/rss
 dreams feed pull
 ```
 
-A feed is a document typed `doc://schemas/feed`, with `url`, `kind`, and an optional `title`. It does nothing until something pulls it. An agent can add one with `put_doc`. There are two kinds:
+A feed is a document typed `doc://schemas/feed`, with `url`, `kind`, and an optional `title` and `instructions`. It does nothing until something pulls it. An agent can add one with `put_doc`. There are two kinds:
 
 - **`rss`** reads RSS or Atom. Each entry is one item. The item keeps the entry's `title`, `url`, `published`, `guid`, and `content` (the content or summary, verbatim).
 - **`html`** reads one web page as text. The page is one item. When the text changes, the next pull writes a new revision of the item, and reports it as new.
@@ -495,18 +495,35 @@ Items are documents typed `doc://schemas/feed-item`. They go under the feed's id
 
 The item documents are the record of what was seen. A pull skips an item that exists, or that has a tombstone. So a pull never reports an item two times, and an item that you delete does not come back. An RSS entry that the feed edits later is not new. There is no retention: delete old items like any other document.
 
-`feed pull` prints the new items. With `--json`, or from the `pull_feeds` tool, it gives:
+`feed pull` with no id pulls every feed. With an id, it pulls one feed. It prints the new items. With `--json`, or from the `pull_feeds` tool, it gives the new items grouped by feed:
 
 ```json
 {
-  "items": [{"href": "doc://feeds/news-ycombinator-com/035d4c4c31796bf3.md?rev=1-8c24…", "title": "…", "description": "the first 150 characters of the content, as text"}],
+  "feeds": [
+    {
+      "feed": "doc://feeds/news-ycombinator-com.md",
+      "title": "Hacker News",
+      "instructions": "Most posts come from a small tech audience. Say when a claim needs a wider view.",
+      "items": [{"href": "doc://feeds/news-ycombinator-com/035d4c4c31796bf3.md?rev=1-8c24…", "title": "…", "description": "the first 150 characters of the content, as text"}]
+    }
+  ],
   "errors": []
 }
 ```
 
-A feed that fails goes in `errors`, and the other feeds are still pulled. `feed pull` then exits 1.
+A feed with no new items is not in `feeds`. A feed that fails goes in `errors`, and the other feeds are still pulled. `feed pull` then exits 1.
 
-`feed add` makes the id from the origin of the URL. A second feed from the same site needs `--id`. For a web page, pass `--kind html`.
+`feed add` makes the id from the origin of the URL. A second feed from the same site needs `--id`. For a web page, pass `--kind html`. On an existing feed, `feed add` changes only the fields that you give.
+
+### Instructions
+
+`instructions` is text for the agent that processes the items of a feed. Use it to correct for a known bias of the source, or to say what matters in it:
+
+```
+dreams feed add https://example.com/rss --instructions "This outlet favors one side of most debates. For each claim, name the strongest view against it."
+```
+
+A pull gives each feed's instructions next to its items. The instructions are not copied into the items. An agent that has only an item reads the feed document named in the item's `feed` field. `--instructions ""` removes them.
 
 ### Wake an agent on new items
 
@@ -518,7 +535,7 @@ dreams task add tasks/read-hn --runner runners/claude --every 1h \
   --glob 'feeds/news-ycombinator-com/*' read-hn.md
 ```
 
-The pull runs as the actor `tasks/pull-feeds`, so the reading task sees its writes. The reading task gets the ids of the new items at the end of its prompt. Use `--type doc://schemas/feed-item` in place of `--glob` to read the items of every feed.
+The pull runs as the actor `tasks/pull-feeds`, so the reading task sees its writes. The reading task gets the ids of the new items at the end of its prompt. It does not get the instructions, so tell its prompt to read the feed document of each item and follow its `instructions`. Use `--type doc://schemas/feed-item` in place of `--glob` to read the items of every feed.
 
 The first pull writes every item that the feed has now. To skip them, deploy the reading task after the first pull. A deploy starts the task at the current end of the change feed.
 

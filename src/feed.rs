@@ -33,13 +33,14 @@ pub const DESCRIPTION_CHARS: usize = 150;
 /// The body of `schemas/feed`.
 pub const FEED_SCHEMA: &str = r#"{
   "title": "Feed",
-  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item document under the feed's _id without .md: feeds/example-com.md has its items under feeds/example-com/.",
+  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item document under the feed's _id without .md: feeds/example-com.md has its items under feeds/example-com/. instructions are for the agent that processes the items of this feed, for example to correct for a known bias of the source; read them before you process an item.",
   "type": "object",
   "required": ["url", "kind"],
   "properties": {
     "url": {"type": "string", "minLength": 1},
     "kind": {"enum": ["rss", "html"]},
     "title": {"type": "string"},
+    "instructions": {"type": "string"},
     "tags": {"type": "array", "items": {"type": "string"}}
   }
 }"#;
@@ -47,7 +48,7 @@ pub const FEED_SCHEMA: &str = r#"{
 /// The body of `schemas/feed-item`.
 pub const ITEM_SCHEMA: &str = r#"{
   "title": "Feed item",
-  "description": "One item that a pull of `feed` wrote, as the feed gave it. content is the item's content or summary, verbatim; for an html feed it is the text of the page.",
+  "description": "One item that a pull of `feed` wrote, as the feed gave it. content is the item's content or summary, verbatim; for an html feed it is the text of the page. Before you process an item, read the instructions of its feed document, if it has them.",
   "type": "object",
   "required": ["feed"],
   "properties": {
@@ -86,6 +87,8 @@ pub struct Feed {
     pub url: String,
     pub kind: Kind,
     pub title: Option<String>,
+    /// For the agent that processes the items.
+    pub instructions: Option<String>,
 }
 
 impl Feed {
@@ -99,6 +102,7 @@ impl Feed {
             url: text("url").unwrap_or_default(),
             kind: Kind::parse(&text("kind").unwrap_or_default())?,
             title: text("title"),
+            instructions: text("instructions"),
         })
     }
 
@@ -275,11 +279,25 @@ pub struct PullError {
     pub error: String,
 }
 
+/// The new items of one feed, with what an agent needs to process them.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct FeedItems {
+    /// `doc://<id>` of the feed.
+    pub feed: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The feed's instructions for the agent that processes its items.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    /// Items that were not seen before, in the order they were written.
+    pub items: Vec<NewItem>,
+}
+
 /// What a pull wrote.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, JsonSchema)]
 pub struct PullReport {
-    /// Items that were not seen before, in the order they were written.
-    pub items: Vec<NewItem>,
+    /// Each feed that has new items, in id order.
+    pub feeds: Vec<FeedItems>,
     /// Feeds that failed. The others were still pulled.
     pub errors: Vec<PullError>,
 }
@@ -345,14 +363,23 @@ pub fn apply(store: &mut Store, feed: &Feed, drafts: Vec<ItemDraft>) -> Result<V
     Ok(new)
 }
 
-/// Apply every gathered feed. One failure never stops the others.
+/// Apply every gathered feed. A feed with no new items is left out of the
+/// report. One failure never stops the others.
 pub fn apply_all(store: &mut Store, gathered: Vec<Result<(Feed, Vec<ItemDraft>), PullError>>) -> PullReport {
     let mut report = PullReport::default();
     for g in gathered {
-        match g.and_then(|(feed, drafts)| {
-            apply(store, &feed, drafts).map_err(|e| PullError { feed: feed.id.clone(), error: e.to_string() })
-        }) {
-            Ok(items) => report.items.extend(items),
+        let applied = g.and_then(|(feed, drafts)| match apply(store, &feed, drafts) {
+            Ok(items) => Ok((feed, items)),
+            Err(e) => Err(PullError { feed: feed.id.clone(), error: e.to_string() }),
+        });
+        match applied {
+            Ok((_, items)) if items.is_empty() => {}
+            Ok((feed, items)) => report.feeds.push(FeedItems {
+                feed: format!("{}{}", DocRef::SCHEME, feed.id),
+                title: feed.title,
+                instructions: feed.instructions,
+                items,
+            }),
             Err(e) => report.errors.push(e),
         }
     }
@@ -376,7 +403,13 @@ mod tests {
     }
 
     fn feed(kind: Kind) -> Feed {
-        Feed { id: "feeds/example-com.md".into(), url: "https://example.com/feed".into(), kind, title: None }
+        Feed {
+            id: "feeds/example-com.md".into(),
+            url: "https://example.com/feed".into(),
+            kind,
+            title: None,
+            instructions: None,
+        }
     }
 
     const RSS: &str = r#"<?xml version="1.0"?>
@@ -498,5 +531,36 @@ mod tests {
         assert_ne!(second[0].href, first[0].href);
         assert_eq!(second[0].description, "Two");
         assert_eq!(store.history("feeds/example-com/page.md", None).unwrap().revisions.len(), 2);
+    }
+
+    #[test]
+    fn apply_all_groups_new_items_by_feed() {
+        let mut store = store();
+        let rss = Feed {
+            title: Some("Example".into()),
+            instructions: Some("This source leans one way; look for the other side.".into()),
+            ..feed(Kind::Rss)
+        };
+        let page = Feed { id: "feeds/page.md".into(), ..feed(Kind::Html) };
+        let gathered = || {
+            vec![
+                Ok((rss.clone(), parse(&rss, RSS.as_bytes()).unwrap())),
+                Ok((page.clone(), parse(&page, b"<p>Page</p>").unwrap())),
+                Err(PullError { feed: "feeds/bad.md".into(), error: "no".into() }),
+            ]
+        };
+        let report = apply_all(&mut store, gathered());
+        assert_eq!(report.errors.len(), 1);
+        assert_eq!(report.feeds.len(), 2);
+        let first = &report.feeds[0];
+        assert_eq!(first.feed, "doc://feeds/example-com.md");
+        assert_eq!(first.title.as_deref(), Some("Example"));
+        assert_eq!(first.instructions, rss.instructions);
+        assert_eq!(first.items.len(), parse(&rss, RSS.as_bytes()).unwrap().len());
+        assert_eq!(report.feeds[1].feed, "doc://feeds/page.md");
+        assert_eq!(report.feeds[1].instructions, None);
+
+        let again = apply_all(&mut store, gathered());
+        assert_eq!(again.feeds, [], "a feed with no new items is left out");
     }
 }
