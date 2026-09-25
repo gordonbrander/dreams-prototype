@@ -29,6 +29,8 @@ pub const PROTECTED_IDS: &[&str] = &[
     "schemas/prompt",
     "schemas/daily",
     "schemas/bookmark",
+    "schemas/feed",
+    "schemas/feed-item",
 ];
 
 pub const DEFAULT_TIMEOUT: &str = "10m";

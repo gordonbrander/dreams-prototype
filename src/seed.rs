@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use crate::doc::PutInput;
 use crate::error::StoreError;
+use crate::feed;
 use crate::prompt::{self, PROMPT_TYPE};
 use crate::runner::{self, RUNNER_TYPE};
 use crate::skill::{self, SKILL_TYPE};
@@ -22,6 +23,8 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("schemas/prompt", prompt::PROMPT_SCHEMA),
     ("schemas/daily", DAILY_SCHEMA),
     ("schemas/bookmark", BOOKMARK_SCHEMA),
+    ("schemas/feed", feed::FEED_SCHEMA),
+    ("schemas/feed-item", feed::ITEM_SCHEMA),
 ];
 
 /// The body of `schemas/daily`: one note per day, see `seed/daily-note.md`.
@@ -95,6 +98,8 @@ pub const RUNNERS: &[(&str, &str, &[&str])] = &[
         ],
     ),
     ("runners/pi", "Pi, print mode", &["pi", "-p", "--no-extensions", "-"]),
+    // Not an agent: pulls every feed, as the task's actor. The prompt is not read.
+    ("runners/feeds", "Pull every feed", &["{exe}", "--json", "feed", "pull"]),
 ];
 
 /// Every built-in document as put input, schemas first so that typed
@@ -169,17 +174,27 @@ pub fn defaults() -> Vec<PutInput> {
         }),
     ];
     // Seeded tasks are templates: each runs only where the user deploys it.
-    let tasks = [json!({
-        "_id": "tasks/brief",
-        "_type": task::TASK_TYPE,
-        "title": "Daily brief",
-        "runner": "doc://runners/claude",
-        "every": "1d",
-        "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content \
-            already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \
-            \"## Brief\", an empty line, and the brief to the end of the note's content, \
-            with the steps in \"Add to a daily note\".",
-    })];
+    let tasks = [
+        json!({
+            "_id": "tasks/brief",
+            "_type": task::TASK_TYPE,
+            "title": "Daily brief",
+            "runner": "doc://runners/claude",
+            "every": "1d",
+            "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content \
+                already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \
+                \"## Brief\", an empty line, and the brief to the end of the note's content, \
+                with the steps in \"Add to a daily note\".",
+        }),
+        json!({
+            "_id": "tasks/pull-feeds",
+            "_type": task::TASK_TYPE,
+            "title": "Pull feeds",
+            "runner": "doc://runners/feeds",
+            "every": "1h",
+            "prompt": "Pull every feed. This runner does not read the prompt.",
+        }),
+    ];
     schemas
         .chain(runners)
         .chain(skills)

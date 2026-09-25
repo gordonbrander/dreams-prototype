@@ -12,6 +12,7 @@ pub mod daemon;
 pub mod db;
 pub mod doc;
 pub mod error;
+pub mod feed;
 pub mod markdown;
 pub mod mcp;
 pub mod prompt;
