@@ -174,7 +174,7 @@ dreams doc put hello.md
 
 `export` writes every current document to `<dir>/<_id>`. The `_id` extension picks the format: `.json` is JSON, `.yaml` and `.yml` are YAML, and all other ids are Markdown with frontmatter. Nested ids make nested folders. Tombstones are skipped.
 
-`import` reads every `.md`, `.markdown`, `.json`, `.yaml`, and `.yml` file under a folder. The extension picks the parser. Only lowercase extensions match. The path relative to the folder, extension included, is the `_id`. So `notes/foo.md` becomes the document `notes/foo.md`, and `data/bar.json` becomes `data/bar.json`. An `_id` in the file that differs from the path is ignored. Files that came from `export` and were not changed are no-ops. Edited files become the next revision. New files are created.
+`import` reads every `.md`, `.markdown`, `.json`, `.yaml`, and `.yml` file under a folder. The extension picks the parser. Only lowercase extensions match. The path relative to the folder, extension included, is the `_id`. So `notes/foo.md` becomes the document `notes/foo.md`, and `data/bar.json` becomes `data/bar.json`. An `_id` in the file that differs from the path is ignored. Files that came from `export` and were not changed are no-ops. Edited files become the next revision. New files are created. Hidden files and folders, such as `.git` and `.obsidian`, are skipped.
 
 Both commands continue past a failing file, report every file, and exit 1 if any failed.
 

@@ -366,6 +366,22 @@ fn export_then_import_round_trip() {
     assert!(!filtered.join("notes").exists());
 }
 
+#[test]
+fn import_skips_hidden_entries() {
+    let sb = Sandbox::new();
+    let dir = sb.dir.join("vault");
+    std::fs::create_dir_all(dir.join(".obsidian")).unwrap();
+    std::fs::create_dir_all(dir.join("notes/.git")).unwrap();
+    std::fs::write(dir.join(".obsidian/app.json"), "{}").unwrap();
+    std::fs::write(dir.join("notes/.git/config.yaml"), "a: 1\n").unwrap();
+    std::fs::write(dir.join(".draft.md"), "hidden\n").unwrap();
+    std::fs::write(dir.join("notes/a.md"), "---\ntitle: A\n---\n").unwrap();
+    let report = sb.json(&["import", dir.to_str().unwrap()], "");
+    let paths: Vec<&str> =
+        report["results"].as_array().unwrap().iter().map(|r| r["path"].as_str().unwrap()).collect();
+    assert_eq!(paths, vec!["notes/a.md"]);
+}
+
 // ---- scheduled tasks ------------------------------------------------------
 
 const FUTURE: &str = "2099-01-01T00:00:00.000Z";
