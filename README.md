@@ -435,7 +435,7 @@ dreams task runs <id>            past runs from every vault, newest first
 dreams task rm <id>              delete the task; its runs stay
 ```
 
-An edit to a task or to its runner, made here or synced from a peer, runs only after the next `task deploy`. `task deploy` with no id deploys every task that is not deployed at its current revisions: tasks with edits, disabled tasks, and dormant tasks from peers. It asks once for all of them. A redeploy keeps the task's schedule and pending changes. `--yes` deploys without asking.
+An edit to a task or to its runner, made here or synced from a peer, runs only after the next `task deploy`. `task deploy` with no id deploys every task that is not deployed at its current revisions: tasks with edits, disabled tasks, and dormant tasks from peers. It asks once for all of them. A redeploy keeps the task's schedule and pending changes. `--yes` deploys without asking. `runner add` names the deployed tasks that run an earlier revision of the runner. `init` and `restore-defaults` name the dormant tasks and the tasks with edits that are not deployed.
 
 `task add --no-deploy` writes the task but does not deploy it here. `task run` on a dormant task fires its current revision once and leaves it dormant. `task add` on an existing id replaces the template; the new revision runs after a deploy. An identical re-add writes nothing. `task rm` deletes the task document, so after a sync the task stops on every vault. A task with sync conflicts cannot deploy until you resolve them.
 
@@ -529,7 +529,7 @@ A pull gives each feed's instructions next to its items. The instructions are no
 
 ### Wake an agent on new items
 
-The seeded runner `runners/feeds` runs `dreams feed pull`. It is not an agent. The seeded task `tasks/pull-feeds` uses it every hour. Like every task, it is dormant until you deploy it. Then add a task that waits for new items:
+The seeded runner `runners/feeds` runs `dreams feed pull`. It is not an agent. The seeded task `tasks/pull-feeds` uses it every hour. Like every task, it is dormant until you deploy it. Deploy it once on each vault: it pulls every feed, and feeds that you add later too. Until you deploy it, `feed add` says so. An agent that adds a feed over MCP calls `deploy_task` for `tasks/pull-feeds`. Then add a task that waits for new items:
 
 ```
 dreams task deploy tasks/pull-feeds

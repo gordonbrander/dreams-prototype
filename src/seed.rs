@@ -187,7 +187,7 @@ pub fn defaults() -> Vec<PutInput> {
                 with the steps in \"Add to a daily note\".",
         }),
         json!({
-            "_id": "tasks/pull-feeds",
+            "_id": feed::PULL_TASK,
             "_type": task::TASK_TYPE,
             "title": "Pull feeds",
             "runner": "doc://runners/feeds",
