@@ -844,7 +844,7 @@ fn resolve_auto_merges_with_a_runner() {
             "--",
             "echo",
             r#"```json
-{"title": "merged", "_rev": "ignored"}
+{"fields": {"title": "merged", "_rev": "ignored"}}
 ```"#,
         ],
         "",
@@ -1113,7 +1113,7 @@ fn sync_resolve_merges_fields_before_the_push() {
 #[test]
 fn sync_resolve_shows_the_merge_and_can_be_declined() {
     let (a, b) = conflicted_vaults();
-    a.ok(&["runner", "add", "runners/echo", "--", "echo", r#"{"title": "merged"}"#], "");
+    a.ok(&["runner", "add", "runners/echo", "--", "echo", r#"{"fields": {"title": "merged"}}"#], "");
     a.answer.set(Some(false));
     let out = a.ok(&["sync", &b.db(), "--resolve", "--runner", "runners/echo"], "");
     assert!(out.contains("not resolved x: declined"), "{out}");
@@ -1174,4 +1174,79 @@ fn doc_resolve_all_merges_every_conflict() {
     let summary = a.json(&["doc", "resolve", "--all", "--auto", "--yes", "--runner", "runners/missing"], "");
     assert_eq!(summary["resolved"], json!([{"id": "x"}]));
     assert_eq!(a.json(&["doc", "conflicts"], "")["docs"], json!([]));
+}
+
+/// Two vaults where both sides changed `content` of `note`: `a_lines` and
+/// `b_lines` replace the last line of a long shared note. Returns (a, b).
+fn content_vaults(a_lines: &str, b_lines: &str) -> (Sandbox, Sandbox) {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    let base: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+    a.ok(&["doc", "put", "-"], &json!({"_id": "note", "title": "Note", "content": base}).to_string());
+    a.ok(&["sync", &b.db()], "");
+    let edit = |lines: &str| json!({"title": "Note", "content": base.replace("line 20\n", lines)}).to_string();
+    a.ok(&["doc", "update", "note", "-"], &edit(a_lines));
+    b.ok(&["doc", "update", "note", "-"], &edit(b_lines));
+    a.ok(&["sync", &b.db()], "");
+    (a, b)
+}
+
+#[test]
+fn content_that_both_sides_changed_in_different_places_merges_by_lines() {
+    let a = Sandbox::new();
+    let b = Sandbox::new();
+    a.ok(&["init"], "");
+    b.ok(&["init"], "");
+    a.ok(&["doc", "put", "-"], r#"{"_id": "x", "content": "one\ntwo\nthree\n"}"#);
+    a.ok(&["sync", &b.db()], "");
+    a.ok(&["doc", "update", "x", "-"], r#"{"content": "ONE\ntwo\nthree\n"}"#);
+    b.ok(&["doc", "update", "x", "-"], r#"{"content": "one\ntwo\nTHREE\n"}"#);
+    let out = a.ok(&["sync", &b.db(), "--resolve", "--yes", "--runner", "runners/missing"], "");
+    assert!(out.contains("resolved x (fields)"), "{out}");
+    assert_eq!(b.json(&["doc", "get", "x"], "")["content"], "ONE\ntwo\nTHREE\n");
+}
+
+#[test]
+fn doc_diff_json_gives_the_work_that_is_left() {
+    let (a, _b) = content_vaults("line 20 a\n", "line 20 b\n");
+    let c = a.json(&["doc", "diff", "note", "--json"], "");
+    assert_eq!(c["settled"]["title"], "Note");
+    assert_eq!(c["contested"][0]["field"], "content");
+    assert_eq!(c["contested"][0]["marked"], true);
+    assert!(c["draft"]["content"].as_str().unwrap().contains("<<<<<<< ours\n"), "{c}");
+    assert_eq!(c["diffs"].as_array().unwrap().len(), 2);
+    let text = a.ok(&["doc", "diff", "note"], "");
+    assert!(text.ends_with("merged by fields: title; to decide: content (markers)\n"), "{text}");
+
+    // a merge file that still has the markers is refused
+    let draft = c["draft"]["content"].as_str().unwrap();
+    let file = a.file("m.json", &json!({"title": "Note", "content": draft}).to_string());
+    let err = a.fails(&["doc", "resolve", "note", &file], "");
+    assert!(err["message"].as_str().unwrap().contains("conflict markers"), "{err}");
+}
+
+#[test]
+fn a_runner_resolves_marked_blocks_with_edits() {
+    let (a, b) = content_vaults("line 20 a\n", "line 20 b\n");
+    let draft = a.json(&["doc", "diff", "note", "--json"], "")["draft"]["content"].as_str().unwrap().to_string();
+    let start = draft.find("<<<<<<< ours").unwrap();
+    let block = &draft[start..];
+    let reply = json!({"edits": [{"old": block, "new": "line 20 a\nline 20 b\n"}]}).to_string();
+    a.ok(&["runner", "add", "runners/echo", "--", "echo", &reply], "");
+    let out = a.ok(&["sync", &b.db(), "--resolve", "--yes", "--runner", "runners/echo"], "");
+    assert!(out.contains("resolved note (doc://runners/echo)"), "{out}");
+    let content = b.json(&["doc", "get", "note"], "")["content"].as_str().unwrap().to_string();
+    let before: String = (1..=19).map(|i| format!("line {i}\n")).collect();
+    assert_eq!(content, format!("{before}line 20 a\nline 20 b\n"), "the text before the block is unchanged");
+
+    // an edit that does not match fails, and the conflict stays
+    let (a, b) = content_vaults("line 20 a\n", "line 20 b\n");
+    let reply = json!({"edits": [{"old": "not in the note", "new": "x"}]}).to_string();
+    a.ok(&["runner", "add", "runners/echo", "--", "echo", &reply], "");
+    let (code, out, _) = a.run(&["sync", &b.db(), "--resolve", "--yes", "--runner", "runners/echo"], "");
+    assert_eq!(code, 1, "{out}");
+    assert!(out.contains("failed note:") && out.contains("old text not found"), "{out}");
+    assert_eq!(a.json(&["doc", "conflicts"], "")["docs"][0]["id"], "note");
 }

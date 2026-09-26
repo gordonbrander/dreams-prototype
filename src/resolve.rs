@@ -1,20 +1,30 @@
-//! Automatic conflict resolution: an agent reads the winner, every
-//! conflicting revision, and their common ancestor, and writes one merged
-//! body. The store then writes the merge on the winner and tombstones the
-//! losers, as `doc resolve` does by hand.
+//! Conflict resolution for agents. `Conflict` is the work that is left
+//! after code merges what it can: fields that only one side changed merge
+//! at once, and `content` merges line by line, with conflict markers where
+//! both sides changed the same lines. An agent decides the rest, and replies
+//! with `fields` and with `edits` that replace each marked block. The store
+//! then writes the merge on the winner and tombstones the losers, as
+//! `doc resolve` does by hand.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::Path;
 
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::diff::{self, Edit};
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::rev::short_rev;
 use crate::runner::{self, Runner};
 use crate::store::Store;
 
 /// The runner `--auto` uses unless told otherwise.
 pub const DEFAULT_RUNNER: &str = "doc://runners/claude.json";
+
+/// The field that merges line by line.
+const CONTENT: &str = "content";
 
 /// A merge an agent proposed, not yet written.
 #[derive(Debug, Clone)]
@@ -25,39 +35,241 @@ pub struct Proposal {
     pub conflicts: Vec<String>,
     pub merged: PutInput,
     /// The pinned reference of the runner revision that wrote the merge.
-    /// `None` when the field merge settled it, so no runner started.
+    /// `None` when code merged every field, so no runner started.
     pub runner: Option<String>,
 }
 
-/// A merge without an agent: each field takes the one change that the sides
-/// made to it. `None` when two sides changed one field in different ways,
-/// or when the sides have different types.
-pub fn field_merge(ancestor: &Doc, leaves: &[Doc]) -> Option<Map<String, Value>> {
-    let first = leaves.first()?;
-    if leaves.iter().any(|d| d.type_path() != first.type_path()) {
-        return None;
+/// A document's conflicts, merged as far as code can.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Conflict {
+    pub id: String,
+    /// The winner's _rev. A merge is written on it.
+    pub winner: String,
+    /// The other live revisions. Pass them to resolve_doc.
+    pub conflicts: Vec<String>,
+    /// The last revision that every side shared. Absent when the sides share none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<String>,
+    /// Fields that code merged: only one side changed them, or `content` merged by lines.
+    pub settled: Map<String, Value>,
+    /// Fields that two sides changed in different ways. Decide these.
+    pub contested: Vec<Contested>,
+    /// The merged body so far: `settled`, plus the winner's value of each
+    /// contested field, and `content` with conflict markers when it is marked.
+    pub draft: Map<String, Value>,
+    /// Each side's body as a unified diff from the ancestor (from the winner without one).
+    pub diffs: Vec<SideDiff>,
+}
+
+/// A field that two sides changed in different ways.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct Contested {
+    pub field: String,
+    /// The ancestor's value. Absent when the ancestor does not have the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ancestor: Option<Value>,
+    /// The value on each side, winner first. Empty when the field is marked.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sides: Vec<SideValue>,
+    /// `content` only: the draft has conflict markers in it. `ours` is the
+    /// winner's lines (or the first side that changed), `theirs` the other side's.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub marked: bool,
+    /// With `marked`: the revisions of the `ours` and the `theirs` lines.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ours: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub theirs: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SideValue {
+    pub rev: String,
+    /// Absent when this side does not have the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct SideDiff {
+    pub from: String,
+    pub to: String,
+    pub diff: String,
+}
+
+/// An agent's decisions for a `Conflict`.
+#[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
+pub struct Reply {
+    /// A value for each contested field that is not marked. null removes the field.
+    /// A contested field that is not here keeps the winner's value.
+    #[serde(default)]
+    pub fields: Map<String, Value>,
+    /// Edits to the marked `content`, applied in order: each `old` is one whole
+    /// marked block, copied exactly, and occurs once; `new` is the merged text.
+    #[serde(default)]
+    pub edits: Vec<Edit>,
+}
+
+impl Conflict {
+    /// The conflicts of `id` as they are now.
+    pub fn read(store: &Store, id: &str) -> Result<Conflict, StoreError> {
+        let (winner, sides, ancestor) = load(store, id)?;
+        Ok(Conflict::from_docs(&winner, &sides, ancestor.as_ref()))
     }
-    let keys: std::collections::BTreeSet<&String> = leaves.iter().flat_map(|d| d.body.keys()).collect();
-    let mut merged = Map::new();
-    for key in keys {
-        let base = ancestor.body.get(key);
-        let mut changes: Vec<Option<&Value>> = Vec::new();
-        for leaf in leaves {
-            let value = leaf.body.get(key);
-            if value != base && !changes.contains(&value) {
-                changes.push(value);
+
+    /// Merge what code can. `sides` excludes the winner.
+    pub fn from_docs(winner: &Doc, sides: &[Doc], ancestor: Option<&Doc>) -> Conflict {
+        let leaves: Vec<&Doc> = std::iter::once(winner).chain(sides).collect();
+        // A change of type changes what the fields mean: compare values only.
+        let same_type = leaves.iter().all(|d| d.type_path() == winner.type_path());
+        let base = ancestor.filter(|_| same_type);
+        let keys: BTreeSet<&String> = leaves.iter().flat_map(|d| d.body.keys()).collect();
+        let (mut settled, mut contested, mut draft) = (Map::new(), Vec::new(), Map::new());
+        for key in keys {
+            let values: Vec<Option<&Value>> = leaves.iter().map(|d| d.body.get(key)).collect();
+            let base_value = base.and_then(|a| a.body.get(key));
+            // The distinct changes from the base, each with the first side that made it.
+            let mut changes: Vec<(Option<&Value>, &str)> = Vec::new();
+            for (value, doc) in values.iter().zip(&leaves) {
+                let changed = match base {
+                    Some(_) => *value != base_value,
+                    None => true,
+                };
+                if changed && !changes.iter().any(|(v, _)| v == value) {
+                    changes.push((*value, &doc.rev));
+                }
+            }
+            let one = match (base, changes.as_slice()) {
+                (Some(_), []) => Some(base_value),
+                (_, [(value, _)]) => Some(*value),
+                _ => None,
+            };
+            if let Some(value) = one {
+                if let Some(v) = value {
+                    settled.insert(key.clone(), v.clone());
+                    draft.insert(key.clone(), v.clone());
+                }
+                continue;
+            }
+            if let (Some(_), CONTENT, [(ours, ours_rev), (theirs, theirs_rev)]) =
+                (base, key.as_str(), changes.as_slice())
+                && let (Some(a), Some(o), Some(t)) = (as_text(base_value), as_text(*ours), as_text(*theirs))
+            {
+                match diff::merge_content(a, o, t) {
+                    Ok(merged) => {
+                        settled.insert(key.clone(), Value::String(merged.clone()));
+                        draft.insert(key.clone(), Value::String(merged));
+                    }
+                    Err(marked) => {
+                        draft.insert(key.clone(), Value::String(marked));
+                        contested.push(Contested {
+                            field: key.clone(),
+                            ancestor: base_value.cloned(),
+                            sides: Vec::new(),
+                            marked: true,
+                            ours: Some(ours_rev.to_string()),
+                            theirs: Some(theirs_rev.to_string()),
+                        });
+                    }
+                }
+                continue;
+            }
+            if let Some(v) = values[0] {
+                draft.insert(key.clone(), v.clone());
+            }
+            contested.push(Contested {
+                field: key.clone(),
+                ancestor: base_value.cloned(),
+                sides: leaves
+                    .iter()
+                    .zip(&values)
+                    .map(|(d, v)| SideValue { rev: d.rev.clone(), value: v.cloned() })
+                    .collect(),
+                marked: false,
+                ours: None,
+                theirs: None,
+            });
+        }
+        Conflict {
+            id: winner.id.clone(),
+            winner: winner.rev.clone(),
+            conflicts: sides.iter().map(|d| d.rev.clone()).collect(),
+            ancestor: ancestor.map(|a| a.rev.clone()),
+            settled,
+            contested,
+            draft,
+            diffs: side_diffs(winner, sides, ancestor),
+        }
+    }
+
+    /// The merged body: the draft with the agent's decisions.
+    pub fn apply(&self, reply: &Reply) -> Result<Map<String, Value>, StoreError> {
+        let mut body = self.draft.clone();
+        let mut marked = false;
+        for c in &self.contested {
+            if c.marked {
+                marked = true;
+                let text = body.get(&c.field).and_then(Value::as_str).unwrap_or_default();
+                let merged = diff::apply_edits(text, &reply.edits)?;
+                body.insert(c.field.clone(), Value::String(merged));
+            } else {
+                match reply.fields.get(&c.field) {
+                    None => {}
+                    Some(Value::Null) => {
+                        body.remove(&c.field);
+                    }
+                    Some(v) => {
+                        body.insert(c.field.clone(), v.clone());
+                    }
+                }
             }
         }
-        let value = match changes.as_slice() {
-            [] => base,
-            [one] => *one,
-            _ => return None,
-        };
-        if let Some(v) = value {
-            merged.insert(key.clone(), v.clone());
+        if !marked && !reply.edits.is_empty() {
+            return Err(StoreError::invalid("edits need content with conflict markers, and it has none"));
         }
+        Ok(body)
     }
-    Some(merged)
+}
+
+/// A text field's value; an absent field is empty text. `None` for other values.
+fn as_text(v: Option<&Value>) -> Option<&str> {
+    match v {
+        None => Some(""),
+        Some(v) => v.as_str(),
+    }
+}
+
+/// The winner, the other live leaves, and the last revision they shared.
+fn load(store: &Store, id: &str) -> Result<(Doc, Vec<Doc>, Option<Doc>), StoreError> {
+    let winner = store.get(id)?;
+    let sides = winner.conflicts.iter().map(|rev| store.get_rev(rev)).collect::<Result<Vec<_>, _>>()?;
+    let ancestor = match common_ancestor(store, &winner.rev, &winner.conflicts)? {
+        Some(rev) if !sides.is_empty() => Some(store.get_rev(&rev)?),
+        _ => None,
+    };
+    Ok((winner, sides, ancestor))
+}
+
+/// Each leaf as a diff from the ancestor, or from the winner without one.
+fn side_diffs(winner: &Doc, sides: &[Doc], ancestor: Option<&Doc>) -> Vec<SideDiff> {
+    if sides.is_empty() {
+        return Vec::new();
+    }
+    let (base, role) = match ancestor {
+        Some(a) => (a, "ancestor"),
+        None => (winner, "winner"),
+    };
+    let base_text = diff::body_text(base.type_path(), &base.body);
+    let from = format!("{} ({role})", short_rev(&base.rev));
+    std::iter::once((winner, "winner"))
+        .chain(sides.iter().map(|d| (d, "conflict")))
+        .filter(|(d, _)| d.rev != base.rev)
+        .map(|(d, role)| {
+            let to = format!("{} ({role})", short_rev(&d.rev));
+            let text = diff::body_text(d.type_path(), &d.body);
+            SideDiff { from: base.rev.clone(), to: d.rev.clone(), diff: diff::unified(&base_text, &text, &from, &to) }
+        })
+        .collect()
 }
 
 /// The newest revision that `winner` and every one of `others` descend
@@ -76,58 +288,98 @@ pub fn common_ancestor(store: &Store, winner: &str, others: &[String]) -> Result
     Ok(chain.get(oldest).cloned())
 }
 
-fn revision_json(doc: &Doc) -> String {
-    let mut doc = doc.clone();
-    doc.conflicts.clear();
-    doc.deleted_conflicts.clear();
-    doc.seq = None;
-    serde_json::to_string_pretty(&doc).expect("documents serialize")
+/// A merge that a person or an agent wrote in full must not keep conflict markers.
+pub fn check_markers(body: &Map<String, Value>) -> Result<(), StoreError> {
+    match body.get(CONTENT).and_then(Value::as_str) {
+        Some(text) if diff::has_markers(text) => Err(StoreError::invalid("merged content still has conflict markers")),
+        _ => Ok(()),
+    }
 }
 
-/// The instructions and the revisions, for the agent's stdin. `leaves[0]`
-/// is the winner.
-pub fn merge_prompt(id: &str, ancestor: Option<&Doc>, leaves: &[Doc]) -> String {
+fn json(v: &impl Serialize) -> String {
+    serde_json::to_string_pretty(v).expect("values serialize")
+}
+
+/// The instructions and the work left, for the agent's stdin.
+pub fn merge_prompt(c: &Conflict) -> String {
     let mut text = format!(
-        "You merge conflicting revisions of the document \"{id}\" in a document vault.\n\
+        "You merge conflicting revisions of the document \"{}\" in a document vault.\n\
          Two copies of the vault edited this document at the same time, and a sync brought the edits together.\n\
-         Each revision below is a JSON object. Fields whose names start with \"_\" are metadata. \
-         The other fields are the document body.\n\n"
+         Code merged every change that only one side made. You decide only what is left.\n\n",
+        c.id
     );
-    match ancestor {
-        Some(a) => text.push_str(&format!(
-            "The common ancestor is the last revision that all sides shared. Compare each side with it to see what that side changed.\n\
-             <ancestor>\n{}\n</ancestor>\n\n",
-            revision_json(a)
-        )),
-        None => text.push_str("The revisions share no common ancestor. Each side created the document separately.\n\n"),
-    }
-    if let Some((winner, others)) = leaves.split_first() {
+    if !c.settled.is_empty() {
         text.push_str(&format!(
-            "The winner is the revision the vault shows now:\n<revision role=\"winner\">\n{}\n</revision>\n\n",
-            revision_json(winner)
+            "These fields are merged. Do not return them:\n<settled>\n{}\n</settled>\n\n",
+            json(&c.settled)
         ));
-        text.push_str("The conflicting revisions:\n");
-        for doc in others {
-            text.push_str(&format!("<revision role=\"conflict\">\n{}\n</revision>\n", revision_json(doc)));
+    }
+    let fields: Vec<&Contested> = c.contested.iter().filter(|f| !f.marked).collect();
+    if !fields.is_empty() {
+        match c.ancestor {
+            Some(_) => text.push_str(
+                "Decide these fields. Each one shows its value in the last revision that the sides shared \
+                 (the ancestor), and its value on each side. A value that is not shown means that the field is not there.\n",
+            ),
+            None => text.push_str(
+                "Decide these fields. The sides share no revision: each side created the document separately. \
+                 A value that is not shown means that the field is not there.\n",
+            ),
         }
+        for f in fields {
+            text.push_str(&format!("<field name=\"{}\">\n", f.field));
+            if let Some(a) = &f.ancestor {
+                text.push_str(&format!("<ancestor>\n{}\n</ancestor>\n", json(a)));
+            }
+            for (i, side) in f.sides.iter().enumerate() {
+                let role = if i == 0 { "winner" } else { "conflict" };
+                match &side.value {
+                    Some(v) => text.push_str(&format!(
+                        "<side rev=\"{}\" role=\"{role}\">\n{}\n</side>\n",
+                        short_rev(&side.rev),
+                        json(v)
+                    )),
+                    None => text.push_str(&format!("<side rev=\"{}\" role=\"{role}\"/>\n", short_rev(&side.rev))),
+                }
+            }
+            text.push_str("</field>\n");
+        }
+        text.push('\n');
+    }
+    if let Some(f) = c.contested.iter().find(|f| f.marked) {
+        let content = c.draft.get(&f.field).and_then(Value::as_str).unwrap_or_default();
+        let rev = |r: &Option<String>| r.as_deref().map(short_rev).unwrap_or_default();
+        text.push_str(&format!(
+            "The field \"{}\" is merged line by line. Where both sides changed the same lines, it has a marked block. \
+             Each marker line starts with 7 or more of one character:\n\
+             - \"<<<<<<< ours\" starts the lines of revision {}.\n\
+             - \"||||||| original\" starts the lines of the ancestor.\n\
+             - \"=======\" starts the lines of revision {}.\n\
+             - \">>>>>>> theirs\" ends the block.\n\
+             <content>\n{content}</content>\n\n",
+            f.field,
+            rev(&f.ours),
+            rev(&f.theirs),
+        ));
     }
     text.push_str(
-        "\nWrite one merged body:\n\
-         - Keep every change that one side made and the other sides did not.\n\
-         - When sides changed the same field in different ways, combine the changes if you can. If you cannot, keep the winner's value.\n\
-         - Merge text fields such as \"content\" line by line, and keep the additions from every side.\n\
-         - \"title\" and \"content\" must be strings. \"tags\" must be a list of strings.\n\
-         - Do not add fields that no revision has.\n\n\
+        "Rules:\n\
+         - For each field that you decide, combine the changes of every side if you can. If you cannot, use the winner's value. \
+         Put the value in \"fields\". null removes the field.\n\
+         - For each marked block, write one edit. \"old\" is the whole block, from its \"<<<<<<< ours\" line through its \
+         \">>>>>>> theirs\" line, copied exactly. \"new\" is the merged text: keep the additions from every side, \
+         and remove the markers. Edit only the marked blocks.\n\
+         - \"title\" and \"content\" must be strings. \"tags\" must be a list of strings.\n\n\
          Do not use any tools, and do not change the vault.\n\
-         Reply with exactly one JSON object: the merged body, with no field whose name starts with \"_\". Write no other text.\n",
+         Reply with exactly one JSON object, and write no other text:\n\
+         {\"fields\": {\"<field>\": <value>}, \"edits\": [{\"old\": \"<block>\", \"new\": \"<merged text>\"}]}\n",
     );
     text
 }
 
-/// The merged body from an agent's reply: the outermost JSON object in the
-/// text, so a code fence or a sentence around it does no harm. Fields that
-/// start with `_` are dropped; the store sets them.
-pub fn parse_merge(text: &str) -> Result<Map<String, Value>, StoreError> {
+/// The agent's reply: the outermost JSON object in the text, so a code
+/// fence or a sentence around it does no harm.
+pub fn parse_reply(text: &str) -> Result<Reply, StoreError> {
     let snippet = || text.chars().take(200).collect::<String>();
     let bad = |why: String| StoreError::Runner { message: format!("{why}; the reply began: {:?}", snippet()) };
     let (Some(start), Some(end)) = (text.find('{'), text.rfind('}')) else {
@@ -137,38 +389,32 @@ pub fn parse_merge(text: &str) -> Result<Map<String, Value>, StoreError> {
         return Err(bad("the reply has no JSON object".into()));
     }
     match serde_json::from_str::<Value>(&text[start..=end]) {
-        Ok(Value::Object(mut map)) => {
-            map.retain(|k, _| !k.starts_with('_'));
-            Ok(map)
+        Ok(v @ Value::Object(_)) => {
+            serde_json::from_value(v).map_err(|e| bad(format!("the reply is not a merge: {e}")))
         }
         Ok(_) => Err(bad("the reply is not a JSON object".into())),
         Err(e) => Err(bad(format!("the reply is not valid JSON: {e}"))),
     }
 }
 
-/// A merge of `id`: the field merge when it settles every field, else the
-/// runner's. `None` when the document has no conflicts. Nothing is written.
+/// A merge of `id`: code's merge when it settles every field, else the
+/// runner's decisions on the rest. `None` when the document has no
+/// conflicts. Nothing is written.
 pub async fn propose(store: &Store, db: &Path, id: &str, runner_ref: &str) -> Result<Option<Proposal>, StoreError> {
-    let winner = store.get(id)?;
-    if winner.conflicts.is_empty() {
+    let (winner, sides, ancestor) = load(store, id)?;
+    if sides.is_empty() {
         return Ok(None);
     }
-    let mut leaves = vec![winner.clone()];
-    for rev in &winner.conflicts {
-        leaves.push(store.get_rev(rev)?);
-    }
-    let ancestor = match common_ancestor(store, &winner.rev, &winner.conflicts)? {
-        Some(rev) => Some(store.get_rev(&rev)?),
-        None => None,
-    };
-    let (body, runner) = match ancestor.as_ref().and_then(|a| field_merge(a, &leaves)) {
-        Some(body) => (body, None),
-        None => {
-            let runner = Runner::get(store, &DocRef::from_cli(runner_ref)?.to_string())?;
-            let prompt = merge_prompt(id, ancestor.as_ref(), &leaves);
-            let reply = runner::invoke(&runner, db, &format!("resolve/{id}"), &prompt).await?;
-            (parse_merge(&reply)?, Some(runner.pinned()))
-        }
+    let conflict = Conflict::from_docs(&winner, &sides, ancestor.as_ref());
+    let (body, runner) = if conflict.contested.is_empty() {
+        (conflict.draft.clone(), None)
+    } else {
+        let runner = Runner::get(store, &DocRef::from_cli(runner_ref)?.to_string())?;
+        let reply = runner::invoke(&runner, db, &format!("resolve/{id}"), &merge_prompt(&conflict)).await?;
+        let body = conflict
+            .apply(&parse_reply(&reply)?)
+            .map_err(|e| StoreError::Runner { message: format!("the merge does not apply: {e}") })?;
+        (body, Some(runner.pinned()))
     };
     let merged = PutInput {
         id: Some(id.to_string()),
@@ -177,7 +423,32 @@ pub async fn propose(store: &Store, db: &Path, id: &str, runner_ref: &str) -> Re
         type_id: winner.type_path().map(str::to_string),
         body,
     };
-    Ok(Some(Proposal { conflicts: winner.conflicts.clone(), winner, merged, runner }))
+    Ok(Some(Proposal { conflicts: conflict.conflicts, winner, merged, runner }))
+}
+
+/// Resolve `id` with an agent's decisions on the conflicts it read. Fails
+/// when the conflicts changed since, so the draft is the one it read.
+pub fn resolve_with(store: &mut Store, id: &str, conflicts: &[String], reply: &Reply) -> Result<Doc, StoreError> {
+    let (winner, sides, ancestor) = load(store, id)?;
+    let conflict = Conflict::from_docs(&winner, &sides, ancestor.as_ref());
+    let (mut want, mut have) = (conflicts.to_vec(), conflict.conflicts.clone());
+    want.sort();
+    have.sort();
+    if want != have {
+        return Err(StoreError::Conflict {
+            id: id.to_string(),
+            parent: Some(winner.rev.clone()),
+            leaves: std::iter::once(winner.rev.clone()).chain(have).collect(),
+            hint: Some("the conflicts changed since they were read; read them again".into()),
+        });
+    }
+    let merged = PutInput {
+        id: Some(id.to_string()),
+        parent: Some(winner.rev.clone()),
+        type_id: winner.type_path().map(str::to_string),
+        body: conflict.apply(reply)?,
+    };
+    store.resolve(id, Some(merged), Some(conflicts))
 }
 
 #[cfg(test)]
@@ -201,65 +472,124 @@ mod tests {
         }
     }
 
+    fn side(rev: &str, body: Value) -> Doc {
+        Doc { conflicts: Vec::new(), ..doc(rev, body) }
+    }
+
+    fn fields(c: &Conflict) -> Vec<&str> {
+        c.contested.iter().map(|f| f.field.as_str()).collect()
+    }
+
     #[test]
-    fn parse_merge_finds_the_object() {
-        let bare = parse_merge(r#"{"title": "t"}"#).unwrap();
-        assert_eq!(bare["title"], "t");
-        let fenced = parse_merge("```json\n{\"title\": \"t\", \"tags\": [\"a\"]}\n```").unwrap();
-        assert_eq!(fenced["tags"], json!(["a"]));
-        let chatty = parse_merge("Here is the merge:\n{\"content\": \"a {b} c\"}\nDone.").unwrap();
-        assert_eq!(chatty["content"], "a {b} c");
-        let meta = parse_merge(r#"{"_id": "x", "_rev": "1-a", "title": "t"}"#).unwrap();
-        assert_eq!(meta.keys().collect::<Vec<_>>(), ["title"]);
-        for bad in ["no json here", "} {", "{not json}", "[1, 2]"] {
-            let err = parse_merge(bad).unwrap_err();
+    fn parse_reply_finds_the_object() {
+        let bare = parse_reply(r#"{"fields": {"title": "t"}}"#).unwrap();
+        assert_eq!(bare.fields["title"], "t");
+        let fenced = parse_reply("```json\n{\"edits\": [{\"old\": \"a\", \"new\": \"b\"}]}\n```").unwrap();
+        assert_eq!(fenced.edits[0].new, "b");
+        let chatty = parse_reply("Here is the merge:\n{\"fields\": {\"content\": \"a {b} c\"}}\nDone.").unwrap();
+        assert_eq!(chatty.fields["content"], "a {b} c");
+        for bad in ["no json here", "} {", "{not json}", "[1, 2]", r#"{"edits": "no"}"#] {
+            let err = parse_reply(bad).unwrap_err();
             assert!(matches!(err, StoreError::Runner { .. }), "{bad}: {err}");
         }
     }
 
     #[test]
-    fn field_merge_takes_the_one_change_to_each_field() {
-        let base = doc("1-a", json!({"title": "t", "content": "c", "tags": ["x"]}));
-        let left = doc("2-b", json!({"title": "left", "content": "c", "tags": ["x"]}));
-        let right = doc("2-c", json!({"title": "t", "content": "right"}));
-        let merged = field_merge(&base, &[left.clone(), right.clone()]).unwrap();
-        assert_eq!(
-            Value::Object(merged),
-            json!({"title": "left", "content": "right"}),
-            "a removed field stays removed"
+    fn fields_that_one_side_changed_settle() {
+        let base = side("1-a", json!({"title": "t", "content": "c", "tags": ["x"]}));
+        let winner = doc("2-b", json!({"title": "left", "content": "c", "tags": ["x"]}));
+        let other = side("2-c", json!({"title": "t", "content": "c"}));
+        let c = Conflict::from_docs(&winner, &[other], Some(&base));
+        assert!(c.contested.is_empty());
+        assert_eq!(Value::Object(c.settled), json!({"title": "left", "content": "c"}), "a removed field stays removed");
+        assert_eq!(c.conflicts, ["2-c"]);
+        assert_eq!(c.ancestor.as_deref(), Some("1-a"));
+        assert_eq!(c.diffs.len(), 2);
+
+        let same = side("2-d", json!({"title": "left", "content": "c", "tags": ["x"]}));
+        let c = Conflict::from_docs(&winner, &[same], Some(&base));
+        assert!(c.contested.is_empty(), "the same change on two sides is one change");
+    }
+
+    #[test]
+    fn content_merges_by_lines() {
+        let base = side("1-a", json!({"content": "one\ntwo\nthree\n"}));
+        let winner = doc("2-b", json!({"content": "ONE\ntwo\nthree\n"}));
+        let apart = side("2-c", json!({"content": "one\ntwo\nTHREE\n"}));
+        let c = Conflict::from_docs(&winner, &[apart], Some(&base));
+        assert!(c.contested.is_empty());
+        assert_eq!(c.settled["content"], "ONE\ntwo\nTHREE\n");
+
+        let winner = doc("2-b", json!({"title": "w", "content": "one\ntwo\nthree\nfour a\n"}));
+        let other = side("2-c", json!({"title": "o", "content": "one\ntwo\nthree\nfour b\n"}));
+        let c = Conflict::from_docs(&winner, &[other], Some(&base));
+        assert_eq!(fields(&c), ["content", "title"]);
+        let content = &c.contested[0];
+        assert!(content.marked && content.sides.is_empty());
+        assert_eq!((content.ours.as_deref(), content.theirs.as_deref()), (Some("2-b"), Some("2-c")));
+        let draft = c.draft["content"].as_str().unwrap();
+        assert!(draft.starts_with("one\ntwo\nthree\n<<<<<<< ours\nfour a\n"), "{draft}");
+        assert_eq!(c.draft["title"], "w", "the draft has the winner's value");
+        assert_eq!(c.contested[1].sides.len(), 2);
+
+        let block = &draft["one\ntwo\nthree\n".len()..];
+        let reply = Reply {
+            fields: serde_json::from_value(json!({"title": "both", "_rev": "x", "tags": ["no"]})).unwrap(),
+            edits: vec![Edit { old: block.into(), new: "four a\nfour b\n".into() }],
+        };
+        let body = c.apply(&reply).unwrap();
+        assert_eq!(Value::Object(body), json!({"title": "both", "content": "one\ntwo\nthree\nfour a\nfour b\n"}));
+        assert!(c.apply(&Reply::default()).unwrap_err().to_string().contains("conflict markers"));
+    }
+
+    #[test]
+    fn some_conflicts_stay_whole() {
+        // three sides that change content: no line merge
+        let base = side("1-a", json!({"content": "c\n"}));
+        let winner = doc("2-b", json!({"content": "b\n"}));
+        let c = Conflict::from_docs(
+            &winner,
+            &[side("2-c", json!({"content": "x\n"})), side("2-d", json!({"content": "y\n"}))],
+            Some(&base),
         );
+        assert!(!c.contested[0].marked && c.contested[0].sides.len() == 3);
+        let err = c.apply(&Reply { edits: vec![Edit { old: "b".into(), new: "z".into() }], ..Default::default() });
+        assert!(err.unwrap_err().to_string().contains("edits need content"));
+        let kept = c.apply(&Reply::default()).unwrap();
+        assert_eq!(kept["content"], "b\n", "a field without a decision keeps the winner's value");
+        let removed =
+            c.apply(&Reply { fields: serde_json::from_value(json!({"content": null})).unwrap(), ..Default::default() });
+        assert!(!removed.unwrap().contains_key("content"));
 
-        let same = doc("2-d", json!({"title": "left", "content": "c", "tags": ["x"]}));
-        let merged = field_merge(&base, &[left.clone(), same]).unwrap();
-        assert_eq!(merged["title"], "left", "the same change on two sides is one change");
+        // no ancestor: only values that every side has settle
+        let winner = doc("1-b", json!({"title": "same", "content": "b\n"}));
+        let c = Conflict::from_docs(&winner, &[side("1-c", json!({"title": "same", "content": "c\n"}))], None);
+        assert_eq!(fields(&c), ["content"]);
+        assert!(!c.contested[0].marked);
+        assert_eq!(c.settled["title"], "same");
 
-        let keeps_tags = doc("2-e", json!({"title": "t", "content": "right", "tags": ["x"]}));
-        let third = doc("3-f", json!({"title": "t", "content": "c", "tags": ["x", "y"]}));
-        let merged = field_merge(&base, &[left.clone(), keeps_tags, third]).unwrap();
-        assert_eq!(Value::Object(merged), json!({"title": "left", "content": "right", "tags": ["x", "y"]}));
-    }
-
-    #[test]
-    fn field_merge_refuses_an_overlap_or_a_type_change() {
-        let base = doc("1-a", json!({"title": "t"}));
-        let left = doc("2-b", json!({"title": "left"}));
-        assert!(field_merge(&base, &[left.clone(), doc("2-c", json!({"title": "right"}))]).is_none());
-        let removed = doc("2-c", json!({}));
-        assert!(field_merge(&base, &[left.clone(), removed]).is_none(), "a removal and an edit overlap");
-        let mut typed = doc("2-d", json!({"title": "t"}));
+        // a changed type: compare values only
+        let mut typed = side("2-c", json!({"title": "t", "tags": ["x"]}));
         typed.type_id = Some("doc://schemas/note?rev=1-x".into());
-        assert!(field_merge(&base, &[left, typed]).is_none());
+        let base = side("1-a", json!({"title": "t"}));
+        let c = Conflict::from_docs(&doc("2-b", json!({"title": "left"})), &[typed], Some(&base));
+        assert_eq!(fields(&c), ["tags", "title"]);
     }
 
     #[test]
-    fn prompt_names_the_ancestor_and_every_leaf() {
-        let ancestor = doc("1-aaa", json!({"title": "base"}));
-        let leaves = [doc("2-bbb", json!({"title": "left"})), doc("2-ccc", json!({"title": "right"}))];
-        let p = merge_prompt("n", Some(&ancestor), &leaves);
-        for needle in ["1-aaa", "base", "2-bbb", "left", "2-ccc", "right", "role=\"winner\"", "role=\"conflict\""] {
-            assert!(p.contains(needle), "missing {needle}");
+    fn prompt_shows_only_what_is_left() {
+        let base = side("1-aaa", json!({"title": "base", "tags": ["t"], "content": "one\n"}));
+        let winner = doc("2-bbb", json!({"title": "left", "tags": ["t", "w"], "content": "one\nleft\n"}));
+        let other = side("2-ccc", json!({"title": "right", "tags": ["t"], "content": "one\nright\n"}));
+        let c = Conflict::from_docs(&winner, &[other], Some(&base));
+        let p = merge_prompt(&c);
+        for needle in
+            ["<settled>", "\"w\"", "<field name=\"title\">", "\"base\"", "role=\"winner\"", "role=\"conflict\""]
+        {
+            assert!(p.contains(needle), "missing {needle}: {p}");
         }
+        assert!(p.contains("revision 2-bbb") && p.contains("revision 2-ccc"), "{p}");
+        assert!(p.contains("<<<<<<< ours\nleft\n"), "{p}");
         assert!(!p.contains("_conflicts"), "metadata the agent does not need is left out");
-        assert!(merge_prompt("n", None, &leaves).contains("no common ancestor"));
     }
 }

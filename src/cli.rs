@@ -233,7 +233,9 @@ enum DocCmd {
         #[arg(long, requires = "all")]
         yes: bool,
     },
-    /// Show each side of a conflict as a diff from the revision that the sides last shared.
+    /// Show each side of a conflict as a diff from the revision that the sides last shared,
+    /// and which fields merge by themselves. With --json: the fields that code merged, the
+    /// fields left to decide, and a draft with conflict markers in `content`.
     Diff { id: String },
     /// Revision history, newest first.
     History {
@@ -1419,6 +1421,7 @@ fn doc_cmd(
                 Some(file) => {
                     let map = read_input(&Input { file: Some(file), format }, stdin)?;
                     let prepared = prepare_write(map, WriteMode::Update)?;
+                    resolve::check_markers(&prepared.input.body)?;
                     if prepared.unchanged { None } else { Some(prepared.input) }
                 }
             };
@@ -1426,33 +1429,21 @@ fn doc_cmd(
             print_doc(out, json, &doc)?;
         }
         DocCmd::Diff { id } => {
-            let winner = store.get(&id)?;
-            let mut diffs = Vec::new();
-            if !winner.conflicts.is_empty() {
-                // Compare each side with the last revision they shared. Without one, with the winner.
-                let (base, base_role) = match resolve::common_ancestor(store, &winner.rev, &winner.conflicts)? {
-                    Some(rev) => (store.get_rev(&rev)?, "ancestor"),
-                    None => (winner.clone(), "winner"),
-                };
-                let base_text = diff::body_text(base.type_path(), &base.body);
-                let from = format!("{} ({base_role})", short_rev(&base.rev));
-                let mut sides = vec![(winner.clone(), "winner")];
-                for rev in &winner.conflicts {
-                    sides.push((store.get_rev(rev)?, "conflict"));
-                }
-                for (side, role) in sides.iter().filter(|(d, _)| d.rev != base.rev) {
-                    let to = format!("{} ({role})", short_rev(&side.rev));
-                    let text = diff::body_text(side.type_path(), &side.body);
-                    let diff = diff::unified(&base_text, &text, &from, &to);
-                    diffs.push(serde_json::json!({ "from": base.rev, "to": side.rev, "diff": diff }));
-                }
-            }
+            let conflict = resolve::Conflict::read(store, &id)?;
             if json {
-                print_json(out, &diffs)?;
-            } else {
-                for d in &diffs {
-                    write!(out, "{}", d["diff"].as_str().unwrap_or_default())?;
+                print_json(out, &conflict)?;
+            } else if !conflict.conflicts.is_empty() {
+                for d in &conflict.diffs {
+                    write!(out, "{}", d.diff)?;
                 }
+                let settled: Vec<String> = conflict.settled.keys().cloned().collect();
+                let contested: Vec<String> = conflict
+                    .contested
+                    .iter()
+                    .map(|c| if c.marked { format!("{} (markers)", c.field) } else { c.field.clone() })
+                    .collect();
+                let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
+                writeln!(out, "merged by fields: {}; to decide: {}", list(&settled), list(&contested))?;
             }
         }
         DocCmd::Conflicts { limit, after } => {
