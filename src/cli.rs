@@ -867,10 +867,14 @@ fn deploy_hints(store: &Store, out: &mut dyn Write, runner: Option<&str>) -> any
         }
     }
     if !dormant.is_empty() {
-        writeln!(out, "dormant here: {}; `dreams task deploy <id>` starts one", dormant.join(", "))?;
+        writeln!(out, "dormant tasks: {}\n.`dreams task deploy <id>` to start one", dormant.join(", "))?;
     }
     if !changed.is_empty() {
-        writeln!(out, "changed: {}; `dreams task deploy` runs the new revisions", changed.join(", "))?;
+        writeln!(
+            out,
+            "changed: {}.\n`dreams task deploy` to update deployed tasks to latest version",
+            changed.join(", ")
+        )?;
     }
     Ok(())
 }
