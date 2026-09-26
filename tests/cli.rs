@@ -846,7 +846,7 @@ fn resolve_auto_merges_with_a_runner() {
             "--",
             "echo",
             r#"```json
-{"fields": {"title": "merged"}}
+{"fields": {"title": "merged", "_rev": "ignored"}}
 ```"#,
         ],
         "",

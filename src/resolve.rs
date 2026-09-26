@@ -126,7 +126,8 @@ pub struct SideDiff {
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct Reply {
     /// A value for each contested field. null removes the field. A contested
-    /// field that is not here keeps the winner's value.
+    /// field that is not here keeps the winner's value. Keys that start with
+    /// `_` are ignored; any other key is an error.
     #[serde(default)]
     pub fields: Map<String, Value>,
     /// Edits to the marked `content`, applied in order: each `old` is one whole
@@ -226,7 +227,8 @@ impl Conflict {
     /// The merged body: the draft with the agent's decisions.
     pub fn apply(&self, reply: &Reply) -> Result<Map<String, Value>, StoreError> {
         let mut body = self.draft.clone();
-        for (key, value) in &reply.fields {
+        // Metadata (`_id`, `_rev`, ...) is never a body field: the store sets it.
+        for (key, value) in reply.fields.iter().filter(|(k, _)| !k.starts_with('_')) {
             if !self.contested.iter().any(|c| c.field == *key) {
                 let why = if key == CONTENT && self.marked.is_some() {
                     "`content` has conflict markers: use `content_edits`".to_string()
@@ -551,6 +553,8 @@ mod tests {
         assert!(err(json!({"content_edits": [{"old": "one\n", "new": "1\n"}]})).contains("still has conflict markers"));
         let unknown = err(json!({"fields": {"tags": ["no"]}, "content_edits": edits}));
         assert!(unknown.contains("\"tags\", which is not a field to decide; decide: title"), "{unknown}");
+        let meta = c.apply(&reply(json!({"fields": {"_rev": "2-b", "_id": "n"}, "content_edits": edits}))).unwrap();
+        assert!(!meta.contains_key("_rev") && !meta.contains_key("_id"), "metadata is ignored");
         assert!(err(json!({"fields": {"content": "x"}, "content_edits": edits})).contains("use `content_edits`"));
     }
 

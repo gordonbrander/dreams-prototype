@@ -369,7 +369,7 @@ Else, `--auto` gives a runner only what is left: the merged fields as context, e
  "content_edits": [{"old": "<<<<<<< ours\n…\n>>>>>>> theirs\n", "new": "the merged lines\n"}]}
 ```
 
-`fields` has a value for each field to decide; `null` removes the field, and a field that is not there keeps the winner's value. Any other field in `fields` is an error. `content_edits` works like a file-edit tool: each `old` is one whole marked block, copied exactly, and must occur once; `new` replaces it. After the edits, no marker may remain. So the agent does not write the note again, and the text outside the blocks does not change. If the reply does not apply, the command fails with an error named `runner`, and nothing is written.
+`fields` has a value for each field to decide; `null` removes the field, and a field that is not there keeps the winner's value. Keys that start with `_` are ignored, because the store sets them. Any other field in `fields` is an error. `content_edits` works like a file-edit tool: each `old` is one whole marked block, copied exactly, and must occur once; `new` replaces it. After the edits, no marker may remain. So the agent does not write the note again, and the text outside the blocks does not change. If the reply does not apply, the command fails with an error named `runner`, and nothing is written.
 
 The default runner is `runners/claude.json`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
 
