@@ -960,7 +960,7 @@ fn feeds_pull_only_new_items() {
     // The default id comes from the origin.
     let advice = "This source leans one way; look for the other side.";
     let doc = sb.json(&["feed", "add", &rss_url, "--title", "Local", "--instructions", advice], "");
-    let rss_id = format!("feeds/{}.md", dreams::feed::origin_slug(&base));
+    let rss_id = format!("feeds/{}.md", dreams::slug::origin_slug(&base));
     assert_eq!(doc["_id"], rss_id.as_str());
     assert_eq!(doc["kind"], "rss");
     // A second add with no flags keeps the fields that it does not give.

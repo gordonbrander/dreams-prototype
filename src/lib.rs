@@ -23,6 +23,7 @@ pub mod runner;
 pub mod schema;
 pub mod seed;
 pub mod skill;
+pub mod slug;
 pub mod store;
 pub mod sync;
 pub mod task;

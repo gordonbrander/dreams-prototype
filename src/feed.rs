@@ -112,19 +112,9 @@ impl Feed {
     }
 }
 
-/// `https://www.Example.com:8080/a?b` to `example-com-8080`: the origin
-/// rules of the bookmark skill.
-pub fn origin_slug(url: &str) -> String {
-    let lower = url.to_lowercase();
-    let rest = lower.split_once("://").map_or(lower.as_str(), |(_, r)| r);
-    let rest = rest.strip_prefix("www.").unwrap_or(rest);
-    let rest = rest.split(['?', '#']).next().unwrap_or_default();
-    slug::slugify(rest.split('/').next().unwrap_or_default())
-}
-
 /// The id `feed add` uses when it is given none: `feeds/<origin-slug>.md`.
 pub fn default_id(url: &str) -> Result<String, StoreError> {
-    match origin_slug(url) {
+    match crate::slug::origin_slug(url) {
         s if s.is_empty() => Err(StoreError::invalid(format!("cannot make an id from {url:?}; pass --id"))),
         s => Ok(format!("feeds/{s}.md")),
     }
@@ -455,11 +445,7 @@ mod tests {
     }
 
     #[test]
-    fn origin_slugs_follow_the_bookmark_rules() {
-        assert_eq!(origin_slug("https://www.example.com/foo/bar?x=1"), "example-com");
-        assert_eq!(origin_slug("http://Example.com/"), "example-com");
-        assert_eq!(origin_slug("https://blog.example.org/2026/09/my_post.html#part-2"), "blog-example-org");
-        assert_eq!(origin_slug("http://localhost:8080/docs"), "localhost-8080");
+    fn default_ids_use_the_origin_slug() {
         assert_eq!(default_id("https://news.ycombinator.com/rss").unwrap(), "feeds/news-ycombinator-com.md");
         assert!(default_id("https://").is_err());
     }
