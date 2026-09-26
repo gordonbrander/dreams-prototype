@@ -1233,7 +1233,7 @@ fn a_runner_resolves_marked_blocks_with_edits() {
     let draft = a.json(&["doc", "diff", "note", "--json"], "")["draft"]["content"].as_str().unwrap().to_string();
     let start = draft.find("<<<<<<< ours").unwrap();
     let block = &draft[start..];
-    let reply = json!({"edits": [{"old": block, "new": "line 20 a\nline 20 b\n"}]}).to_string();
+    let reply = json!({"content_edits": [{"old": block, "new": "line 20 a\nline 20 b\n"}]}).to_string();
     a.ok(&["runner", "add", "runners/echo", "--", "echo", &reply], "");
     let out = a.ok(&["sync", &b.db(), "--resolve", "--yes", "--runner", "runners/echo"], "");
     assert!(out.contains("resolved note (doc://runners/echo)"), "{out}");
@@ -1243,7 +1243,7 @@ fn a_runner_resolves_marked_blocks_with_edits() {
 
     // an edit that does not match fails, and the conflict stays
     let (a, b) = content_vaults("line 20 a\n", "line 20 b\n");
-    let reply = json!({"edits": [{"old": "not in the note", "new": "x"}]}).to_string();
+    let reply = json!({"content_edits": [{"old": "not in the note", "new": "x"}]}).to_string();
     a.ok(&["runner", "add", "runners/echo", "--", "echo", &reply], "");
     let (code, out, _) = a.run(&["sync", &b.db(), "--resolve", "--yes", "--runner", "runners/echo"], "");
     assert_eq!(code, 1, "{out}");

@@ -2,7 +2,7 @@
 //! after code merges what it can: fields that only one side changed merge
 //! at once, and `content` merges line by line, with conflict markers where
 //! both sides changed the same lines. An agent decides the rest, and replies
-//! with `fields` and with `edits` that replace each marked block. The store
+//! with `fields` and with `content_edits` that replace each marked block. The store
 //! then writes the merge on the winner and tombstones the losers, as
 //! `doc resolve` does by hand.
 
@@ -107,7 +107,7 @@ pub struct Reply {
     /// Edits to the marked `content`, applied in order: each `old` is one whole
     /// marked block, copied exactly, and occurs once; `new` is the merged text.
     #[serde(default)]
-    pub edits: Vec<Edit>,
+    pub content_edits: Vec<Edit>,
 }
 
 impl Conflict {
@@ -210,7 +210,7 @@ impl Conflict {
             if c.marked {
                 marked = true;
                 let text = body.get(&c.field).and_then(Value::as_str).unwrap_or_default();
-                let merged = diff::apply_edits(text, &reply.edits)?;
+                let merged = diff::apply_edits(text, &reply.content_edits)?;
                 body.insert(c.field.clone(), Value::String(merged));
             } else {
                 match reply.fields.get(&c.field) {
@@ -224,8 +224,8 @@ impl Conflict {
                 }
             }
         }
-        if !marked && !reply.edits.is_empty() {
-            return Err(StoreError::invalid("edits need content with conflict markers, and it has none"));
+        if !marked && !reply.content_edits.is_empty() {
+            return Err(StoreError::invalid("`content_edits` need content with conflict markers, and it has none"));
         }
         Ok(body)
     }
@@ -366,13 +366,13 @@ pub fn merge_prompt(c: &Conflict) -> String {
         "Rules:\n\
          - For each field that you decide, combine the changes of every side if you can. If you cannot, use the winner's value. \
          Put the value in \"fields\". null removes the field.\n\
-         - For each marked block, write one edit. \"old\" is the whole block, from its \"<<<<<<< ours\" line through its \
+         - For each marked block, write one edit in \"content_edits\". \"old\" is the whole block, from its \"<<<<<<< ours\" line through its \
          \">>>>>>> theirs\" line, copied exactly. \"new\" is the merged text: keep the additions from every side, \
          and remove the markers. Edit only the marked blocks.\n\
          - \"title\" and \"content\" must be strings. \"tags\" must be a list of strings.\n\n\
          Do not use any tools, and do not change the vault.\n\
          Reply with exactly one JSON object, and write no other text:\n\
-         {\"fields\": {\"<field>\": <value>}, \"edits\": [{\"old\": \"<block>\", \"new\": \"<merged text>\"}]}\n",
+         {\"fields\": {\"<field>\": <value>}, \"content_edits\": [{\"old\": \"<block>\", \"new\": \"<merged text>\"}]}\n",
     );
     text
 }
@@ -484,11 +484,11 @@ mod tests {
     fn parse_reply_finds_the_object() {
         let bare = parse_reply(r#"{"fields": {"title": "t"}}"#).unwrap();
         assert_eq!(bare.fields["title"], "t");
-        let fenced = parse_reply("```json\n{\"edits\": [{\"old\": \"a\", \"new\": \"b\"}]}\n```").unwrap();
-        assert_eq!(fenced.edits[0].new, "b");
+        let fenced = parse_reply("```json\n{\"content_edits\": [{\"old\": \"a\", \"new\": \"b\"}]}\n```").unwrap();
+        assert_eq!(fenced.content_edits[0].new, "b");
         let chatty = parse_reply("Here is the merge:\n{\"fields\": {\"content\": \"a {b} c\"}}\nDone.").unwrap();
         assert_eq!(chatty.fields["content"], "a {b} c");
-        for bad in ["no json here", "} {", "{not json}", "[1, 2]", r#"{"edits": "no"}"#] {
+        for bad in ["no json here", "} {", "{not json}", "[1, 2]", r#"{"content_edits": "no"}"#] {
             let err = parse_reply(bad).unwrap_err();
             assert!(matches!(err, StoreError::Runner { .. }), "{bad}: {err}");
         }
@@ -535,7 +535,7 @@ mod tests {
         let block = &draft["one\ntwo\nthree\n".len()..];
         let reply = Reply {
             fields: serde_json::from_value(json!({"title": "both", "_rev": "x", "tags": ["no"]})).unwrap(),
-            edits: vec![Edit { old: block.into(), new: "four a\nfour b\n".into() }],
+            content_edits: vec![Edit { old: block.into(), new: "four a\nfour b\n".into() }],
         };
         let body = c.apply(&reply).unwrap();
         assert_eq!(Value::Object(body), json!({"title": "both", "content": "one\ntwo\nthree\nfour a\nfour b\n"}));
@@ -553,8 +553,11 @@ mod tests {
             Some(&base),
         );
         assert!(!c.contested[0].marked && c.contested[0].sides.len() == 3);
-        let err = c.apply(&Reply { edits: vec![Edit { old: "b".into(), new: "z".into() }], ..Default::default() });
-        assert!(err.unwrap_err().to_string().contains("edits need content"));
+        let err = c.apply(&Reply {
+            content_edits: vec![Edit { old: "b".into(), new: "z".into() }],
+            ..Default::default()
+        });
+        assert!(err.unwrap_err().to_string().contains("`content_edits` need content"));
         let kept = c.apply(&Reply::default()).unwrap();
         assert_eq!(kept["content"], "b\n", "a field without a decision keeps the winner's value");
         let removed =
