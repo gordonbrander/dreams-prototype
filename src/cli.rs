@@ -93,7 +93,7 @@ enum Command {
     /// files are no-ops; edited files become the next revision.
     Import { dir: PathBuf },
     /// Copy every revision of the vault at PEER that this vault does not have.
-    /// A task that arrives is dormant here until `task enable`. Concurrent edits
+    /// A task that arrives is dormant here until `task deploy`. Concurrent edits
     /// become conflicts: see `_conflicts` in `doc get` and `doc resolve`.
     Pull { peer: PathBuf },
     /// Pull from the vault at PEER, then push to it. Afterwards both hold the same revisions.
@@ -431,6 +431,9 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
             for id in seeded {
                 writeln!(out, "seeded {id}")?;
             }
+            if !json {
+                deploy_hints(&store, out, None)?;
+            }
         }
         Command::RestoreDefaults => {
             let mut store = Store::open(&cli.db)?;
@@ -443,6 +446,9 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
                 for id in seeded {
                     writeln!(out, "seeded {id}")?;
                 }
+            }
+            if !json {
+                deploy_hints(&store, out, None)?;
             }
         }
         Command::Serve => {
@@ -848,6 +854,28 @@ fn deploy(store: &mut Store, plan: Vec<Deploy>, yes: bool, confirm: Confirm) -> 
     Ok(Some(task::apply_deploy(store, &plan)?))
 }
 
+/// Name the tasks that need `task deploy` on this vault. With `runner`,
+/// only deployed tasks whose runner is that runner and changed.
+fn deploy_hints(store: &Store, out: &mut dyn Write, runner: Option<&str>) -> anyhow::Result<()> {
+    let now = store.now()?;
+    let runs = |s: &TaskState| runner.is_none_or(|r| DocRef::path_of(&s.runner) == format!("{}{r}", DocRef::SCHEME));
+    let (mut dormant, mut changed) = (Vec::new(), Vec::new());
+    for e in task::evaluate(store, &now, None)? {
+        match &e.state {
+            None if runner.is_none() => dormant.push(e.task.id),
+            Some(s) if s.enabled && e.drift && runs(s) => changed.push(e.task.id),
+            _ => {}
+        }
+    }
+    if !dormant.is_empty() {
+        writeln!(out, "dormant here: {}; `dreams task deploy <id>` starts one", dormant.join(", "))?;
+    }
+    if !changed.is_empty() {
+        writeln!(out, "changed: {}; `dreams task deploy` runs the new revisions", changed.join(", "))?;
+    }
+    Ok(())
+}
+
 fn print_deployed(out: &mut dyn Write, states: &[TaskState]) -> io::Result<()> {
     for s in states {
         writeln!(out, "deployed {} {}", s.task_id, short_rev(&s.task_rev))?;
@@ -901,6 +929,9 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
                 print_json(out, &doc)?;
             } else {
                 writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+                if status == WriteStatus::Updated {
+                    deploy_hints(store, out, Some(&runner_id))?;
+                }
             }
         }
         RunnerCmd::List => {
@@ -996,6 +1027,13 @@ fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) ->
                 print_json(out, &doc)?;
             } else {
                 writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+                if !task::state(store, feed::PULL_TASK)?.is_some_and(|s| s.enabled) {
+                    writeln!(
+                        out,
+                        "feeds are not pulled on a schedule here; run `dreams task deploy {}`",
+                        feed::PULL_TASK
+                    )?;
+                }
             }
         }
         FeedCmd::List => {

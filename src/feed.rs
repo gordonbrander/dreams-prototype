@@ -22,6 +22,8 @@ use crate::store::Store;
 /// Seeded schema documents, as type paths.
 pub const FEED_TYPE: &str = "doc://schemas/feed";
 pub const ITEM_TYPE: &str = "doc://schemas/feed-item";
+/// The seeded task that pulls every feed, once it is deployed.
+pub const PULL_TASK: &str = "tasks/pull-feeds";
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
@@ -33,7 +35,7 @@ pub const DESCRIPTION_CHARS: usize = 150;
 /// The body of `schemas/feed`.
 pub const FEED_SCHEMA: &str = r#"{
   "title": "Feed",
-  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item document under the feed's _id without .md: feeds/example-com.md has its items under feeds/example-com/. instructions are for the agent that processes the items of this feed, for example to correct for a known bias of the source; read them before you process an item.",
+  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. The task tasks/pull-feeds pulls every feed on a schedule, on a vault where it is deployed. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item document under the feed's _id without .md: feeds/example-com.md has its items under feeds/example-com/. instructions are for the agent that processes the items of this feed, for example to correct for a known bias of the source; read them before you process an item.",
   "type": "object",
   "required": ["url", "kind"],
   "properties": {

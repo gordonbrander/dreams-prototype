@@ -391,7 +391,8 @@ fn add_test_runners(sb: &Sandbox) {
 fn seed_writes_the_built_in_documents_again() {
     let sb = Sandbox::new();
     sb.ok(&["init"], "");
-    assert_eq!(sb.ok(&["restore-defaults"], ""), "nothing to seed\n");
+    let out = sb.ok(&["restore-defaults"], "");
+    assert!(out.starts_with("nothing to seed\n"), "{out}");
     let skill = sb.file(
         "skill.json",
         r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#,
@@ -401,7 +402,7 @@ fn seed_writes_the_built_in_documents_again() {
     // other commands leave the edit and the deletion as they are
     assert_eq!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"], "y");
     let out = sb.ok(&["restore-defaults"], "");
-    assert_eq!(out, "seeded runners/pi\nseeded skills/daily-note\n");
+    assert!(out.starts_with("seeded runners/pi\nseeded skills/daily-note\n"), "{out}");
     assert!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"].as_str().unwrap().contains("daily"));
     assert_eq!(sb.json(&["restore-defaults"], "")["seeded"], serde_json::json!([]));
     // init also writes the defaults again
@@ -946,6 +947,40 @@ const FEED_RSS: &str = r#"<?xml version="1.0"?>
   <item><title>Two</title><guid>two</guid><description>The second item</description></item>
   <item><title>One</title><guid>one</guid><description>The first item</description></item>
 </channel></rss>"#;
+
+#[test]
+fn commands_name_the_tasks_that_need_a_deploy() {
+    let sb = Sandbox::new();
+    let out = sb.ok(&["init"], "");
+    let dormant = out.lines().find(|l| l.starts_with("dormant here: ")).unwrap_or_else(|| panic!("{out}"));
+    assert!(dormant.contains(dreams::feed::PULL_TASK), "{out}");
+
+    // One deploy of the pull task covers every feed.
+    let hint = format!("task deploy {}", dreams::feed::PULL_TASK);
+    let out = sb.ok(&["feed", "add", "https://one.example/rss"], "");
+    assert!(out.contains(&hint), "{out}");
+    let doc = sb.json(&["feed", "add", "https://one.example/rss", "--title", "One"], "");
+    assert_eq!(doc["title"], "One", "--json prints only the document");
+    sb.ok(&["task", "deploy", dreams::feed::PULL_TASK, "--yes"], "");
+    let out = sb.ok(&["feed", "add", "https://two.example/rss"], "");
+    assert!(!out.contains(&hint), "{out}");
+    let out = sb.ok(&["restore-defaults"], "");
+    assert!(!out.contains(dreams::feed::PULL_TASK), "{out}");
+
+    // A runner edit names the deployed tasks that still run the old revision.
+    sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "");
+    sb.ok(&["runner", "add", "runners/other", "--", "cat"], "");
+    let prompt = sb.file("prompt.md", "Hello.");
+    sb.ok(&["task", "add", "t1", "--runner", "runners/cat", "--every", "1h", "--yes", &prompt], "");
+    sb.ok(&["task", "add", "t2", "--runner", "runners/other", "--every", "1h", "--yes", &prompt], "");
+    assert!(!sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "").contains("changed:"));
+    let out = sb.ok(&["runner", "add", "runners/cat", "--", "cat", "-u"], "");
+    let changed = out.lines().find(|l| l.starts_with("changed: ")).unwrap_or_else(|| panic!("{out}"));
+    assert!(changed.contains("t1") && !changed.contains("t2"), "{out}");
+    assert!(!out.contains("dormant"), "{out}");
+    sb.ok(&["task", "deploy", "t1", "--yes"], "");
+    assert!(!sb.ok(&["restore-defaults"], "").contains("changed:"));
+}
 
 #[test]
 fn feeds_pull_only_new_items() {
