@@ -93,7 +93,7 @@ pub struct SearchResult {
 
 impl From<Doc> for SearchResult {
     fn from(d: Doc) -> Self {
-        let title = d.str_field("title").map(str::to_string);
+        let title = d.field::<String>("title");
         SearchResult {
             id: d.id,
             rev: d.rev,

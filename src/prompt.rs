@@ -37,7 +37,7 @@ pub struct Prompt {
 impl Prompt {
     /// A prompt from a document, or `None` when a field is missing.
     pub fn from_doc(doc: &Doc) -> Option<Prompt> {
-        let field = |key: &str| doc.str_field(key).map(str::to_string);
+        let field = |key: &str| doc.field::<String>(key);
         Some(Prompt { name: field("name")?, description: field("description")?, content: field("content")? })
     }
 }

@@ -96,7 +96,7 @@ impl Feed {
         if doc.type_path() != Some(FEED_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {FEED_TYPE} document", doc.id)));
         }
-        let text = |key: &str| doc.str_field(key).map(str::to_string);
+        let text = |key: &str| doc.field::<String>(key);
         Ok(Feed {
             id: doc.id.clone(),
             url: text("url").unwrap_or_default(),
@@ -139,7 +139,7 @@ pub struct NewItem {
 
 impl NewItem {
     fn of(kind: Kind, doc: &Doc) -> NewItem {
-        let text = |key: &str| doc.str_field(key).unwrap_or_default();
+        let text = |key: &str| doc.field::<&str>(key).unwrap_or_default();
         let content = match kind {
             // Feed content is often HTML.
             Kind::Rss => html2text::config::plain_no_decorate()

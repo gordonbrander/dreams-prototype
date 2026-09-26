@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::doc::{Doc, DocRef};
 use crate::error::StoreError;
@@ -67,16 +67,11 @@ impl Runner {
         if doc.type_path() != Some(RUNNER_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {RUNNER_TYPE} document", doc.id)));
         }
-        let argv: Vec<String> = doc
-            .body
-            .get("argv")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_default();
+        let argv: Vec<String> = doc.field("argv").unwrap_or_default();
         if argv.is_empty() {
             return Err(StoreError::invalid(format!("runner {} has an empty argv", doc.id)));
         }
-        let timeout = doc.str_field("timeout").unwrap_or(DEFAULT_TIMEOUT);
+        let timeout = doc.field::<&str>("timeout").unwrap_or(DEFAULT_TIMEOUT);
         Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
     }
 
@@ -196,6 +191,7 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn ctx() -> Context {
         Context {

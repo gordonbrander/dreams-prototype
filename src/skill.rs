@@ -49,7 +49,7 @@ impl Skill {
     /// A skill from a document, or `None` when a field is missing. The
     /// schema requires the fields, so `None` means the document is not a skill.
     pub fn from_doc(doc: &Doc) -> Option<Skill> {
-        let field = |key: &str| doc.str_field(key);
+        let field = |key: &str| doc.field::<&str>(key);
         let (name, description, content) = (field("name")?, field("description")?, field("content")?);
         let mut fm = Mapping::new();
         fm.insert(Yaml::String("name".into()), Yaml::String(name.into()));

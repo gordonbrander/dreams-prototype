@@ -121,9 +121,26 @@ impl Doc {
         self.type_id.as_deref().map(DocRef::path_of)
     }
 
-    /// The body field `key`, when it is a string.
-    pub fn str_field(&self, key: &str) -> Option<&str> {
-        self.body.get(key).and_then(Value::as_str)
+    /// The body field `key` as `T`. The key is not parsed. None when the
+    /// field is missing or is not a `T`.
+    pub fn field<'a, T: Deserialize<'a>>(&'a self, key: &str) -> Option<T> {
+        self.field_in(&[key])
+    }
+
+    /// The body value at `path` as `T`, for example `["meta", "score"]`. A
+    /// segment indexes an array when the value there is an array:
+    /// `["tags", "0"]`. None when the path is missing or the value is not a `T`.
+    pub fn field_in<'a, T: Deserialize<'a>>(&'a self, path: &[&str]) -> Option<T> {
+        let (first, rest) = path.split_first()?;
+        let mut value = self.body.get(*first)?;
+        for segment in rest {
+            value = match value {
+                Value::Object(map) => map.get(*segment)?,
+                Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+                _ => return None,
+            };
+        }
+        T::deserialize(value).ok()
     }
 }
 
@@ -236,6 +253,29 @@ mod tests {
 
     fn input(v: Value) -> PutInput {
         serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn field_reads_typed_values_by_key_and_path() {
+        let doc: Doc = serde_json::from_value(json!({
+            "_id": "a.md", "_rev": "1-ab", "_created_at": "2026-09-26T00:00:00Z",
+            "title": "Hi", "done": true, "a.b": 1,
+            "meta": {"score": 2.5}, "tags": ["x", "y"],
+        }))
+        .unwrap();
+        assert_eq!(doc.field::<&str>("title"), Some("Hi"));
+        assert_eq!(doc.field::<String>("title"), Some("Hi".to_string()));
+        assert_eq!(doc.field::<bool>("done"), Some(true));
+        assert_eq!(doc.field::<i64>("a.b"), Some(1), "a key is not parsed");
+        assert_eq!(doc.field_in::<f64>(&["meta", "score"]), Some(2.5));
+        assert_eq!(doc.field_in::<&str>(&["tags", "1"]), Some("y"));
+        assert_eq!(doc.field::<Vec<&str>>("tags"), Some(vec!["x", "y"]));
+        assert_eq!(doc.field::<bool>("title"), None, "wrong type");
+        assert_eq!(doc.field::<String>("missing"), None);
+        assert_eq!(doc.field_in::<String>(&["meta", "missing"]), None);
+        assert_eq!(doc.field_in::<String>(&["title", "0"]), None, "not an object or array");
+        assert_eq!(doc.field_in::<&str>(&["tags", "x"]), None, "not an index");
+        assert_eq!(doc.field_in::<String>(&[]), None);
     }
 
     #[test]

@@ -588,14 +588,10 @@ const RESOURCE_PAGE: usize = 1000;
 /// How often a `subscriptions/listen` stream checks the vault.
 const LISTEN_POLL: Duration = Duration::from_secs(1);
 
-fn title_of(doc: &Doc) -> Option<String> {
-    doc.str_field("title").map(str::to_string)
-}
-
 /// A current document as a listed resource.
 fn doc_resource(doc: &Doc) -> Resource {
     let resource = Resource::new(DocRef::uri(&doc.id), &doc.id).with_mime_type("text/markdown");
-    match title_of(doc) {
+    match doc.field::<String>("title") {
         Some(title) => resource.with_title(title),
         None => resource,
     }
@@ -638,7 +634,7 @@ struct Changed {
 impl Watch {
     fn new(store: &Store) -> Result<Watch, StoreError> {
         let seq = store.last_seq()?;
-        let docs = store.list_all(None)?.iter().map(|d| (d.id.clone(), title_of(d))).collect();
+        let docs = store.list_all(None)?.iter().map(|d| (d.id.clone(), d.field::<String>("title"))).collect();
         let skills = skill::list(store)?.into_iter().map(|s| (s.uri.clone(), s)).collect();
         Ok(Watch { seq, docs, prompts: prompt::list(store)?, skills })
     }
@@ -664,7 +660,7 @@ impl Watch {
         }
         for id in ids {
             let now = match store.get(&id) {
-                Ok(doc) => Some(title_of(&doc)),
+                Ok(doc) => Some(doc.field::<String>("title")),
                 Err(StoreError::NotFound { .. } | StoreError::Deleted { .. }) => None,
                 Err(e) => return Err(e),
             };
