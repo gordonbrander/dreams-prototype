@@ -5,8 +5,6 @@
 
 use std::collections::HashSet;
 
-use serde_json::Value;
-
 use crate::doc::Doc;
 use crate::error::StoreError;
 use crate::store::Store;
@@ -39,7 +37,7 @@ pub struct Prompt {
 impl Prompt {
     /// A prompt from a document, or `None` when a field is missing.
     pub fn from_doc(doc: &Doc) -> Option<Prompt> {
-        let field = |key: &str| doc.body.get(key).and_then(Value::as_str).map(str::to_string);
+        let field = |key: &str| doc.field::<String>(key);
         Some(Prompt { name: field("name")?, description: field("description")?, content: field("content")? })
     }
 }

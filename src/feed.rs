@@ -13,10 +13,10 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::hash::sha256_hex;
 use crate::store::Store;
 
 /// Seeded schema documents, as type paths.
@@ -96,7 +96,7 @@ impl Feed {
         if doc.type_path() != Some(FEED_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {FEED_TYPE} document", doc.id)));
         }
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).map(str::to_string);
+        let text = |key: &str| doc.field::<String>(key);
         Ok(Feed {
             id: doc.id.clone(),
             url: text("url").unwrap_or_default(),
@@ -112,19 +112,9 @@ impl Feed {
     }
 }
 
-/// `https://www.Example.com:8080/a?b` to `example-com-8080`: the origin
-/// rules of the bookmark skill.
-pub fn origin_slug(url: &str) -> String {
-    let lower = url.to_lowercase();
-    let rest = lower.split_once("://").map_or(lower.as_str(), |(_, r)| r);
-    let rest = rest.strip_prefix("www.").unwrap_or(rest);
-    let rest = rest.split(['?', '#']).next().unwrap_or_default();
-    slug::slugify(rest.split('/').next().unwrap_or_default())
-}
-
 /// The id `feed add` uses when it is given none: `feeds/<origin-slug>.md`.
 pub fn default_id(url: &str) -> Result<String, StoreError> {
-    match origin_slug(url) {
+    match crate::slug::origin_slug(url) {
         s if s.is_empty() => Err(StoreError::invalid(format!("cannot make an id from {url:?}; pass --id"))),
         s => Ok(format!("feeds/{s}.md")),
     }
@@ -149,7 +139,7 @@ pub struct NewItem {
 
 impl NewItem {
     fn of(kind: Kind, doc: &Doc) -> NewItem {
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).unwrap_or_default();
+        let text = |key: &str| doc.field::<&str>(key).unwrap_or_default();
         let content = match kind {
             // Feed content is often HTML.
             Kind::Rss => html2text::config::plain_no_decorate()
@@ -160,24 +150,9 @@ impl NewItem {
         NewItem {
             href: DocRef::pinned(&doc.id, &doc.rev).to_string(),
             title: text("title").to_string(),
-            description: clip_words(&content, DESCRIPTION_CHARS),
+            description: crate::text::truncate(&content, DESCRIPTION_CHARS),
         }
     }
-}
-
-/// Collapse whitespace, then cut to `max` characters, with `…` when cut.
-fn clip_words(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max {
-        return flat;
-    }
-    let mut cut: String = flat.chars().take(max).collect();
-    cut.push('…');
-    cut
-}
-
-fn key(text: &str) -> String {
-    Sha256::digest(text.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Turn fetched bytes into the items to write. Pure.
@@ -242,7 +217,7 @@ fn parse_entries(feed: &Feed, feed_ref: &str, bytes: &[u8]) -> Result<Vec<ItemDr
                 body.insert(name.into(), Value::String(v));
             }
         }
-        drafts.push(ItemDraft { id: format!("{}/{}.md", feed.base(), key(&seen_as)), body });
+        drafts.push(ItemDraft { id: format!("{}/{}.md", feed.base(), sha256_hex(seen_as.as_bytes())), body });
     }
     Ok(drafts)
 }
@@ -361,7 +336,7 @@ pub fn apply_all(store: &mut Store, gathered: Vec<Result<(Feed, Vec<ItemDraft>),
         match applied {
             Ok((_, items)) if items.is_empty() => {}
             Ok((feed, items)) => report.feeds.push(FeedItems {
-                feed: format!("{}{}", DocRef::SCHEME, feed.id),
+                feed: DocRef::uri(&feed.id),
                 title: feed.title,
                 instructions: feed.instructions,
                 items,
@@ -421,17 +396,17 @@ mod tests {
         let titles: Vec<&str> = drafts.iter().map(|d| d.body["title"].as_str().unwrap()).collect();
         assert_eq!(titles, ["Only a title", "No guid", "Newest"]);
         let newest = &drafts[2];
-        assert_eq!(newest.id, format!("feeds/example-com/{}.md", key("g-2")));
+        assert_eq!(newest.id, format!("feeds/example-com/{}.md", sha256_hex(b"g-2")));
         assert_eq!(newest.body["guid"], "g-2");
         assert_eq!(newest.body["url"], "https://example.com/2");
         assert_eq!(newest.body["feed"], "doc://feeds/example-com.md");
         assert_eq!(newest.body["content"], "<p>Second <b>post</b></p>");
         assert!(newest.body["published"].as_str().unwrap().starts_with("2026-09-22T10:00:00"));
         // No guid: the link is the key.
-        assert_eq!(drafts[1].id, format!("feeds/example-com/{}.md", key("https://example.com/1")));
+        assert_eq!(drafts[1].id, format!("feeds/example-com/{}.md", sha256_hex(b"https://example.com/1")));
         assert!(!drafts[1].body.contains_key("guid"));
         // No guid and no link: the title and date are the key.
-        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", key("Only a title\n")));
+        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", sha256_hex(b"Only a title\n")));
         assert_eq!(parse(&f, RSS.as_bytes()).unwrap(), drafts, "a second parse gives the same drafts");
     }
 
@@ -439,7 +414,7 @@ mod tests {
     fn atom_entries_parse() {
         let drafts = parse(&feed(Kind::Rss), ATOM.as_bytes()).unwrap();
         assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", key("urn:entry:1")));
+        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", sha256_hex(b"urn:entry:1")));
         assert_eq!(drafts[0].body["url"], "https://example.com/e1");
         assert_eq!(drafts[0].body["content"], "<p>Body</p>");
     }
@@ -459,22 +434,9 @@ mod tests {
     }
 
     #[test]
-    fn origin_slugs_follow_the_bookmark_rules() {
-        assert_eq!(origin_slug("https://www.example.com/foo/bar?x=1"), "example-com");
-        assert_eq!(origin_slug("http://Example.com/"), "example-com");
-        assert_eq!(origin_slug("https://blog.example.org/2026/09/my_post.html#part-2"), "blog-example-org");
-        assert_eq!(origin_slug("http://localhost:8080/docs"), "localhost-8080");
+    fn default_ids_use_the_origin_slug() {
         assert_eq!(default_id("https://news.ycombinator.com/rss").unwrap(), "feeds/news-ycombinator-com.md");
         assert!(default_id("https://").is_err());
-    }
-
-    #[test]
-    fn descriptions_are_plain_short_text() {
-        assert_eq!(clip_words("  a \n\n b\tc ", 150), "a b c");
-        let long = "é".repeat(200);
-        let cut = clip_words(&long, 150);
-        assert_eq!(cut.chars().count(), 151);
-        assert!(cut.ends_with('…'));
     }
 
     #[test]

@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::doc::{Doc, DocRef};
 use crate::error::StoreError;
@@ -67,16 +67,11 @@ impl Runner {
         if doc.type_path() != Some(RUNNER_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {RUNNER_TYPE} document", doc.id)));
         }
-        let argv: Vec<String> = doc
-            .body
-            .get("argv")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).map(str::to_string).collect())
-            .unwrap_or_default();
+        let argv: Vec<String> = doc.field("argv").unwrap_or_default();
         if argv.is_empty() {
-            return Err(StoreError::invalid(format!("runner {} has an empty argv", doc.id)));
+            return Err(StoreError::invalid(format!("runner {}: argv must be a non-empty array of strings", doc.id)));
         }
-        let timeout = doc.body.get("timeout").and_then(Value::as_str).unwrap_or(DEFAULT_TIMEOUT);
+        let timeout = doc.field::<&str>("timeout").unwrap_or(DEFAULT_TIMEOUT);
         Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
     }
 
@@ -196,6 +191,7 @@ impl Context {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Value;
 
     fn ctx() -> Context {
         Context {
@@ -250,6 +246,13 @@ mod tests {
         assert_eq!(r.argv, ["cat"]);
         assert_eq!(r.timeout_secs, 120);
         assert_eq!(r.pinned(), "doc://runners/x?rev=1-a");
+        for argv in [json!([]), json!("cat"), json!(["cat", 5])] {
+            doc.body.insert("argv".into(), argv.clone());
+            let err = Runner::from_doc(&doc).unwrap_err().to_string();
+            assert!(err.contains("argv must be a non-empty array of strings"), "{argv}: {err}");
+        }
+        doc.body.remove("argv");
+        assert!(Runner::from_doc(&doc).is_err(), "a missing argv");
         doc.type_id = Some("doc://schemas/note?rev=1-a".into());
         assert!(Runner::from_doc(&doc).is_err());
     }

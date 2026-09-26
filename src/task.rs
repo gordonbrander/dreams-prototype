@@ -23,6 +23,7 @@ use crate::error::StoreError;
 use crate::rev::short_rev;
 use crate::runner::{Context, Runner};
 use crate::store::{DOC_COLS, Store, row_to_doc, type_filter};
+use crate::text::truncate_bytes;
 
 /// Seeded schema documents, as type paths.
 pub const TASK_TYPE: &str = "doc://schemas/task";
@@ -146,7 +147,7 @@ impl Task {
         if doc.type_path() != Some(TASK_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {TASK_TYPE} document", doc.id)));
         }
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let text = |key: &str| doc.field::<String>(key).unwrap_or_default();
         let when = match doc.body.get("when") {
             Some(v) => Some(serde_json::from_value::<When>(v.clone())?),
             None => None,
@@ -157,7 +158,7 @@ impl Task {
             every_secs: parse_duration(&text("every"))?,
             when,
             prompt: text("prompt"),
-            cwd: doc.body.get("cwd").and_then(Value::as_str).map(str::to_string),
+            cwd: doc.field::<String>("cwd"),
         })
     }
 }
@@ -341,7 +342,7 @@ pub fn plan_deploy(store: &Store, id: Option<&str>) -> Result<Vec<Deploy>, Store
             task_rev: head.rev.clone(),
             runner: runner_ref,
             argv: runner.argv,
-            every: head.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
+            every: head.field::<String>("every").unwrap_or_default(),
             when: task.when,
             prompt: task.prompt,
             current,
@@ -636,20 +637,6 @@ pub async fn spawn(argv: &[String], env: &[(String, String)], cwd: &Path, prompt
     }
 }
 
-/// Lossy UTF-8, cut at a character boundary. The flag says whether it was cut.
-fn truncate_utf8(bytes: &[u8], max: usize) -> (String, bool) {
-    let mut text = String::from_utf8_lossy(bytes).into_owned();
-    if text.len() <= max {
-        return (text, false);
-    }
-    let mut end = max;
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    text.truncate(end);
-    (text, true)
-}
-
 /// The command's last message: the `{out}` file when the command wrote
 /// one, else stdout.
 pub fn last_message(out_file: &Path, stdout: &[u8]) -> Vec<u8> {
@@ -671,7 +658,7 @@ pub fn failures(outcome: &Outcome, timeout: Duration) -> Vec<String> {
     }
     if !outcome.timed_out && outcome.spawn_error.is_none() && outcome.exit_code != Some(0) {
         let (tail, _) =
-            truncate_utf8(&outcome.stderr[outcome.stderr.len().saturating_sub(MAX_STDERR_BYTES)..], MAX_STDERR_BYTES);
+            truncate_bytes(&outcome.stderr[outcome.stderr.len().saturating_sub(MAX_STDERR_BYTES)..], MAX_STDERR_BYTES);
         let tail = tail.trim();
         errors.push(match outcome.exit_code {
             Some(code) if tail.is_empty() => format!("exit code {code}"),
@@ -703,7 +690,7 @@ pub fn finish(
     }) else {
         unreachable!("a JSON object")
     };
-    let (content, cut) = truncate_utf8(&last_message(out_file, &outcome.stdout), MAX_CONTENT_BYTES);
+    let (content, cut) = truncate_bytes(&last_message(out_file, &outcome.stdout), MAX_CONTENT_BYTES);
     let mut errors = failures(outcome, timeout);
     if cut {
         errors.push(format!("output truncated to {MAX_CONTENT_BYTES} bytes"));
@@ -796,7 +783,7 @@ async fn fire_as_task(
         task: eval.task.id.clone(),
         run: done.id.clone(),
         exit_code: outcome.0.exit_code,
-        error: done.body.get("error").and_then(Value::as_str).map(str::to_string),
+        error: done.field::<String>("error"),
     }))
 }
 
@@ -905,16 +892,5 @@ mod tests {
         );
         let empty = prompt_text(&eval("do it\n", Some(When::default()), vec![]));
         assert!(empty.ends_with("(seq 4 to 9):\n"), "{empty}");
-    }
-
-    #[test]
-    fn truncation_keeps_char_boundaries() {
-        let s = "héllo wörld".repeat(10);
-        let (cut, was_cut) = truncate_utf8(s.as_bytes(), 8);
-        assert!(was_cut);
-        assert!(cut.len() <= 8);
-        assert!(s.starts_with(&cut));
-        let (whole, was_cut) = truncate_utf8(b"abc", 8);
-        assert_eq!((whole.as_str(), was_cut), ("abc", false));
     }
 }
