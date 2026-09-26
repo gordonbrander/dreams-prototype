@@ -119,21 +119,7 @@ pub fn origin_slug(url: &str) -> String {
     let rest = lower.split_once("://").map_or(lower.as_str(), |(_, r)| r);
     let rest = rest.strip_prefix("www.").unwrap_or(rest);
     let rest = rest.split(['?', '#']).next().unwrap_or_default();
-    slug(rest.split('/').next().unwrap_or_default())
-}
-
-/// Each run of characters other than `a`-`z` and `0`-`9` becomes one `-`,
-/// with none at the ends.
-fn slug(text: &str) -> String {
-    let mut out = String::new();
-    for c in text.chars() {
-        if c.is_ascii_lowercase() || c.is_ascii_digit() {
-            out.push(c);
-        } else if !out.is_empty() && !out.ends_with('-') {
-            out.push('-');
-        }
-    }
-    out.trim_end_matches('-').to_string()
+    slug::slugify(rest.split('/').next().unwrap_or_default())
 }
 
 /// The id `feed add` uses when it is given none: `feeds/<origin-slug>.md`.
