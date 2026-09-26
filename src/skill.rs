@@ -8,10 +8,10 @@ use std::collections::HashSet;
 
 use serde_json::{Value, json};
 use serde_yaml_ng::{Mapping, Value as Yaml};
-use sha2::{Digest, Sha256};
 
 use crate::doc::Doc;
 use crate::error::StoreError;
+use crate::hash::sha256_hex;
 use crate::store::Store;
 
 /// The seeded schema document for skills, as a type path.
@@ -65,7 +65,7 @@ impl Skill {
 
     /// The extension's Skill object: its SKILL.md as the one resource.
     pub fn entry(&self) -> Value {
-        let digest: String = Sha256::digest(self.text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
+        let digest = sha256_hex(self.text.as_bytes());
         json!({
             "uri": self.uri,
             "frontmatter": {"name": self.name, "description": self.description},
@@ -124,6 +124,7 @@ mod tests {
 
     #[test]
     fn entry_digest_and_size_match_the_text() {
+        use sha2::{Digest, Sha256};
         let mut store = store();
         put(&mut store, "skills/a", "git-workflow", "# Steps\n");
         let skill = find(&store, "skill://git-workflow/SKILL.md").unwrap().unwrap();

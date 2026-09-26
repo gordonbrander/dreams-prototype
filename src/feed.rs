@@ -13,10 +13,10 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::hash::sha256_hex;
 use crate::store::Store;
 
 /// Seeded schema documents, as type paths.
@@ -176,10 +176,6 @@ fn clip_words(text: &str, max: usize) -> String {
     cut
 }
 
-fn key(text: &str) -> String {
-    Sha256::digest(text.as_bytes()).iter().take(8).map(|b| format!("{b:02x}")).collect()
-}
-
 /// Turn fetched bytes into the items to write. Pure.
 pub fn parse(feed: &Feed, bytes: &[u8]) -> Result<Vec<ItemDraft>, StoreError> {
     let feed_ref = DocRef::from_cli(&feed.id)?.path();
@@ -242,7 +238,7 @@ fn parse_entries(feed: &Feed, feed_ref: &str, bytes: &[u8]) -> Result<Vec<ItemDr
                 body.insert(name.into(), Value::String(v));
             }
         }
-        drafts.push(ItemDraft { id: format!("{}/{}.md", feed.base(), key(&seen_as)), body });
+        drafts.push(ItemDraft { id: format!("{}/{}.md", feed.base(), sha256_hex(seen_as.as_bytes())), body });
     }
     Ok(drafts)
 }
@@ -421,17 +417,17 @@ mod tests {
         let titles: Vec<&str> = drafts.iter().map(|d| d.body["title"].as_str().unwrap()).collect();
         assert_eq!(titles, ["Only a title", "No guid", "Newest"]);
         let newest = &drafts[2];
-        assert_eq!(newest.id, format!("feeds/example-com/{}.md", key("g-2")));
+        assert_eq!(newest.id, format!("feeds/example-com/{}.md", sha256_hex(b"g-2")));
         assert_eq!(newest.body["guid"], "g-2");
         assert_eq!(newest.body["url"], "https://example.com/2");
         assert_eq!(newest.body["feed"], "doc://feeds/example-com.md");
         assert_eq!(newest.body["content"], "<p>Second <b>post</b></p>");
         assert!(newest.body["published"].as_str().unwrap().starts_with("2026-09-22T10:00:00"));
         // No guid: the link is the key.
-        assert_eq!(drafts[1].id, format!("feeds/example-com/{}.md", key("https://example.com/1")));
+        assert_eq!(drafts[1].id, format!("feeds/example-com/{}.md", sha256_hex(b"https://example.com/1")));
         assert!(!drafts[1].body.contains_key("guid"));
         // No guid and no link: the title and date are the key.
-        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", key("Only a title\n")));
+        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", sha256_hex(b"Only a title\n")));
         assert_eq!(parse(&f, RSS.as_bytes()).unwrap(), drafts, "a second parse gives the same drafts");
     }
 
@@ -439,7 +435,7 @@ mod tests {
     fn atom_entries_parse() {
         let drafts = parse(&feed(Kind::Rss), ATOM.as_bytes()).unwrap();
         assert_eq!(drafts.len(), 1);
-        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", key("urn:entry:1")));
+        assert_eq!(drafts[0].id, format!("feeds/example-com/{}.md", sha256_hex(b"urn:entry:1")));
         assert_eq!(drafts[0].body["url"], "https://example.com/e1");
         assert_eq!(drafts[0].body["content"], "<p>Body</p>");
     }

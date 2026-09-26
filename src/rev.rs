@@ -2,9 +2,9 @@
 //! the revision's content. Compatible in shape with eto and slouchdb.
 
 use serde_json::{Map, Value};
-use sha2::{Digest, Sha256};
 
 use crate::error::StoreError;
+use crate::hash::sha256_hex;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rev {
@@ -70,14 +70,6 @@ pub fn canonical_bytes(value: &Value) -> Vec<u8> {
     out
 }
 
-fn hex(bytes: &[u8]) -> String {
-    let mut s = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        s.push_str(&format!("{b:02x}"));
-    }
-    s
-}
-
 /// Content hash of a revision. Covers `_id`, `_parent`, `_type`, `_deleted`
 /// and the user body. Absent `_parent` / `_type` are written as `null`.
 pub fn hash(id: &str, parent: Option<&str>, type_id: Option<&str>, deleted: bool, body: &Map<String, Value>) -> String {
@@ -87,7 +79,7 @@ pub fn hash(id: &str, parent: Option<&str>, type_id: Option<&str>, deleted: bool
     preimage.insert("_type".into(), type_id.map(|t| Value::String(t.to_string())).unwrap_or(Value::Null));
     preimage.insert("_deleted".into(), Value::Bool(deleted));
     let bytes = canonical_bytes(&Value::Object(preimage));
-    hex(&Sha256::digest(&bytes))
+    sha256_hex(&bytes)
 }
 
 /// The `_rev` a revision with this content will have. Gen is 1 for a
