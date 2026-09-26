@@ -125,7 +125,7 @@ A sync can bring in edits that two vaults made to the same revision. The documen
    - `conflicts`: the revisions to settle.
 3. Decide each contested field. Combine the changes of every side if you can. If you cannot, ask the user.
 4. For each marked block in `draft.content`, write one edit: `old` is the whole block, from its `<<<<<<< ours` line through its `>>>>>>> theirs` line, copied exactly. `new` is the merged text, with the additions from both sides and no markers.
-5. Call `resolve_doc` with `id`, `conflicts`, `fields` (a value for each contested field, and no other field; null removes a field), and `content_edits`. If it fails because the conflicts changed, start again at step 2. If an edit does not match, copy the block again, exactly.
+5. Call `resolve_doc_conflicts` with `id`, `conflicts`, `fields` (a value for each contested field, and no other field; null removes a field), and `content_edits`. If it fails because the conflicts changed, start again at step 2. If an edit does not match, copy the block again, exactly.
 
 Do not merge a runner. Tell the user to resolve it with `dreams doc resolve <id> --keep <rev>`. To merge every conflict at once, the user can run `dreams sync <path> --resolve`.
 
