@@ -447,6 +447,14 @@ impl Store {
         self.actor.as_deref()
     }
 
+    /// Run `f` with `actor` as the actor of its writes, then restore the actor.
+    pub fn as_actor<T>(&mut self, actor: Option<String>, f: impl FnOnce(&mut Store) -> T) -> T {
+        let previous = std::mem::replace(&mut self.actor, actor);
+        let result = f(self);
+        self.actor = previous;
+        result
+    }
+
     /// Refuse writes and deletes of documents whose type path is in
     /// `types` (pinned or not) or whose id is in `ids`.
     pub fn set_protected(&mut self, types: &[&str], ids: &[&str]) {
@@ -518,20 +526,7 @@ impl Store {
         let head = head_in(&tx, id)?.ok_or_else(|| StoreError::NotFound { id: id.to_string() })?;
         let losers = conflicts_in(&tx, id, &head.rev)?;
         if let Some(expected) = expected {
-            let mut want = expected.to_vec();
-            let mut have = losers.clone();
-            want.sort();
-            have.sort();
-            if want != have {
-                let mut leaves = vec![head.rev.clone()];
-                leaves.extend(losers.iter().cloned());
-                return Err(StoreError::Conflict {
-                    id: id.to_string(),
-                    parent: Some(head.rev.clone()),
-                    leaves,
-                    hint: Some("the conflicts changed since they were read; run resolve again".into()),
-                });
-            }
+            check_conflicts(id, &head.rev, &losers, expected)?;
         }
         if let Some(mut input) = merged {
             match &input.id {
@@ -588,6 +583,20 @@ impl Store {
         }
         let next = if docs.len() == limit { docs.last().map(|d| d.id.clone()) } else { None };
         Ok(ConflictPage { docs, next })
+    }
+
+    /// Every document with conflicts, in id order.
+    pub fn conflicted_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut ids = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.conflicted(after.as_deref(), Some(MAX_LIMIT))?;
+            ids.extend(page.docs.into_iter().map(|d| d.id));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(ids),
+            }
+        }
     }
 
     /// `rev` and every revision behind it, newest first.
@@ -653,7 +662,11 @@ impl Store {
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
         let Store { conn, validators, actor, protected_types, protected_ids } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
+        let mut doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
+        // A write on the winner does not settle the other leaves: say so.
+        if head_in(&tx, &doc.id)?.is_some_and(|h| h.rev == doc.rev) {
+            doc.conflicts = conflicts_in(&tx, &doc.id, &doc.rev)?;
+        }
         tx.commit()?;
         Ok(doc)
     }
@@ -838,4 +851,21 @@ impl Store {
     pub fn connection(&self) -> &Connection {
         &self.conn
     }
+}
+
+/// Fails when `expected`, the conflicts a reader saw, are not the current
+/// conflicts `have` of `id`, whose winner is `head`.
+pub fn check_conflicts(id: &str, head: &str, have: &[String], expected: &[String]) -> Result<(), StoreError> {
+    let (mut want, mut now) = (expected.to_vec(), have.to_vec());
+    want.sort();
+    now.sort();
+    if want == now {
+        return Ok(());
+    }
+    Err(StoreError::Conflict {
+        id: id.to_string(),
+        parent: Some(head.to_string()),
+        leaves: std::iter::once(head.to_string()).chain(have.iter().cloned()).collect(),
+        hint: Some("the conflicts changed since they were read; read them again".into()),
+    })
 }

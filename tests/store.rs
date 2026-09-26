@@ -485,6 +485,19 @@ fn plus_secs(s: &Store, from: &str, secs: i64) -> String {
 }
 
 #[test]
+fn as_actor_scopes_the_actor_to_its_writes() {
+    let mut s = store();
+    s.set_actor(Some("person".into()));
+    let by_task = s.as_actor(Some("tasks/t".into()), |s| s.put(input(json!({"_id": "a", "title": "a"})))).unwrap();
+    assert_eq!(by_task.actor.as_deref(), Some("tasks/t"));
+    let after = s.put(input(json!({"_id": "b", "title": "b"}))).unwrap();
+    assert_eq!(after.actor.as_deref(), Some("person"), "the actor is restored");
+    let failed = s.as_actor(Some("tasks/t".into()), |s| s.put(input(json!({"_id": "a", "title": "no parent"}))));
+    assert!(failed.is_err());
+    assert_eq!(s.actor(), Some("person"), "the actor is restored after an error too");
+}
+
+#[test]
 fn actor_is_recorded_per_store() {
     let mut s = store();
     let plain = s.put(input(json!({"_id": "a", "title": "a"}))).unwrap();

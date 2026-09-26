@@ -32,11 +32,13 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use crate::diff::Edit;
 use crate::doc::{Doc, DocRef, PutInput, new_id};
 use crate::error::StoreError;
 use crate::feed::{self, PullReport};
 use crate::markdown;
 use crate::prompt;
+use crate::resolve::{self, Conflict, Reply};
 use crate::skill::{self, Skill};
 use crate::store::{Changes, ConflictPage, History, ListQuery, Page, SearchPage, Store};
 use crate::task::{self, Deploy, TaskList, TaskState};
@@ -152,9 +154,55 @@ pub struct ResolveParams {
     pub id: String,
     /// The merged document, written on the winning revision, with its fields in
     /// `body`. Omit _parent (or set it to the winner's _rev). Omit the whole field to keep the winner as it is.
+    /// Leave it out when you give `fields` or `content_edits`.
     pub merged: Option<DocInput>,
     /// The _conflicts you read. When given, resolve fails if they changed since.
+    /// Needed with `fields` and `content_edits`.
     pub conflicts: Option<Vec<String>>,
+    /// With diff_doc_conflicts: a value for each contested field. null removes the field.
+    /// A contested field that is not here keeps the winner's value.
+    pub fields: Option<Map<String, Value>>,
+    /// With diff_doc_conflicts: edits to the draft's `content`, in order. Each `old` is one
+    /// whole marked block, copied exactly; `new` is the merged text.
+    pub content_edits: Option<Vec<Edit>>,
+}
+
+/// What `resolve_doc` writes on the winner.
+enum Merge {
+    /// Keep the winner as it is.
+    Keep { conflicts: Option<Vec<String>> },
+    /// A whole merged document.
+    Whole { merged: PutInput, conflicts: Option<Vec<String>> },
+    /// Decisions on the draft of diff_doc_conflicts, which needs the conflicts that were read.
+    Reply { reply: Reply, conflicts: Vec<String> },
+}
+
+impl ResolveParams {
+    fn merge(self) -> Result<Merge, StoreError> {
+        let reply = match (self.fields, self.content_edits) {
+            (None, None) => None,
+            (fields, edits) => {
+                Some(Reply { fields: fields.unwrap_or_default(), content_edits: edits.unwrap_or_default() })
+            }
+        };
+        match (reply, self.merged, self.conflicts) {
+            (None, None, conflicts) => Ok(Merge::Keep { conflicts }),
+            (None, Some(merged), conflicts) => Ok(Merge::Whole { merged: merged.into(), conflicts }),
+            (Some(_), Some(_), _) => {
+                Err(StoreError::invalid("give `merged`, or `fields` and `content_edits`, not both"))
+            }
+            (Some(_), None, None) => {
+                Err(StoreError::invalid("`fields` and `content_edits` need the `conflicts` you read"))
+            }
+            (Some(reply), None, Some(conflicts)) => Ok(Merge::Reply { reply, conflicts }),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DiffConflictsParams {
+    /// Document id.
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -315,7 +363,8 @@ impl Vault {
 
     #[tool(description = "Get a document by href: doc://<id> or a bare id gives the current revision, \
         doc://<id>?rev=<rev> gives that exact revision. When sync made concurrent edits, the current \
-        revision's _conflicts lists the other live revisions; read them with get_rev and settle them with resolve_doc.")]
+        revision's _conflicts lists the other live revisions; read them ready to merge with diff_doc_conflicts, \
+        and settle them with resolve_doc.")]
     fn get_doc(&self, Parameters(p): Parameters<GetParams>) -> Result<Json<Doc>, McpError> {
         self.lock()?.get_href(&p.href, p.deleted_conflicts).map(Json).map_err(to_mcp)
     }
@@ -337,10 +386,28 @@ impl Vault {
         self.lock()?.delete(&p.id, &p.parent).map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "Resolve a document's conflicts: optionally write `merged` on the winning revision, \
-        then tombstone every revision listed in _conflicts, in one step. Returns the new current revision.")]
+    #[tool(description = "Read a document's conflicts, ready to merge: `settled` (the fields that code merged), \
+        `contested` (the fields you decide, with the ancestor's value and each side's value), `draft` (the merged \
+        body, with conflict markers in `content` where both sides changed the same lines), and `marked` (the revisions of the marked lines). \
+        Then call resolve_doc with `conflicts`, `fields` for the contested fields, and `content_edits` with one edit per marked block.")]
+    fn diff_doc_conflicts(&self, Parameters(p): Parameters<DiffConflictsParams>) -> Result<Json<Conflict>, McpError> {
+        Conflict::read(&*self.lock()?, &p.id).map(Json).map_err(to_mcp)
+    }
+
+    #[tool(description = "Resolve a document's conflicts: write a merge on the winning revision (if given), \
+        then tombstone every revision listed in _conflicts, in one step. Give the merge as `fields` and `content_edits` \
+        for the draft of diff_doc_conflicts, with `conflicts`; or as a whole document in `merged`; or give neither \
+        to keep the winner. Returns the new current revision.")]
     fn resolve_doc(&self, Parameters(p): Parameters<ResolveParams>) -> Result<Json<Doc>, McpError> {
-        self.lock()?.resolve(&p.id, p.merged.map(Into::into), p.conflicts.as_deref()).map(Json).map_err(to_mcp)
+        let id = p.id.clone();
+        let mut store = self.lock()?;
+        let result = match p.merge().map_err(to_mcp)? {
+            Merge::Keep { conflicts } => store.resolve(&id, None, conflicts.as_deref()),
+            Merge::Whole { merged, conflicts } => resolve::check_markers(&merged.body)
+                .and_then(|()| store.resolve(&id, Some(merged), conflicts.as_deref())),
+            Merge::Reply { reply, conflicts } => resolve::resolve_with(&mut store, &id, &conflicts, &reply),
+        };
+        result.map(Json).map_err(to_mcp)
     }
 
     #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \
@@ -745,6 +812,60 @@ mod tests {
 
     fn deployed(vault: &Vault) -> Option<TaskState> {
         task::state(&vault.lock().unwrap(), "tasks/t").unwrap()
+    }
+
+    /// A vault where both sides appended a different line to `note`.
+    fn vault_with_conflict() -> Vault {
+        let mut a = Store::open_in_memory().unwrap();
+        let mut b = Store::open_in_memory().unwrap();
+        let put = |s: &mut Store, v: Value| s.put(serde_json::from_value(v).unwrap()).unwrap();
+        let base = put(&mut a, json!({"_id": "note", "title": "t", "content": "one\n"}));
+        crate::sync::sync(&mut a, "a", &mut b, "b").unwrap();
+        put(&mut a, json!({"_id": "note", "_parent": base.rev, "title": "t", "content": "one\nfrom a\n"}));
+        put(&mut b, json!({"_id": "note", "_parent": base.rev, "title": "t", "content": "one\nfrom b\n"}));
+        crate::sync::pull(&mut a, &b, "b").unwrap();
+        Vault::new(a)
+    }
+
+    fn resolve(vault: &Vault, args: Value) -> Result<Doc, McpError> {
+        vault.resolve_doc(Parameters(serde_json::from_value(args).unwrap())).map(|Json(d)| d)
+    }
+
+    #[test]
+    fn diff_doc_conflicts_and_resolve_doc_with_edits() {
+        let vault = vault_with_conflict();
+        let Json(c) = vault.diff_doc_conflicts(Parameters(DiffConflictsParams { id: "note".into() })).unwrap();
+        assert_eq!(c.settled["title"], "t");
+        let draft = c.draft["content"].as_str().unwrap();
+        let block = &draft[draft.find("<<<<<<<").unwrap()..];
+
+        let err = resolve(&vault, json!({"id": "note", "content_edits": [{"old": block, "new": "x\n"}]})).unwrap_err();
+        assert!(err.message.contains("need the `conflicts`"), "{}", err.message);
+        let leaves_markers =
+            json!({"id": "note", "conflicts": c.conflicts, "content_edits": [{"old": "one\n", "new": "1\n"}]});
+        assert!(resolve(&vault, leaves_markers).unwrap_err().message.contains("conflict markers"));
+        let whole = json!({"id": "note", "merged": {"body": {"content": draft}}});
+        assert!(resolve(&vault, whole).unwrap_err().message.contains("conflict markers"));
+
+        let edits = json!({"id": "note", "conflicts": c.conflicts,
+            "content_edits": [{"old": block, "new": "from a\nfrom b\n"}]});
+        let doc = resolve(&vault, edits).unwrap();
+        assert_eq!(doc.body["content"], "one\nfrom a\nfrom b\n");
+        assert_eq!(doc.body["title"], "t");
+        assert!(doc.conflicts.is_empty());
+    }
+
+    #[test]
+    fn resolve_doc_takes_one_kind_of_merge() {
+        let vault = vault_with_conflict();
+        let both = json!({"id": "note", "conflicts": [], "merged": {"body": {}}, "fields": {}});
+        assert!(resolve(&vault, both).unwrap_err().message.contains("not both"));
+        let stale = json!({"id": "note", "conflicts": ["1-x"], "fields": {}});
+        assert!(resolve(&vault, stale).unwrap_err().message.contains("read them again"));
+        let winner = vault.lock().unwrap().get("note").unwrap();
+        let kept = resolve(&vault, json!({"id": "note", "conflicts": winner.conflicts})).unwrap();
+        assert_eq!(kept.body, winner.body, "no merge keeps the winner");
+        assert!(kept.conflicts.is_empty());
     }
 
     #[test]
