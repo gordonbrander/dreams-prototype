@@ -232,7 +232,13 @@ pushed 1 revision to /Users/me/desktop.db (16 present)
 
 The command still exits 0. The conflicts stay until you resolve them, and each later pull names them again.
 
-`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `missing_parent`, `last_seq`, `restarted`, and `conflicts` (every document with conflicts in the target vault, when there are any). With `--resolve`, the reports are in `pulls`, and the merge result is in `resolve`: `resolved`, `declined`, `by_hand`, and `failed`.
+`--json` prints one object, with a key for each step, in the order they ran:
+- `pulled`: the pull into this vault.
+- `resolve`: with `--resolve` only, the merges: `resolved`, `declined`, `by_hand`, and `failed`.
+- `pushed`: `sync` only, the push to the peer.
+- `conflicts`: every document with conflicts in this vault at the end.
+
+`pulled` and `pushed` each have `peer` (the vault the revisions came from), `read`, `written`, `present`, `missing_parent`, `last_seq`, and `restarted`.
 
 ### What replicates
 
@@ -289,7 +295,7 @@ dreams doc diff notes/plan.md
 merged by fields: tags; to decide: title, content (markers)
 ```
 
-The last line names the fields that merge by themselves (see [Let an agent merge](#let-an-agent-merge)), and the fields that are left to decide. `doc diff --json` gives the same data as the MCP tool `diff_doc_conflicts`: `settled`, `contested`, `draft`, and `diffs`.
+The last line names the fields that merge by themselves (see [Let an agent merge](#let-an-agent-merge)), and the fields that are left to decide. `doc diff --json` gives the same data as the MCP tool `diff_doc_conflicts`: `settled`, `contested`, `marked`, and `draft`. The diffs are in the text output only.
 
 To resolve, keep the winner:
 
@@ -363,7 +369,7 @@ Else, `--auto` gives a runner only what is left: the merged fields as context, e
  "content_edits": [{"old": "<<<<<<< ours\n…\n>>>>>>> theirs\n", "new": "the merged lines\n"}]}
 ```
 
-`fields` has a value for each field to decide; `null` removes the field, and a field that is not there keeps the winner's value. `content_edits` works like a file-edit tool: each `old` is one whole marked block, copied exactly, and must occur once; `new` replaces it. After the edits, no marker may remain. So the agent does not write the note again, and the text outside the blocks does not change. If the reply does not apply, the command fails with an error named `runner`, and nothing is written.
+`fields` has a value for each field to decide; `null` removes the field, and a field that is not there keeps the winner's value. Any other field in `fields` is an error. `content_edits` works like a file-edit tool: each `old` is one whole marked block, copied exactly, and must occur once; `new` replaces it. After the edits, no marker may remain. So the agent does not write the note again, and the text outside the blocks does not change. If the reply does not apply, the command fails with an error named `runner`, and nothing is written.
 
 The default runner is `runners/claude.json`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
 
@@ -386,7 +392,7 @@ If a sync brings in a new conflict while the agent works, the resolve fails and 
 An agent over MCP is the agent that merges, so it gets the same work as a runner:
 
 1. `list_conflicts` finds the documents.
-2. `diff_doc_conflicts` merges what code can, and returns `settled`, `contested` (each field to decide, with the ancestor's value and each side's value), `draft` (the merged body, with the marked blocks in `content`), `diffs`, and `conflicts`.
+2. `diff_doc_conflicts` merges what code can, and returns `settled`, `contested` (each field to decide, with the ancestor's value and each side's value), `draft` (the merged body, with the marked blocks in `content`), `marked` (the revisions of the lines in the blocks), and `conflicts`.
 3. `resolve_doc` with `id`, `conflicts`, `fields`, and `content_edits`, the same as a runner's reply. The server makes the draft again, applies them, and writes the merge on the winner. If new conflicts arrived since the read, the call fails, and the agent reads again.
 
 An agent can also send a whole document in `merged` (in the same shape as `put_doc`). A `merged` with conflict markers in `content` is refused.
@@ -676,7 +682,7 @@ Each store operation is one tool:
 | `get_rev` | One revision by `rev`. |
 | `delete_doc` | Tombstone with `id` and `parent`. |
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
-| `diff_doc_conflicts` | The conflicts of `id`, merged as far as code can: `settled`, `contested`, `draft`, `diffs`, and `conflicts`. See [Conflicts over MCP](#conflicts-over-mcp). |
+| `diff_doc_conflicts` | The conflicts of `id`, merged as far as code can: `settled`, `contested`, `marked`, `draft`, and `conflicts`. See [Conflicts over MCP](#conflicts-over-mcp). |
 | `resolve_doc` | Tombstone every conflict of `id`, after it writes a merge on the winner if given: `fields` and `content_edits` for the draft of `diff_doc_conflicts`, or a whole document in `merged`. Pass the `conflicts` you read to fail if they changed; `fields` and `content_edits` need them. |
 | `list_docs` | Current documents, newest first, with `type`, `tag`, `prefix` (of `_id`), `before`, `limit`. |
 | `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |

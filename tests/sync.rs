@@ -370,7 +370,7 @@ fn resolve_refuses_when_the_conflicts_changed() {
 }
 
 #[test]
-fn a_pull_reports_every_conflict_in_the_vault() {
+fn conflicted_ids_lists_every_conflict_in_the_vault() {
     let mut a = store();
     let mut b = store();
     let x = put(&mut a, json!({"_id": "x", "title": "base"}));
@@ -380,9 +380,10 @@ fn a_pull_reports_every_conflict_in_the_vault() {
         put(&mut a, json!({"_id": id, "_parent": parent, "title": "a"}));
         put(&mut b, json!({"_id": id, "_parent": parent, "title": "b"}));
     }
-    assert_eq!(pull(&mut a, &b, "b").unwrap().conflicts, ["x", "y"]);
+    pull(&mut a, &b, "b").unwrap();
+    assert_eq!(a.conflicted_ids().unwrap(), ["x", "y"]);
     a.resolve("x", None, None).unwrap();
-    assert_eq!(pull(&mut a, &b, "b").unwrap().conflicts, ["y"], "a pull with nothing new still reports the old ones");
+    assert_eq!(a.conflicted_ids().unwrap(), ["y"]);
 }
 
 #[test]

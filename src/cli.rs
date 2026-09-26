@@ -511,14 +511,11 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
             let db = absolute(&cli.db)?;
             let (_, there) = peer_paths(&cli.db, &peer)?;
             let source = Store::open(&peer)?;
-            let mut report = sync::pull(&mut store, &source, &there)?;
-            let merged = merge_after_pull(&mut store, &db, &merge, confirm)?;
-            if merged.is_some() {
-                report.conflicts = store.conflicted_ids()?;
-            }
-            let hint = format!("dreams pull {}", peer.display());
-            print_pulls(out, json, &[(format!("from {there}"), report)], merged.as_ref(), &hint)?;
-            fail_if_unmerged(merged.as_ref())?;
+            let pulled = sync::pull(&mut store, &source, &there)?;
+            let resolve = merge_after_pull(&mut store, &db, &merge, confirm)?;
+            let report = SyncReport { pulled, resolve, pushed: None, conflicts: store.conflicted_ids()? };
+            print_sync(out, json, &report, &there, &format!("dreams pull {}", peer.display()))?;
+            fail_if_unmerged(report.resolve.as_ref())?;
         }
         Command::Sync { peer, merge } => {
             let mut store = open()?;
@@ -526,13 +523,12 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
             let (here, there) = peer_paths(&cli.db, &peer)?;
             let mut other = Store::open(&peer)?;
             // Merge before the push, so the peer gets the merges in this sync.
-            let into_here = sync::pull(&mut store, &other, &there)?;
-            let merged = merge_after_pull(&mut store, &db, &merge, confirm)?;
-            let into_there = sync::pull(&mut other, &store, &here)?;
-            let hint = format!("dreams sync {}", peer.display());
-            let reports = [(format!("from {there}"), into_here), (format!("to {there}"), into_there)];
-            print_pulls(out, json, &reports, merged.as_ref(), &hint)?;
-            fail_if_unmerged(merged.as_ref())?;
+            let pulled = sync::pull(&mut store, &other, &there)?;
+            let resolve = merge_after_pull(&mut store, &db, &merge, confirm)?;
+            let pushed = Some(sync::pull(&mut other, &store, &here)?);
+            let report = SyncReport { pulled, resolve, pushed, conflicts: store.conflicted_ids()? };
+            print_sync(out, json, &report, &there, &format!("dreams sync {}", peer.display()))?;
+            fail_if_unmerged(report.resolve.as_ref())?;
         }
         Command::Task(cmd) => {
             let mut store = open()?;
@@ -600,59 +596,56 @@ fn peer_paths(db: &Path, peer: &Path) -> Result<(String, String), StoreError> {
     Ok((here, there))
 }
 
-/// Each report with its direction: `from <peer>` for a pull, `to <peer>` for a push.
-/// `merged` is the result of --resolve, printed after the pull. `again` is the
-/// command that pulls again, for the hint.
-fn print_pulls(
-    out: &mut dyn Write,
-    json: bool,
-    reports: &[(String, PullReport)],
-    merged: Option<&MergeSummary>,
-    again: &str,
-) -> io::Result<()> {
+/// What a pull or a sync did, in the order it did it.
+#[derive(Debug, Serialize)]
+struct SyncReport {
+    /// The pull from the peer into this vault.
+    pulled: PullReport,
+    /// With --resolve: the merges, written after the pull and before the push.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resolve: Option<MergeSummary>,
+    /// Sync only: the push from this vault to the peer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pushed: Option<PullReport>,
+    /// Every document with conflicts in this vault at the end, in id order.
+    conflicts: Vec<String>,
+}
+
+/// `again` is the command that pulls again, for the hint.
+fn print_sync(out: &mut dyn Write, json: bool, r: &SyncReport, peer: &str, again: &str) -> io::Result<()> {
     if json {
-        let pulls: Value = match reports {
-            [(_, r)] => serde_json::to_value(r)?,
-            _ => serde_json::to_value(reports.iter().map(|(_, r)| r).collect::<Vec<_>>())?,
-        };
-        return match merged {
-            None => print_json(out, &pulls),
-            Some(m) => print_json(out, &serde_json::json!({ "pulls": pulls, "resolve": m })),
-        };
+        return print_json(out, r);
     }
-    for (i, (direction, r)) in reports.iter().enumerate() {
-        if i == 1
-            && let Some(m) = merged
-        {
-            print_merges(out, m)?;
-        }
-        let verb = if direction.starts_with("to ") { "pushed" } else { "pulled" };
-        let noun = if r.written == 1 { "revision" } else { "revisions" };
-        let mut notes = vec![format!("{} present", r.present)];
-        if r.missing_parent > 0 {
-            notes.push(format!("{} missing parent", r.missing_parent));
-        }
-        if r.restarted {
-            notes.push("checkpoint reset".into());
-        }
-        writeln!(out, "{verb} {} {noun} {direction} ({})", r.written, notes.join(", "))?;
-    }
-    if reports.len() == 1
-        && let Some(m) = merged
-    {
+    print_transfer(out, "pulled", &format!("from {peer}"), &r.pulled)?;
+    if let Some(m) = &r.resolve {
         print_merges(out, m)?;
     }
-    let conflicts = reports.last().map(|(_, r)| r.conflicts.as_slice()).unwrap_or_default();
-    if !conflicts.is_empty() {
-        let noun = if conflicts.len() == 1 { "document has" } else { "documents have" };
-        writeln!(out, "{} {noun} conflicts: {}", conflicts.len(), conflicts.join(", "))?;
-        if merged.is_none() {
+    if let Some(pushed) = &r.pushed {
+        print_transfer(out, "pushed", &format!("to {peer}"), pushed)?;
+    }
+    if !r.conflicts.is_empty() {
+        let noun = if r.conflicts.len() == 1 { "document has" } else { "documents have" };
+        writeln!(out, "{} {noun} conflicts: {}", r.conflicts.len(), r.conflicts.join(", "))?;
+        if r.resolve.is_none() {
             writeln!(out, "`{again} --resolve` to merge them, or `dreams doc resolve <id>` to resolve one")?;
         } else {
             writeln!(out, "`dreams doc diff <id>` to compare the sides, and `dreams doc resolve <id>` to resolve one")?;
         }
     }
     Ok(())
+}
+
+/// One line for a pull or a push.
+fn print_transfer(out: &mut dyn Write, verb: &str, direction: &str, r: &PullReport) -> io::Result<()> {
+    let noun = if r.written == 1 { "revision" } else { "revisions" };
+    let mut notes = vec![format!("{} present", r.present)];
+    if r.missing_parent > 0 {
+        notes.push(format!("{} missing parent", r.missing_parent));
+    }
+    if r.restarted {
+        notes.push("checkpoint reset".into());
+    }
+    writeln!(out, "{verb} {} {noun} {direction} ({})", r.written, notes.join(", "))
 }
 
 /// What a merge of every conflict did.
@@ -776,13 +769,8 @@ fn merge_all(store: &mut Store, db: &Path, runner: &str, yes: bool, confirm: Con
 
 /// Write a merge. It records the runner that wrote it, unless --actor named someone.
 fn apply_proposal(store: &mut Store, p: resolve::Proposal) -> Result<Doc, StoreError> {
-    let previous = store.actor().map(str::to_string);
-    if previous.is_none() {
-        store.set_actor(p.runner.clone());
-    }
-    let result = store.resolve(&p.winner.id, Some(p.merged), Some(&p.conflicts));
-    store.set_actor(previous);
-    result
+    let actor = store.actor().map(str::to_string).or(p.runner);
+    store.as_actor(actor, |s| s.resolve(&p.winner.id, Some(p.merged), Some(&p.conflicts)))
 }
 
 /// Logs to stderr, filtered by `RUST_LOG`, or by `default` when it is unset.
@@ -1429,19 +1417,19 @@ fn doc_cmd(
             print_doc(out, json, &doc)?;
         }
         DocCmd::Diff { id } => {
-            let conflict = resolve::Conflict::read(store, &id)?;
+            let sides = resolve::Sides::load(store, &id)?;
+            let conflict = resolve::Conflict::new(&sides);
             if json {
                 print_json(out, &conflict)?;
             } else if !conflict.conflicts.is_empty() {
-                for d in &conflict.diffs {
+                for d in resolve::side_diffs(&sides) {
                     write!(out, "{}", d.diff)?;
                 }
                 let settled: Vec<String> = conflict.settled.keys().cloned().collect();
-                let contested: Vec<String> = conflict
-                    .contested
-                    .iter()
-                    .map(|c| if c.marked { format!("{} (markers)", c.field) } else { c.field.clone() })
-                    .collect();
+                let mut contested: Vec<String> = conflict.contested.iter().map(|c| c.field.clone()).collect();
+                if conflict.marked.is_some() {
+                    contested.push("content (markers)".into());
+                }
                 let list = |v: &[String]| if v.is_empty() { "none".to_string() } else { v.join(", ") };
                 writeln!(out, "merged by fields: {}; to decide: {}", list(&settled), list(&contested))?;
             }

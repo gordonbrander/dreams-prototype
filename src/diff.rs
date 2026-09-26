@@ -72,7 +72,7 @@ pub struct Edit {
 }
 
 /// Apply `edits` in order. Each `old` must occur exactly once in the text
-/// at that step, and no conflict marker may remain at the end.
+/// at that step.
 pub fn apply_edits(text: &str, edits: &[Edit]) -> Result<String, StoreError> {
     let mut text = text.to_string();
     for (i, edit) in edits.iter().enumerate() {
@@ -83,9 +83,6 @@ pub fn apply_edits(text: &str, edits: &[Edit]) -> Result<String, StoreError> {
             1 => text = text.replacen(&edit.old, &edit.new, 1),
             k => return Err(StoreError::invalid(format!("edit {n}: old text occurs {k} times; include more of it"))),
         }
-    }
-    if has_markers(&text) {
-        return Err(StoreError::invalid("content still has conflict markers"));
     }
     Ok(text)
 }
@@ -133,6 +130,5 @@ mod tests {
         assert!(err(&[edit("zzz", "")]).contains("edit 1: old text not found"));
         assert!(err(&[edit(block, "b\n"), edit("b\n", "")]).contains("edit 2: old text occurs 2 times"));
         assert!(err(&[edit("", "q")]).contains("empty"));
-        assert!(err(&[edit("a\n", "A\n")]).contains("still has conflict markers"));
     }
 }

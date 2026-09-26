@@ -745,9 +745,11 @@ fn pull_and_sync_between_two_vaults() {
     assert_eq!(a.json(&["doc", "get", "x"], "")["title"], "from b");
 
     a.ok(&["doc", "put", "-"], r#"{"_id": "y", "title": "from a"}"#);
-    let reports = a.json(&["sync", &b_db], "");
-    assert_eq!(reports[0]["written"], 0);
-    assert_eq!(reports[1]["written"], 1);
+    let report = a.json(&["sync", &b_db], "");
+    assert_eq!(report["pulled"]["written"], 0);
+    assert_eq!(report["pushed"]["written"], 1);
+    assert_eq!(report["conflicts"], json!([]));
+    assert!(a.json(&["pull", &b_db], "").get("pushed").is_none(), "a pull does not push");
     assert_eq!(b.json(&["doc", "get", "y"], "")["title"], "from a");
     let out = a.ok(&["sync", &b_db], "");
     let b_path = std::fs::canonicalize(&b_db).unwrap().to_string_lossy().into_owned();
@@ -844,7 +846,7 @@ fn resolve_auto_merges_with_a_runner() {
             "--",
             "echo",
             r#"```json
-{"fields": {"title": "merged", "_rev": "ignored"}}
+{"fields": {"title": "merged"}}
 ```"#,
         ],
         "",
@@ -1086,9 +1088,9 @@ fn sync_names_the_conflicts_and_update_keeps_them() {
     let out = a.ok(&["sync", &b.db()], "");
     assert!(out.contains("1 document has conflicts: x"), "{out}");
     assert!(out.contains("--resolve"), "{out}");
-    let reports = a.json(&["sync", &b.db()], "");
-    assert_eq!(reports[0]["conflicts"], json!(["x"]));
-    assert_eq!(reports[1]["conflicts"], json!(["x"]), "the peer has the same conflict");
+    let report = a.json(&["sync", &b.db()], "");
+    assert_eq!(report["conflicts"], json!(["x"]));
+    assert_eq!(b.json(&["doc", "conflicts"], "")["docs"][0]["id"], "x", "the peer has the same conflict");
 
     let updated = a.json(&["doc", "update", "x", "-"], r#"{"title": "again"}"#);
     assert_eq!(updated["_conflicts"].as_array().unwrap().len(), 1);
@@ -1213,10 +1215,10 @@ fn doc_diff_json_gives_the_work_that_is_left() {
     let (a, _b) = content_vaults("line 20 a\n", "line 20 b\n");
     let c = a.json(&["doc", "diff", "note", "--json"], "");
     assert_eq!(c["settled"]["title"], "Note");
-    assert_eq!(c["contested"][0]["field"], "content");
-    assert_eq!(c["contested"][0]["marked"], true);
+    assert_eq!(c["contested"], json!([]));
+    assert!(c["marked"]["ours"].is_string() && c["marked"]["theirs"].is_string(), "{c}");
     assert!(c["draft"]["content"].as_str().unwrap().contains("<<<<<<< ours\n"), "{c}");
-    assert_eq!(c["diffs"].as_array().unwrap().len(), 2);
+    assert!(c.get("diffs").is_none(), "diffs are for a person: `doc diff` without --json");
     let text = a.ok(&["doc", "diff", "note"], "");
     assert!(text.ends_with("merged by fields: title; to decide: content (markers)\n"), "{text}");
 

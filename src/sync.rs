@@ -35,10 +35,6 @@ pub struct PullReport {
     /// read the source's whole feed again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub restarted: bool,
-    /// Every document with conflicts in this vault after the pull, in id
-    /// order: the new ones and the ones not yet resolved.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub conflicts: Vec<String>,
 }
 
 /// Copy into `target` every revision of `source` committed after the
@@ -66,7 +62,6 @@ pub fn pull(target: &mut Store, source: &Store, peer: &str) -> Result<PullReport
         since = batch.last_seq;
     }
     report.last_seq = since;
-    report.conflicts = target.conflicted_ids()?;
     Ok(report)
 }
 

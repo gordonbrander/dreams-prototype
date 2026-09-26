@@ -738,20 +738,6 @@ pub async fn fire(
     now: &str,
     force: bool,
 ) -> Result<Option<Fired>, StoreError> {
-    let previous_actor = store.actor().map(str::to_string);
-    store.set_actor(Some(eval.task.id.clone()));
-    let result = fire_as_task(store, db, eval, now, force).await;
-    store.set_actor(previous_actor);
-    result
-}
-
-async fn fire_as_task(
-    store: &mut Store,
-    db: &Path,
-    eval: &Evaluation,
-    now: &str,
-    force: bool,
-) -> Result<Option<Fired>, StoreError> {
     let Some(claim) = claim(store, eval, now, force)? else {
         return Ok(None);
     };
@@ -780,7 +766,9 @@ async fn fire_as_task(
         }
     };
     let finished_at = store.now()?;
-    let done = finish(store, &claim, &outcome.0, &ctx.out, outcome.1, &finished_at);
+    // The receipt records the task as its actor.
+    let done = store
+        .as_actor(Some(eval.task.id.clone()), |s| finish(s, &claim, &outcome.0, &ctx.out, outcome.1, &finished_at));
     let _ = std::fs::remove_dir_all(&scratch);
     let done = done?;
     Ok(Some(Fired {
