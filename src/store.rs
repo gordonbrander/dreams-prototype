@@ -590,6 +590,20 @@ impl Store {
         Ok(ConflictPage { docs, next })
     }
 
+    /// Every document with conflicts, in id order.
+    pub fn conflicted_ids(&self) -> Result<Vec<String>, StoreError> {
+        let mut ids = Vec::new();
+        let mut after = None;
+        loop {
+            let page = self.conflicted(after.as_deref(), Some(MAX_LIMIT))?;
+            ids.extend(page.docs.into_iter().map(|d| d.id));
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return Ok(ids),
+            }
+        }
+    }
+
     /// `rev` and every revision behind it, newest first.
     pub fn ancestors(&self, rev_id: &str) -> Result<Vec<String>, StoreError> {
         let mut stmt = self.conn.prepare_cached(
@@ -653,7 +667,11 @@ impl Store {
     fn put_draft(&mut self, draft: Draft) -> Result<Doc, StoreError> {
         let Store { conn, validators, actor, protected_types, protected_ids } = self;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
+        let mut doc = put_draft_in(&tx, validators, actor.as_deref(), protected_types, protected_ids, draft)?;
+        // A write on the winner does not settle the other leaves: say so.
+        if head_in(&tx, &doc.id)?.is_some_and(|h| h.rev == doc.rev) {
+            doc.conflicts = conflicts_in(&tx, &doc.id, &doc.rev)?;
+        }
         tx.commit()?;
         Ok(doc)
     }

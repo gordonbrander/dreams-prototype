@@ -105,14 +105,19 @@ dreams [--db PATH] [--json] <command>
   doc list    [--type T] [--tag G] [--prefix P] [--limit N] [--before SEQ]
   doc search  <query> [--type T] [--tag G] [--prefix P] [--limit N]
   doc conflicts [--limit N] [--after ID]          documents with conflicts
+  doc diff    <id>                                each side of a conflict, as a diff from the shared revision
   doc resolve <id> [FILE]                         keep FILE (or the winner) and tombstone the conflicts
+  doc resolve <id> --keep REV                     keep one side and tombstone the others
   doc resolve <id> --auto [--runner R] [--dry-run]
-                                                  an agent writes the merge
+                                                  merge the fields, or let an agent write the merge
+  doc resolve --all --auto [--runner R] [--yes]   merge every document with conflicts
   doc history <id> [--limit N]
   doc changes [--since SEQ] [--limit N]
 
-  pull <peer.db>                                  copy the revisions this vault does not have
-  sync <peer.db>                                  pull, then push
+  pull <peer.db> [--resolve [--runner R] [--yes]]
+                                                  copy the revisions this vault does not have
+  sync <peer.db> [--resolve [--runner R] [--yes]]
+                                                  pull, then push
 
   task add    <id> --runner R --every 15m [--glob G] [--tag T] [--type T] [--id D]... [--no-deploy] [--yes] [PROMPT_FILE]
   task list                                       every task, its state here, its last run, and whether it is due
@@ -180,6 +185,7 @@ Two vaults replicate the way CouchDB databases do. A vault can pull from another
 ```
 dreams --db laptop.db pull desktop.db     # desktop's changes into laptop
 dreams --db laptop.db sync desktop.db     # pull, then push
+dreams --db laptop.db sync desktop.db --resolve   # pull, merge every conflict, then push
 ```
 
 The peer is another vault file on this machine. It must exist, so run `init` on it first. A vault cannot sync with itself. Pull and sync are CLI commands only. An agent cannot start them over MCP.
@@ -214,7 +220,19 @@ Each line of output counts revisions:
 | `missing parent` | Revisions skipped because an ancestor did not replicate. Shown only when not zero. |
 | `checkpoint reset` | The peer changed, so the whole feed was read again. |
 
-`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `missing_parent`, `last_seq`, and `restarted`.
+When the vault has [conflicts](#conflicts) after the command, the output names them, and gives the command that merges them:
+
+```
+dreams --db laptop.db sync desktop.db
+pulled 1 revision from /Users/me/desktop.db (15 present)
+pushed 1 revision to /Users/me/desktop.db (16 present)
+1 document has conflicts: notes/plan.md
+`dreams sync desktop.db --resolve` to merge them, or `dreams doc resolve <id>` to resolve one
+```
+
+The command still exits 0. The conflicts stay until you resolve them, and each later pull names them again.
+
+`--json` prints one report for `pull` and two for `sync`: `peer` (the vault the revisions came from), `read`, `written`, `present`, `missing_parent`, `last_seq`, `restarted`, and `conflicts` (every document with conflicts in the target vault, when there are any). With `--resolve`, the reports are in `pulls`, and the merge result is in `resolve`: `resolved`, `declined`, `by_hand`, and `failed`.
 
 ### What replicates
 
@@ -244,7 +262,7 @@ _conflicts:
 
 An edit made on one side wins over a delete made on the other side, so the document comes back. This is the CouchDB rule.
 
-Until you resolve, the document works as usual. Reads, lists, and search use the winner. `doc update` writes on the winner, and the conflict stays. `doc history` follows the winner's branch only. Read a losing leaf with `doc get 'doc://<id>?rev=<rev>'`.
+Until you resolve, the document works as usual. Reads, lists, and search use the winner. `doc update` writes on the winner, and the conflict stays: its output still shows `_conflicts`. `doc history` follows the winner's branch only. Read a losing leaf with `doc get 'doc://<id>?rev=<rev>'`.
 
 To find every document with conflicts:
 
@@ -254,10 +272,32 @@ ID             WINNER      CONFLICTS
 notes/plan.md  3-4be1…     1
 ```
 
+To compare the sides, `doc diff` shows each side as a diff from the last revision that the sides shared:
+
+```
+dreams doc diff notes/plan.md
+--- 2-17c0… (ancestor)
++++ 3-4be1… (winner)
+@@ -1,3 +1,3 @@
+ ---
+-title: Plan
++title: Plan for May
+ ---
+--- 2-17c0… (ancestor)
++++ 3-09ac… (conflict)
+…
+```
+
 To resolve, keep the winner:
 
 ```
 dreams doc resolve notes/plan.md
+```
+
+or keep another side:
+
+```
+dreams doc resolve notes/plan.md --keep 3-09ac…
 ```
 
 or write a merge on the winner:
@@ -274,6 +314,30 @@ A resolve does not delete the losing revisions. It writes a tombstone on each on
 
 Vaults seeded by different versions of this binary can have different built-in schemas, runners, skills, or prompts. A sync then makes conflicts on those documents. MCP clients cannot write the seeded schemas or runners, so resolve them with the CLI.
 
+### Merge every conflict in a sync
+
+```
+dreams sync desktop.db --resolve
+pulled 2 revisions from /Users/me/desktop.db (15 present)
+resolved notes/plan.md (fields)
+resolved notes/ideas.md (doc://runners/claude.json)
+pushed 4 revisions to /Users/me/desktop.db (15 present)
+```
+
+`--resolve` merges every document with conflicts in this vault, not only the ones that this pull brought in. `sync --resolve` merges after the pull and before the push, so the peer gets the merges in the same sync. `pull --resolve` merges after the pull. Each document merges as with `doc resolve --auto` (see below).
+
+On a terminal, the command shows each merge as a diff from the winner and asks once for all of them. `--yes` applies them without asking. With no terminal to ask on, the command applies them: a merge loses nothing, because the other sides stay in the vault as tombstones. If you say no, nothing is merged, and a sync still pushes.
+
+A runner is never merged by an agent, because `doc resolve --auto` runs the seeded runners without a deploy. `--resolve` names it under `resolve by hand`. Compare the sides with `doc diff`, and keep one with `doc resolve <id> --keep <rev>`.
+
+If one merge fails, the others are still written, a sync still pushes, and the command exits 1. The failed document keeps its conflicts.
+
+To merge every conflict without a pull, for example the ones that you did not resolve in an earlier sync:
+
+```
+dreams doc resolve --all --auto
+```
+
 ### Let an agent merge
 
 ```
@@ -281,9 +345,11 @@ dreams doc resolve notes/plan.md --auto --dry-run   # look first
 dreams doc resolve notes/plan.md --auto
 ```
 
-`--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude.json`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
+`--auto` first tries a merge by fields. It compares each field of each side with the last revision that the sides shared. When only one side changed a field, or every side changed it in the same way, the merge takes that change. When each field has at most one change, the merge is done, and no runner starts. The merge by fields is used only with `--auto` and `--resolve`.
 
-The merge keeps the winner's `_type`, unpinned, so it is validated against the current schema. Its `_actor` is the pinned reference of the runner revision that wrote it, unless you give `--actor`.
+When two sides changed one field in different ways, or the sides share no revision, `--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude.json`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
+
+The merge keeps the winner's `_type`, unpinned, so it is validated against the current schema. Its `_actor` is the pinned reference of the runner revision that wrote it, unless you give `--actor`. A merge by fields has the usual actor.
 
 `--dry-run` prints the merge and writes nothing. Its output is valid input for `doc resolve <id> FILE`, so you can edit the merge before you apply it:
 
@@ -300,8 +366,10 @@ If a sync brings in a new conflict while the agent works, the resolve fails and 
 An agent resolves conflicts with the same steps:
 
 1. `list_conflicts` finds the documents.
-2. `get_doc` returns the winner and its `_conflicts`. `get_doc` with `doc://<id>?rev=<rev>`, or `get_rev`, reads each one.
+2. `get_doc` returns the winner and its `_conflicts`. `get_doc` with `doc://<id>?rev=<rev>` reads each one. When the sides have the same `_parent`, that revision is the one they last shared.
 3. `resolve_doc` with `id`, the `merged` document (in the same shape as `put_doc`), and the `conflicts` it read. If new conflicts arrived since the read, the call fails, and the agent reads again.
+
+The `dreams` skill gives agents these steps.
 
 ## Scheduled tasks
 

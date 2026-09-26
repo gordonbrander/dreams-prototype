@@ -25,7 +25,39 @@ pub struct Proposal {
     pub conflicts: Vec<String>,
     pub merged: PutInput,
     /// The pinned reference of the runner revision that wrote the merge.
-    pub runner: String,
+    /// `None` when the field merge settled it, so no runner started.
+    pub runner: Option<String>,
+}
+
+/// A merge without an agent: each field takes the one change that the sides
+/// made to it. `None` when two sides changed one field in different ways,
+/// or when the sides have different types.
+pub fn field_merge(ancestor: &Doc, leaves: &[Doc]) -> Option<Map<String, Value>> {
+    let first = leaves.first()?;
+    if leaves.iter().any(|d| d.type_path() != first.type_path()) {
+        return None;
+    }
+    let keys: std::collections::BTreeSet<&String> = leaves.iter().flat_map(|d| d.body.keys()).collect();
+    let mut merged = Map::new();
+    for key in keys {
+        let base = ancestor.body.get(key);
+        let mut changes: Vec<Option<&Value>> = Vec::new();
+        for leaf in leaves {
+            let value = leaf.body.get(key);
+            if value != base && !changes.contains(&value) {
+                changes.push(value);
+            }
+        }
+        let value = match changes.as_slice() {
+            [] => base,
+            [one] => *one,
+            _ => return None,
+        };
+        if let Some(v) = value {
+            merged.insert(key.clone(), v.clone());
+        }
+    }
+    Some(merged)
 }
 
 /// The newest revision that `winner` and every one of `others` descend
@@ -114,14 +146,13 @@ pub fn parse_merge(text: &str) -> Result<Map<String, Value>, StoreError> {
     }
 }
 
-/// Ask the runner for a merge of `id`. `None` when the document has no
-/// conflicts. Nothing is written.
+/// A merge of `id`: the field merge when it settles every field, else the
+/// runner's. `None` when the document has no conflicts. Nothing is written.
 pub async fn propose(store: &Store, db: &Path, id: &str, runner_ref: &str) -> Result<Option<Proposal>, StoreError> {
     let winner = store.get(id)?;
     if winner.conflicts.is_empty() {
         return Ok(None);
     }
-    let runner = Runner::get(store, &DocRef::from_cli(runner_ref)?.to_string())?;
     let mut leaves = vec![winner.clone()];
     for rev in &winner.conflicts {
         leaves.push(store.get_rev(rev)?);
@@ -130,9 +161,15 @@ pub async fn propose(store: &Store, db: &Path, id: &str, runner_ref: &str) -> Re
         Some(rev) => Some(store.get_rev(&rev)?),
         None => None,
     };
-    let prompt = merge_prompt(id, ancestor.as_ref(), &leaves);
-    let reply = runner::invoke(&runner, db, &format!("resolve/{id}"), &prompt).await?;
-    let body = parse_merge(&reply)?;
+    let (body, runner) = match ancestor.as_ref().and_then(|a| field_merge(a, &leaves)) {
+        Some(body) => (body, None),
+        None => {
+            let runner = Runner::get(store, &DocRef::from_cli(runner_ref)?.to_string())?;
+            let prompt = merge_prompt(id, ancestor.as_ref(), &leaves);
+            let reply = runner::invoke(&runner, db, &format!("resolve/{id}"), &prompt).await?;
+            (parse_merge(&reply)?, Some(runner.pinned()))
+        }
+    };
     let merged = PutInput {
         id: Some(id.to_string()),
         parent: Some(winner.rev.clone()),
@@ -140,7 +177,7 @@ pub async fn propose(store: &Store, db: &Path, id: &str, runner_ref: &str) -> Re
         type_id: winner.type_path().map(str::to_string),
         body,
     };
-    Ok(Some(Proposal { conflicts: winner.conflicts.clone(), winner, merged, runner: runner.pinned() }))
+    Ok(Some(Proposal { conflicts: winner.conflicts.clone(), winner, merged, runner }))
 }
 
 #[cfg(test)]
@@ -178,6 +215,40 @@ mod tests {
             let err = parse_merge(bad).unwrap_err();
             assert!(matches!(err, StoreError::Runner { .. }), "{bad}: {err}");
         }
+    }
+
+    #[test]
+    fn field_merge_takes_the_one_change_to_each_field() {
+        let base = doc("1-a", json!({"title": "t", "content": "c", "tags": ["x"]}));
+        let left = doc("2-b", json!({"title": "left", "content": "c", "tags": ["x"]}));
+        let right = doc("2-c", json!({"title": "t", "content": "right"}));
+        let merged = field_merge(&base, &[left.clone(), right.clone()]).unwrap();
+        assert_eq!(
+            Value::Object(merged),
+            json!({"title": "left", "content": "right"}),
+            "a removed field stays removed"
+        );
+
+        let same = doc("2-d", json!({"title": "left", "content": "c", "tags": ["x"]}));
+        let merged = field_merge(&base, &[left.clone(), same]).unwrap();
+        assert_eq!(merged["title"], "left", "the same change on two sides is one change");
+
+        let keeps_tags = doc("2-e", json!({"title": "t", "content": "right", "tags": ["x"]}));
+        let third = doc("3-f", json!({"title": "t", "content": "c", "tags": ["x", "y"]}));
+        let merged = field_merge(&base, &[left.clone(), keeps_tags, third]).unwrap();
+        assert_eq!(Value::Object(merged), json!({"title": "left", "content": "right", "tags": ["x", "y"]}));
+    }
+
+    #[test]
+    fn field_merge_refuses_an_overlap_or_a_type_change() {
+        let base = doc("1-a", json!({"title": "t"}));
+        let left = doc("2-b", json!({"title": "left"}));
+        assert!(field_merge(&base, &[left.clone(), doc("2-c", json!({"title": "right"}))]).is_none());
+        let removed = doc("2-c", json!({}));
+        assert!(field_merge(&base, &[left.clone(), removed]).is_none(), "a removal and an edit overlap");
+        let mut typed = doc("2-d", json!({"title": "t"}));
+        typed.type_id = Some("doc://schemas/note?rev=1-x".into());
+        assert!(field_merge(&base, &[left, typed]).is_none());
     }
 
     #[test]

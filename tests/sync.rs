@@ -368,3 +368,33 @@ fn resolve_refuses_when_the_conflicts_changed() {
     assert_eq!(all.len(), 2);
     assert!(a.resolve("x", None, Some(&all)).unwrap().conflicts.is_empty());
 }
+
+#[test]
+fn a_pull_reports_every_conflict_in_the_vault() {
+    let mut a = store();
+    let mut b = store();
+    let x = put(&mut a, json!({"_id": "x", "title": "base"}));
+    let y = put(&mut a, json!({"_id": "y", "title": "base"}));
+    sync_ab(&mut a, &mut b);
+    for (id, parent) in [("x", &x.rev), ("y", &y.rev)] {
+        put(&mut a, json!({"_id": id, "_parent": parent, "title": "a"}));
+        put(&mut b, json!({"_id": id, "_parent": parent, "title": "b"}));
+    }
+    assert_eq!(pull(&mut a, &b, "b").unwrap().conflicts, ["x", "y"]);
+    a.resolve("x", None, None).unwrap();
+    assert_eq!(pull(&mut a, &b, "b").unwrap().conflicts, ["y"], "a pull with nothing new still reports the old ones");
+}
+
+#[test]
+fn a_write_on_the_winner_keeps_its_conflicts() {
+    let mut a = store();
+    let mut b = store();
+    let x = put(&mut a, json!({"_id": "x", "title": "base"}));
+    sync_ab(&mut a, &mut b);
+    put(&mut a, json!({"_id": "x", "_parent": x.rev, "title": "a"}));
+    put(&mut b, json!({"_id": "x", "_parent": x.rev, "title": "b"}));
+    sync_ab(&mut a, &mut b);
+    let head = a.get("x").unwrap();
+    let updated = put(&mut a, json!({"_id": "x", "_parent": head.rev, "title": "again"}));
+    assert_eq!(updated.conflicts, head.conflicts, "the update did not resolve the conflict");
+}

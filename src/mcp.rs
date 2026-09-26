@@ -315,7 +315,8 @@ impl Vault {
 
     #[tool(description = "Get a document by href: doc://<id> or a bare id gives the current revision, \
         doc://<id>?rev=<rev> gives that exact revision. When sync made concurrent edits, the current \
-        revision's _conflicts lists the other live revisions; read them with get_rev and settle them with resolve_doc.")]
+        revision's _conflicts lists the other live revisions; read each with doc://<id>?rev=<rev> and settle them with \
+        resolve_doc.")]
     fn get_doc(&self, Parameters(p): Parameters<GetParams>) -> Result<Json<Doc>, McpError> {
         self.lock()?.get_href(&p.href, p.deleted_conflicts).map(Json).map_err(to_mcp)
     }

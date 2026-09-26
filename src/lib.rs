@@ -10,6 +10,7 @@
 pub mod cli;
 pub mod daemon;
 pub mod db;
+pub mod diff;
 pub mod doc;
 pub mod error;
 pub mod feed;
