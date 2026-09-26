@@ -957,7 +957,7 @@ const FEED_RSS: &str = r#"<?xml version="1.0"?>
 fn commands_name_the_tasks_that_need_a_deploy() {
     let sb = Sandbox::new();
     let out = sb.ok(&["init"], "");
-    let dormant = out.lines().find(|l| l.starts_with("dormant here: ")).unwrap_or_else(|| panic!("{out}"));
+    let dormant = out.lines().find(|l| l.starts_with("dormant tasks: ")).unwrap_or_else(|| panic!("{out}"));
     assert!(dormant.contains(dreams::feed::PULL_TASK), "{out}");
 
     // One deploy of the pull task covers every feed.

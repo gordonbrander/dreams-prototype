@@ -234,8 +234,7 @@ impl Vault {
                 McpError::invalid_params("this confirmation is unknown or expired; call deploy_task again", None)
             })?;
         let answer = responses.as_ref().and_then(|r| r.get(CONFIRM_KEY));
-        let confirmed = answer.is_some_and(|a| a["action"] == "accept" && a["content"]["deploy"] == true);
-        if !confirmed {
+        if !answer.is_some_and(|a| a["action"] == "accept") {
             return Err(McpError::invalid_request("the person did not confirm; nothing was deployed", None));
         }
         let mut store = self.lock()?;
@@ -257,11 +256,8 @@ impl Vault {
              prompt and command until you deploy again or disable it.\n\n",
         );
         message.push_str(&plan.iter().map(Deploy::describe).collect::<Vec<_>>().join("\n"));
-        let schema = json!({
-            "type": "object",
-            "properties": {"deploy": {"type": "boolean", "title": "Deploy", "description": "Run these tasks here"}},
-            "required": ["deploy"]
-        });
+        // No fields: the client shows only Accept and Decline.
+        let schema = json!({"type": "object", "properties": {}});
         let request = InputRequest::Elicitation(ElicitRequest::new(ElicitRequestParams::FormElicitationParams {
             meta: None,
             message,
@@ -743,8 +739,8 @@ mod tests {
         (r.request_state.unwrap(), request["params"]["message"].as_str().unwrap().to_string())
     }
 
-    fn answer(action: &str, deploy: bool) -> Option<rmcp::model::InputResponses> {
-        serde_json::from_value(json!({CONFIRM_KEY: {"action": action, "content": {"deploy": deploy}}})).unwrap()
+    fn answer(action: &str) -> Option<rmcp::model::InputResponses> {
+        serde_json::from_value(json!({CONFIRM_KEY: {"action": action, "content": {}}})).unwrap()
     }
 
     fn deployed(vault: &Vault) -> Option<TaskState> {
@@ -773,9 +769,9 @@ mod tests {
         assert!(deployed(&vault).is_none());
 
         // decline: nothing deployed, and the handle is spent
-        assert!(vault.deploy_round(id(), Some(key.clone()), answer("decline", false), true).is_err());
-        assert!(vault.deploy_round(id(), Some(key), answer("accept", true), true).is_err(), "handle reused");
-        assert!(vault.deploy_round(id(), Some("forged".into()), answer("accept", true), true).is_err());
+        assert!(vault.deploy_round(id(), Some(key.clone()), answer("decline"), true).is_err());
+        assert!(vault.deploy_round(id(), Some(key), answer("accept"), true).is_err(), "handle reused");
+        assert!(vault.deploy_round(id(), Some("forged".into()), answer("accept"), true).is_err());
         assert!(deployed(&vault).is_none());
 
         // an edit between the rounds asks again, with the new revision
@@ -784,11 +780,11 @@ mod tests {
         let edit = json!({"_id": "tasks/t", "_parent": head.rev, "_type": task::TASK_TYPE,
             "body": {"runner": "doc://runners/claude.json", "every": "1h", "prompt": "edited"}});
         let edited = vault.put_doc(Parameters(serde_json::from_value(edit).unwrap())).unwrap().0;
-        let (key, message) = asked(vault.deploy_round(id(), Some(key), answer("accept", true), true).unwrap());
+        let (key, message) = asked(vault.deploy_round(id(), Some(key), answer("accept"), true).unwrap());
         assert!(message.contains("edited"), "{message}");
 
         // accept: deployed at the confirmed revision
-        let done = vault.deploy_round(id(), Some(key), answer("accept", true), true).unwrap();
+        let done = vault.deploy_round(id(), Some(key), answer("accept"), true).unwrap();
         assert!(matches!(done, CallToolResponse::Complete(_)));
         let state = deployed(&vault).unwrap();
         assert!(state.enabled);

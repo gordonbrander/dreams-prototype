@@ -867,7 +867,7 @@ fn deploy_hints(store: &Store, out: &mut dyn Write, runner: Option<&str>) -> any
         }
     }
     if !dormant.is_empty() {
-        writeln!(out, "dormant tasks: {}\n.`dreams task deploy <id>` to start one", dormant.join(", "))?;
+        writeln!(out, "dormant tasks: {}.\n`dreams task deploy <id>` to start one", dormant.join(", "))?;
     }
     if !changed.is_empty() {
         writeln!(
