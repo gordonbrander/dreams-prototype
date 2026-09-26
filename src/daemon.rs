@@ -65,11 +65,16 @@ pub async fn run(store: &mut Store, db: &Path, interval: Duration, poll: Duratio
 
 // ---- install ------------------------------------------------------------
 
-fn stem(db: &Path) -> String {
-    let raw = db.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "vault".into());
-    let clean: String = raw.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '-' }).collect();
-    if clean.is_empty() { "vault".into() } else { clean }
+/// The name of a vault's service: `vault-<id>`. The id never replicates, so
+/// two vaults never share a name, and a vault that moves keeps its name.
+pub fn service_name(vault_id: &str) -> String {
+    format!("vault-{vault_id}")
 }
+
+const LABEL_PREFIX: &str = "io.dreams.";
+const PLIST_SUFFIX: &str = ".plist";
+const UNIT_PREFIX: &str = "dreams-";
+const UNIT_SUFFIX: &str = ".service";
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -125,8 +130,58 @@ pub fn render_unit(exe: &Path, db: &Path, path_env: &str) -> String {
     )
 }
 
+/// The part of `render_plist` that names `db`.
+fn plist_fragment(db: &Path) -> String {
+    format!("<string>--db</string>\n    <string>{}</string>", xml_escape(&db.to_string_lossy()))
+}
+
+/// The part of `render_unit` that names `db`.
+fn unit_fragment(db: &Path) -> String {
+    format!(" --db {} daemon\n", db.to_string_lossy())
+}
+
+/// The names of the services in `dir` whose file is `<prefix><name><suffix>`
+/// and contains `fragment`. A missing `dir` has none.
+fn services_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(Result::ok)
+        .filter_map(|e| {
+            let file = e.file_name().to_string_lossy().into_owned();
+            let name = file.strip_prefix(prefix)?.strip_suffix(suffix)?.to_string();
+            std::fs::read_to_string(e.path()).ok()?.contains(fragment).then_some(name)
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The services of a vault: every one that points at its database, and
+/// the one its id names, if that is installed. Old names and the service of
+/// a deleted vault are found by the path.
+fn installed_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str, vault_id: Option<&str>) -> Vec<String> {
+    let mut names = services_for(dir, prefix, suffix, fragment);
+    if let Some(name) = vault_id.map(service_name)
+        && !names.contains(&name)
+        && dir.join(format!("{prefix}{name}{suffix}")).exists()
+    {
+        names.push(name);
+    }
+    names
+}
+
 fn home() -> Result<PathBuf, StoreError> {
     std::env::var_os("HOME").map(PathBuf::from).ok_or_else(|| StoreError::invalid("HOME is not set"))
+}
+
+fn agents_dir(home: &Path) -> PathBuf {
+    home.join("Library/LaunchAgents")
+}
+
+fn units_dir(home: &Path) -> PathBuf {
+    home.join(".config/systemd/user")
 }
 
 fn sh(program: &str, args: &[String]) -> Result<(), StoreError> {
@@ -147,16 +202,50 @@ fn uid(home: &Path) -> Result<u32, StoreError> {
     Ok(std::fs::metadata(home).map_err(|e| StoreError::invalid(format!("{}: {e}", home.display())))?.uid())
 }
 
-/// Register the daemon with the OS. `db` must be absolute.
-pub fn install(db: &Path, exe: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
+fn io(e: std::io::Error) -> StoreError {
+    StoreError::invalid(e.to_string())
+}
+
+fn remove_file(path: &Path) -> Result<(), StoreError> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        _ => Ok(()),
+    }
+}
+
+/// Stop a launchd agent and remove its plist.
+fn remove_agent(home: &Path, name: &str) -> Result<(), StoreError> {
+    let label = format!("{LABEL_PREFIX}{name}");
+    let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{label}", uid(home)?)]).output();
+    remove_file(&agents_dir(home).join(format!("{label}{PLIST_SUFFIX}")))
+}
+
+/// Stop a systemd user unit and remove its file.
+fn remove_unit(home: &Path, name: &str) -> Result<(), StoreError> {
+    let unit = format!("{UNIT_PREFIX}{name}{UNIT_SUFFIX}");
+    let _ = Command::new("systemctl").args(["--user", "disable", "--now", &unit]).output();
+    remove_file(&units_dir(home).join(&unit))?;
+    let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
+    Ok(())
+}
+
+/// Register the daemon of the vault at `db` with the OS, named by its id.
+/// Other services for the same `db`, such as ones with an old name, are
+/// removed first. `db` must be absolute.
+pub fn install(db: &Path, vault_id: &str, exe: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
     let path_env = std::env::var("PATH").unwrap_or_default();
     let home = home()?;
-    let stem = stem(db);
-    let io = |e: std::io::Error| StoreError::invalid(e.to_string());
+    let name = service_name(vault_id);
     if cfg!(target_os = "macos") {
-        let label = format!("io.dreams.{stem}");
-        let plist = home.join("Library/LaunchAgents").join(format!("{label}.plist"));
-        let log = home.join("Library/Logs/dreams").join(format!("{stem}.log"));
+        for old in services_for(&agents_dir(&home), LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db)) {
+            if old != name {
+                remove_agent(&home, &old)?;
+                writeln!(out, "removed {LABEL_PREFIX}{old}").map_err(io)?;
+            }
+        }
+        let label = format!("{LABEL_PREFIX}{name}");
+        let plist = agents_dir(&home).join(format!("{label}{PLIST_SUFFIX}"));
+        let log = home.join("Library/Logs/dreams").join(format!("{name}.log"));
         std::fs::create_dir_all(plist.parent().unwrap()).map_err(io)?;
         std::fs::create_dir_all(log.parent().unwrap()).map_err(io)?;
         std::fs::write(&plist, render_plist(&label, exe, db, &log, &path_env)).map_err(io)?;
@@ -165,15 +254,21 @@ pub fn install(db: &Path, exe: &Path, out: &mut dyn Write) -> Result<(), StoreEr
         sh("launchctl", &["bootstrap".into(), domain, plist.to_string_lossy().into_owned()])?;
         writeln!(out, "installed {label}\n  {}\nlogs: {}", plist.display(), log.display()).map_err(io)?;
     } else if cfg!(target_os = "linux") {
-        let name = format!("dreams-{stem}.service");
-        let unit = home.join(".config/systemd/user").join(&name);
+        for old in services_for(&units_dir(&home), UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db)) {
+            if old != name {
+                remove_unit(&home, &old)?;
+                writeln!(out, "removed {UNIT_PREFIX}{old}{UNIT_SUFFIX}").map_err(io)?;
+            }
+        }
+        let unit_name = format!("{UNIT_PREFIX}{name}{UNIT_SUFFIX}");
+        let unit = units_dir(&home).join(&unit_name);
         std::fs::create_dir_all(unit.parent().unwrap()).map_err(io)?;
         std::fs::write(&unit, render_unit(exe, db, &path_env)).map_err(io)?;
         sh("systemctl", &["--user".into(), "daemon-reload".into()])?;
-        sh("systemctl", &["--user".into(), "enable".into(), "--now".into(), name.clone()])?;
+        sh("systemctl", &["--user".into(), "enable".into(), "--now".into(), unit_name.clone()])?;
         writeln!(
             out,
-            "installed {name}\n  {}\nlogs: journalctl --user -u {name}\nTo keep it running while logged out: loginctl enable-linger",
+            "installed {unit_name}\n  {}\nlogs: journalctl --user -u {unit_name}\nTo keep it running while logged out: loginctl enable-linger",
             unit.display()
         )
         .map_err(io)?;
@@ -187,38 +282,30 @@ pub fn install(db: &Path, exe: &Path, out: &mut dyn Write) -> Result<(), StoreEr
     Ok(())
 }
 
-pub fn uninstall(db: &Path, out: &mut dyn Write) -> Result<(), StoreError> {
+/// Stop and remove every service of the vault at `db`: the one its id names,
+/// when the id is known, and every one that points at `db`.
+pub fn uninstall(db: &Path, vault_id: Option<&str>, out: &mut dyn Write) -> Result<(), StoreError> {
     let home = home()?;
-    let stem = stem(db);
-    let io = |e: std::io::Error| StoreError::invalid(e.to_string());
-    if cfg!(target_os = "macos") {
-        let label = format!("io.dreams.{stem}");
-        let plist = home.join("Library/LaunchAgents").join(format!("{label}.plist"));
-        let domain = format!("gui/{}", uid(&home)?);
-        let _ = Command::new("launchctl").args(["bootout", &format!("{domain}/{label}")]).output();
-        match std::fs::remove_file(&plist) {
-            Ok(()) => writeln!(out, "removed {label}").map_err(io)?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                writeln!(out, "{label} was not installed").map_err(io)?
-            }
-            Err(e) => return Err(io(e)),
+    let removed: Vec<String> = if cfg!(target_os = "macos") {
+        let names = installed_for(&agents_dir(&home), LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db), vault_id);
+        for name in &names {
+            remove_agent(&home, name)?;
         }
+        names.iter().map(|n| format!("{LABEL_PREFIX}{n}")).collect()
     } else if cfg!(target_os = "linux") {
-        let name = format!("dreams-{stem}.service");
-        let unit = home.join(".config/systemd/user").join(&name);
-        let _ = Command::new("systemctl").args(["--user", "disable", "--now", &name]).output();
-        match std::fs::remove_file(&unit) {
-            Ok(()) => {
-                let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
-                writeln!(out, "removed {name}").map_err(io)?
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                writeln!(out, "{name} was not installed").map_err(io)?
-            }
-            Err(e) => return Err(io(e)),
+        let names = installed_for(&units_dir(&home), UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db), vault_id);
+        for name in &names {
+            remove_unit(&home, name)?;
         }
+        names.iter().map(|n| format!("{UNIT_PREFIX}{n}{UNIT_SUFFIX}")).collect()
     } else {
         return Err(StoreError::invalid("no installer for this platform"));
+    };
+    if removed.is_empty() {
+        writeln!(out, "no dreams service for {}", db.display()).map_err(io)?;
+    }
+    for name in removed {
+        writeln!(out, "removed {name}").map_err(io)?;
     }
     Ok(())
 }
@@ -248,8 +335,55 @@ mod tests {
     }
 
     #[test]
-    fn stems_are_safe_labels() {
-        assert_eq!(stem(Path::new("/a/vault.db")), "vault");
-        assert_eq!(stem(Path::new("/a/my notes.sqlite")), "my-notes");
+    fn each_vault_id_names_its_own_service() {
+        assert_eq!(service_name("01a0"), "vault-01a0");
+        assert_ne!(service_name("01a0"), service_name("01a1"));
+    }
+
+    fn scratch() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("dreams-daemon-{}", crate::doc::new_id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn services_are_found_by_the_database_they_run() {
+        let dir = scratch();
+        let exe = Path::new("/opt/bin/dreams");
+        let db = Path::new("/v/work/vault.db");
+        let other = Path::new("/v/home/vault.db");
+        let log = Path::new("/l/x.log");
+        let write = |file: &str, text: String| std::fs::write(dir.join(file), text).unwrap();
+        write("io.dreams.vault.plist", render_plist("io.dreams.vault", exe, db, log, ""));
+        write("io.dreams.vault-01a0.plist", render_plist("io.dreams.vault-01a0", exe, db, log, ""));
+        write("io.dreams.vault-01a1.plist", render_plist("io.dreams.vault-01a1", exe, other, log, ""));
+        write("com.other.plist", render_plist("com.other", exe, db, log, ""));
+        write("dreams-vault.service", render_unit(exe, db, ""));
+        write("dreams-vault-01a1.service", render_unit(exe, other, ""));
+
+        let plists = |db: &Path| services_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db));
+        assert_eq!(plists(db), ["vault", "vault-01a0"]);
+        assert_eq!(plists(other), ["vault-01a1"]);
+        let units = |db: &Path| services_for(&dir, UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db));
+        assert_eq!(units(db), ["vault"]);
+        assert_eq!(units(other), ["vault-01a1"]);
+        // A path that another path starts with is not the same database.
+        assert_eq!(plists(Path::new("/v/work/vault")), Vec::<String>::new());
+        assert_eq!(services_for(&dir.join("missing"), LABEL_PREFIX, PLIST_SUFFIX, "x"), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_moved_vault_is_found_by_its_id() {
+        let dir = scratch();
+        let exe = Path::new("/opt/bin/dreams");
+        let log = Path::new("/l/x.log");
+        let old = render_plist("io.dreams.vault-01a0", exe, Path::new("/old/vault.db"), log, "");
+        std::fs::write(dir.join("io.dreams.vault-01a0.plist"), old).unwrap();
+        let fragment = plist_fragment(Path::new("/new/vault.db"));
+        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, None), Vec::<String>::new());
+        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, Some("01a0")), ["vault-01a0"]);
+        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, Some("01a1")), Vec::<String>::new());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -474,11 +474,16 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
             let db = absolute(&cli.db)?;
             match action {
                 Some(DaemonCmd::Install) => {
-                    open()?; // create and migrate first, so the daemon finds a database
+                    // Create and migrate first, so the daemon finds a database.
+                    let id = open()?.vault_id()?;
                     let exe = std::env::current_exe()?;
-                    daemon::install(&db, &exe, out)?;
+                    daemon::install(&db, &id, &exe, out)?;
                 }
-                Some(DaemonCmd::Uninstall) => daemon::uninstall(&db, out)?,
+                Some(DaemonCmd::Uninstall) => {
+                    // A deleted vault has no id; its service is found by path. Opening would create the file.
+                    let id = if db.exists() { Some(Store::open(&db)?.vault_id()?) } else { None };
+                    daemon::uninstall(&db, id.as_deref(), out)?
+                }
                 None => {
                     let mut store = open()?;
                     let interval = std::time::Duration::from_secs(task::parse_duration(&interval)?);
