@@ -1,6 +1,11 @@
+---
+_type: doc://schemas/skill.json
+name: bookmark
+description: "Save a web page as a bookmark: fetch it, summarize it, and tag it. Use when the user wants to bookmark, clip, or save a link, or find saved links."
+---
 # Bookmarks
 
-A bookmark is one document for one web page. Its `_type` is `doc://schemas/bookmark`. It has the tag `bookmark`.
+A bookmark is one document for one web page. Its `_type` is `doc://schemas/bookmark.json`. It has the tag `bookmark`.
 
 A bookmark has these fields:
 - `url` is the address of the page, as the user gave it.
@@ -32,10 +37,10 @@ Examples:
 2. Get the page with your web fetch tool. Find its title and read its text. If you cannot get the page, use the URL as the title, and tell the user.
 3. Write the summary: two to five sentences or bullets in Markdown about what the page says.
 4. Call `get_doc` with `href` set to the id.
-5. If the document is not found, create it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark`, and no `_parent`. Use this body: `{"title": "<title>", "url": "<url>", "content": "<content>", "tags": ["bookmark", ...]}`.
+5. If the document is not found, create it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark.json`, and no `_parent`. Use this body: `{"title": "<title>", "url": "<url>", "content": "<content>", "tags": ["bookmark", ...]}`.
    - `content` is the summary. If the user gave notes, add `\n\n## Notes\n\n` and then the notes.
    - `tags` is `bookmark` and one to five topic tags. Write tags in lowercase, with `-` between words. Use tags that other bookmarks use when they fit. To see them, call `list_docs` with `tag` set to `bookmark`.
-6. If the document is found, update it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark`, and `_parent` set to its `_rev`. Send the full body:
+6. If the document is found, update it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark.json`, and `_parent` set to its `_rev`. Send the full body:
    - Set `title` and `url` to the new values.
    - In `content`, replace the summary with the new summary. Keep the `## Notes` section. Add the new notes to the end of it, with one empty line between notes.
    - Keep the old tags. Add new topic tags if they fit. Make sure that `tags` contains `bookmark`.

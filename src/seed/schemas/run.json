@@ -1,0 +1,17 @@
+{
+  "title": "Task run",
+  "description": "The receipt of one firing of a task, written when the agent finished. `task` and `runner` are the pinned doc:// references of the task and runner revisions that ran. `vault` is the id of the vault that ran it.",
+  "type": "object",
+  "required": ["task", "runner", "vault", "started_at", "finished_at", "tags"],
+  "properties": {
+    "task": {"type": "string"},
+    "runner": {"type": "string"},
+    "vault": {"type": "string"},
+    "started_at": {"type": "string"},
+    "finished_at": {"type": "string"},
+    "exit_code": {"type": ["integer", "null"]},
+    "error": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

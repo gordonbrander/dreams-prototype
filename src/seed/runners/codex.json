@@ -1,0 +1,19 @@
+{
+  "_type": "doc://schemas/runner.json",
+  "title": "Codex CLI, non-interactive",
+  "command": [
+    "codex",
+    "exec",
+    "-c",
+    "approval_policy=never",
+    "-c",
+    "tools.web_search=true",
+    "--sandbox",
+    "workspace-write",
+    "--skip-git-repo-check",
+    "--output-last-message",
+    "{out}",
+    "-"
+  ],
+  "timeout": "10m"
+}

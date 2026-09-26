@@ -1,9 +1,9 @@
-//! Runners: documents typed `doc://schemas/runner` that hold an argv
-//! template. A task names one by `doc://` reference. The template is
+//! Runners: documents typed `doc://schemas/runner.json` that hold a command
+//! template: a program and its arguments. A task names one by `doc://` reference. The template is
 //! spawned directly, never through a shell, with tokens replaced inside
-//! each element. Runner commands are code, so they enter only through the
-//! CLI: `serve` marks the type protected. The default runners are seeded
-//! by `seed::seed`.
+//! each element. Runner commands are code, so none runs until a person
+//! confirms a deploy that shows it. The default runners are seeded by
+//! `seed::seed`, and `serve` keeps them read-only.
 
 use std::path::{Path, PathBuf};
 
@@ -11,49 +11,37 @@ use serde_json::json;
 
 use crate::doc::{Doc, DocRef};
 use crate::error::StoreError;
+use crate::seed;
 use crate::store::Store;
 use crate::task::{self, parse_duration};
 
 /// The seeded schema document for runners, as a type path.
-pub const RUNNER_TYPE: &str = "doc://schemas/runner";
+pub const RUNNER_TYPE: &str = "doc://schemas/runner.json";
 
 /// Type paths that MCP clients may read but not write or delete.
-pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
+pub const PROTECTED_TYPES: &[&str] = &[task::RUN_TYPE];
 
-/// Seeded schema documents that MCP clients may not change.
-pub const PROTECTED_IDS: &[&str] = &[
-    "schemas/task",
-    "schemas/run",
-    "schemas/runner",
-    "schemas/skill",
-    "schemas/prompt",
-    "schemas/daily",
-    "schemas/bookmark",
-    "schemas/feed",
-    "schemas/feed-item",
-];
+/// Seeded documents that MCP clients may not change: the schemas, and the
+/// runners. Other runners are writable over MCP, because a runner runs only
+/// after a person confirms a deploy that shows its command. The seeded
+/// runners also run without a deploy, from `doc resolve --auto`.
+pub fn protected_ids() -> Vec<&'static str> {
+    seed::FILES
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| id.starts_with("schemas/") || id.starts_with("runners/"))
+        .collect()
+}
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
-
-/// The body of `schemas/runner`.
-pub const RUNNER_SCHEMA: &str = r#"{
-  "title": "Runner",
-  "description": "A command that runs an agent: argv with {db} {task} {run} {mcp} {out} {exe} tokens. The prompt arrives on stdin; the last message is read from stdout, or from {out} when the command wrote it.",
-  "type": "object",
-  "required": ["argv"],
-  "properties": {
-    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-    "timeout": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
-    "title": {"type": "string"}
-  }
-}"#;
 
 #[derive(Debug, Clone)]
 pub struct Runner {
     pub id: String,
     /// The revision that was read, so a run can record exactly what ran.
     pub rev: String,
-    pub argv: Vec<String>,
+    /// The program and its arguments, before tokens are replaced.
+    pub command: Vec<String>,
     pub timeout_secs: u64,
 }
 
@@ -67,12 +55,15 @@ impl Runner {
         if doc.type_path() != Some(RUNNER_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {RUNNER_TYPE} document", doc.id)));
         }
-        let argv: Vec<String> = doc.field("argv").unwrap_or_default();
-        if argv.is_empty() {
-            return Err(StoreError::invalid(format!("runner {}: argv must be a non-empty array of strings", doc.id)));
+        let command: Vec<String> = doc.field("command").unwrap_or_default();
+        if command.is_empty() {
+            return Err(StoreError::invalid(format!(
+                "runner {}: command must be a non-empty array of strings",
+                doc.id
+            )));
         }
         let timeout = doc.field::<&str>("timeout").unwrap_or(DEFAULT_TIMEOUT);
-        Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
+        Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), command, timeout_secs: parse_duration(timeout)? })
     }
 
     /// Load by `doc://` reference: the head, or one pinned revision.
@@ -115,7 +106,7 @@ pub async fn invoke(runner: &Runner, db: &Path, name: &str, prompt: &str) -> Res
     std::fs::create_dir_all(&cwd).map_err(|e| StoreError::invalid(format!("creating {}: {e}", cwd.display())))?;
     let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
     let timeout = std::time::Duration::from_secs(runner.timeout_secs);
-    let outcome = task::spawn(&ctx.resolve(&runner.argv), &ctx.env(), &cwd, prompt, timeout).await;
+    let outcome = task::spawn(&ctx.resolve(&runner.command), &ctx.env(), &cwd, prompt, timeout).await;
     let message = task::last_message(&ctx.out, &outcome.stdout);
     let _ = std::fs::remove_dir_all(&scratch);
     let errors = task::failures(&outcome, timeout);
@@ -153,11 +144,13 @@ impl Context {
         ]
     }
 
-    /// Replace `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, `{exe}` inside
-    /// each element. Elements stay separate: no shell, no re-splitting.
-    pub fn resolve(&self, argv: &[String]) -> Vec<String> {
+    /// A runner's command as the argv to spawn: `{db}`, `{task}`, `{run}`,
+    /// `{mcp}`, `{out}`, `{exe}` replaced inside each element. Elements stay
+    /// separate: no shell, no re-splitting.
+    pub fn resolve(&self, command: &[String]) -> Vec<String> {
         let pairs = self.pairs();
-        argv.iter()
+        command
+            .iter()
             .map(|arg| pairs.iter().fold(arg.clone(), |acc, (name, value)| acc.replace(&format!("{{{name}}}"), value)))
             .collect()
     }
@@ -228,7 +221,7 @@ mod tests {
     }
 
     #[test]
-    fn runner_from_doc_checks_type_and_argv() {
+    fn runner_from_doc_checks_type_and_command() {
         let mut doc = Doc {
             id: "runners/x".into(),
             rev: "1-a".into(),
@@ -240,19 +233,19 @@ mod tests {
             seq: None,
             conflicts: Vec::new(),
             deleted_conflicts: Vec::new(),
-            body: serde_json::from_value(json!({"argv": ["cat"], "timeout": "2m"})).unwrap(),
+            body: serde_json::from_value(json!({"command": ["cat"], "timeout": "2m"})).unwrap(),
         };
         let r = Runner::from_doc(&doc).unwrap();
-        assert_eq!(r.argv, ["cat"]);
+        assert_eq!(r.command, ["cat"]);
         assert_eq!(r.timeout_secs, 120);
         assert_eq!(r.pinned(), "doc://runners/x?rev=1-a");
-        for argv in [json!([]), json!("cat"), json!(["cat", 5])] {
-            doc.body.insert("argv".into(), argv.clone());
+        for command in [json!([]), json!("cat"), json!(["cat", 5])] {
+            doc.body.insert("command".into(), command.clone());
             let err = Runner::from_doc(&doc).unwrap_err().to_string();
-            assert!(err.contains("argv must be a non-empty array of strings"), "{argv}: {err}");
+            assert!(err.contains("command must be a non-empty array of strings"), "{command}: {err}");
         }
-        doc.body.remove("argv");
-        assert!(Runner::from_doc(&doc).is_err(), "a missing argv");
+        doc.body.remove("command");
+        assert!(Runner::from_doc(&doc).is_err(), "a missing command");
         doc.type_id = Some("doc://schemas/note?rev=1-a".into());
         assert!(Runner::from_doc(&doc).is_err());
     }

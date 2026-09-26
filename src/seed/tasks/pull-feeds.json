@@ -1,0 +1,7 @@
+{
+  "_type": "doc://schemas/task.json",
+  "title": "Pull feeds",
+  "runner": "doc://runners/feeds.json",
+  "every": "1h",
+  "prompt": "Pull every feed. This runner does not read the prompt."
+}

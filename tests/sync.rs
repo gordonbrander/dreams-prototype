@@ -169,31 +169,31 @@ fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
 
     put(
         &mut b,
-        json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude", "every": "1h", "prompt": "go"}),
+        json!({"_id": "tasks/t", "_type": TASK_TYPE, "runner": "doc://runners/claude.json", "every": "1h", "prompt": "go"}),
     );
     let b_vault = b.vault_id().unwrap();
     put(
         &mut b,
-        json!({"_id": "runs/1", "_type": RUN_TYPE, "task": "doc://tasks/t", "runner": "doc://runners/claude",
+        json!({"_id": "runs/1", "_type": RUN_TYPE, "task": "doc://tasks/t", "runner": "doc://runners/claude.json",
                        "vault": b_vault, "started_at": "2026-09-23T10:00:00.000Z",
                        "finished_at": "2026-09-23T10:01:00.000Z", "tags": ["tasks/t"]}),
     );
     let plan = task::plan_deploy(&b, Some("tasks/t")).unwrap();
     task::apply_deploy(&mut b, &plan).unwrap();
-    let claude = b.get("runners/claude").unwrap();
+    let claude = b.get("runners/claude.json").unwrap();
     let mut body = Value::Object(claude.body.clone());
-    body["_id"] = json!("runners/claude");
+    body["_id"] = json!("runners/claude.json");
     body["_parent"] = json!(claude.rev);
     body["_type"] = json!(RUNNER_TYPE);
-    body["argv"] = json!(["claude", "-p", "--edited"]);
+    body["command"] = json!(["claude", "-p", "--edited"]);
     put(&mut b, body);
 
     let r = pull(&mut a, &b, "b").unwrap();
     assert_eq!((r.written, r.missing_parent), (3, 0));
     assert_eq!(a.get("runs/1").unwrap().body["vault"], b.vault_id().unwrap());
     assert_ne!(a.vault_id().unwrap(), b.vault_id().unwrap());
-    let runner = Runner::get(&a, "doc://runners/claude").unwrap();
-    assert_eq!(runner.argv, ["claude", "-p", "--edited"]);
+    let runner = Runner::get(&a, "doc://runners/claude.json").unwrap();
+    assert_eq!(runner.command, ["claude", "-p", "--edited"]);
 
     // deployed on b, dormant on a until a deploys it
     let now = a.now().unwrap();
@@ -208,7 +208,7 @@ fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
     let head = b.get("tasks/t").unwrap();
     let edit = put(
         &mut b,
-        json!({"_id": "tasks/t", "_parent": head.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude",
+        json!({"_id": "tasks/t", "_parent": head.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude.json",
                "every": "1h", "prompt": "changed on b"}),
     );
     sync_ab(&mut a, &mut b);
@@ -228,7 +228,7 @@ fn a_document_that_changes_type_replicates_whole() {
     let note = put(&mut b, json!({"_id": "tasks/t", "title": "an idea"}));
     put(
         &mut b,
-        json!({"_id": "tasks/t", "_parent": note.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude",
+        json!({"_id": "tasks/t", "_parent": note.rev, "_type": TASK_TYPE, "runner": "doc://runners/claude.json",
                "every": "1h", "prompt": "go"}),
     );
     let r = pull(&mut a, &b, "b").unwrap();

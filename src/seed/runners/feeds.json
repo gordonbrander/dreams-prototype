@@ -1,0 +1,11 @@
+{
+  "_type": "doc://schemas/runner.json",
+  "title": "Pull every feed",
+  "command": [
+    "{exe}",
+    "--json",
+    "feed",
+    "pull"
+  ],
+  "timeout": "10m"
+}

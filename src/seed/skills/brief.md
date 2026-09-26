@@ -1,3 +1,8 @@
+---
+_type: doc://schemas/skill.json
+name: brief
+description: "Make a daily brief: food for thought that brings back ideas from the user's notes, with today's intention as its theme. Use when the user asks for a brief or a daily review."
+---
 # Daily brief
 
 A brief is a short page of food for thought for one day. It brings back ideas from the user's own notes. It uses the day's intention as its theme. The user must be able to read it in about two minutes.

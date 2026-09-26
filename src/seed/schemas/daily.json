@@ -1,0 +1,11 @@
+{
+  "title": "Daily note",
+  "description": "One document per day. The _id is the local date as YYYY-MM-DD.md. content is the log for the day; intention is the one intention for the day.",
+  "type": "object",
+  "properties": {
+    "title": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}},
+    "intention": {"type": "string"}
+  }
+}

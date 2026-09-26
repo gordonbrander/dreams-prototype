@@ -1,0 +1,15 @@
+{
+  "title": "Feed item",
+  "description": "One item that a pull of `feed` wrote, as the feed gave it. content is the item's content or summary, verbatim; for an html feed it is the text of the page. Before you process an item, read the instructions of its feed document, if it has them.",
+  "type": "object",
+  "required": ["feed"],
+  "properties": {
+    "feed": {"type": "string", "pattern": "^doc://"},
+    "url": {"type": "string"},
+    "title": {"type": "string"},
+    "published": {"type": "string"},
+    "guid": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

@@ -1,10 +1,10 @@
-//! Scheduled tasks: documents typed `doc://schemas/task` that wake an agent
+//! Scheduled tasks: documents typed `doc://schemas/task.json` that wake an agent
 //! every interval, optionally only when watched documents changed. A task
 //! document is a template and replicates. Each vault keeps its own schedule
 //! in the local `task_state` table: a task with no row is dormant there.
 //! A deploy pins the task revision and the runner revision that run, so an
 //! edit, local or synced, runs only after the next deploy. Each run writes
-//! a receipt, a document typed `doc://schemas/run`, which also replicates.
+//! a receipt, a document typed `doc://schemas/run.json`, which also replicates.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::doc::{Doc, DocRef, PutInput, new_id};
+use crate::doc::{Doc, DocRef, PutInput, new_id, stem};
 use crate::error::StoreError;
 use crate::rev::short_rev;
 use crate::runner::{Context, Runner};
@@ -26,57 +26,12 @@ use crate::store::{DOC_COLS, Store, row_to_doc, type_filter};
 use crate::text::truncate_bytes;
 
 /// Seeded schema documents, as type paths.
-pub const TASK_TYPE: &str = "doc://schemas/task";
-pub const RUN_TYPE: &str = "doc://schemas/run";
+pub const TASK_TYPE: &str = "doc://schemas/task.json";
+pub const RUN_TYPE: &str = "doc://schemas/run.json";
 
 /// Agent output above this is cut, and the run records the cut.
 pub const MAX_CONTENT_BYTES: usize = 512 * 1024;
 const MAX_STDERR_BYTES: usize = 4 * 1024;
-
-/// The body of `schemas/task`.
-pub const TASK_SCHEMA: &str = r#"{
-  "title": "Scheduled task",
-  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document. `cwd` is the folder the agent runs in: a relative path is relative to the vault's folder, and the default is `workspace`.",
-  "type": "object",
-  "required": ["runner", "every", "prompt"],
-  "properties": {
-    "runner": {"type": "string", "pattern": "^doc://"},
-    "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
-    "prompt": {"type": "string"},
-    "cwd": {"type": "string", "minLength": 1},
-    "when": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "glob": {"type": "string", "minLength": 1},
-        "tag": {"type": "string", "minLength": 1},
-        "type": {"type": "string", "minLength": 1},
-        "ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
-      }
-    },
-    "title": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
-
-/// The body of `schemas/run`.
-pub const RUN_SCHEMA: &str = r#"{
-  "title": "Task run",
-  "description": "The receipt of one firing of a task, written when the agent finished. `task` and `runner` are the pinned doc:// references of the task and runner revisions that ran. `vault` is the id of the vault that ran it.",
-  "type": "object",
-  "required": ["task", "runner", "vault", "started_at", "finished_at", "tags"],
-  "properties": {
-    "task": {"type": "string"},
-    "runner": {"type": "string"},
-    "vault": {"type": "string"},
-    "started_at": {"type": "string"},
-    "finished_at": {"type": "string"},
-    "exit_code": {"type": ["integer", "null"]},
-    "error": {"type": "string"},
-    "content": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
 
 /// `30s`, `15m`, `2h`, `1d`, `1w` to seconds. Zero is an error.
 pub fn parse_duration(text: &str) -> Result<u64, StoreError> {
@@ -95,6 +50,17 @@ pub fn parse_duration(text: &str) -> Result<u64, StoreError> {
         return Err(StoreError::invalid("duration must be greater than zero"));
     }
     Ok(n * mult)
+}
+
+/// Seconds as the largest unit that divides them: 600 is `10m`.
+pub fn format_duration(secs: u64) -> String {
+    let unit = [(604_800, 'w'), (86_400, 'd'), (3600, 'h'), (60, 'm')]
+        .into_iter()
+        .find(|(n, _)| secs > 0 && secs.is_multiple_of(*n));
+    match unit {
+        Some((n, u)) => format!("{}{u}", secs / n),
+        None => format!("{secs}s"),
+    }
 }
 
 /// The change filter. Fields are AND-ed.
@@ -178,7 +144,7 @@ pub fn work_dir(db: &Path, cwd: Option<&str>) -> PathBuf {
 }
 
 /// One matching revision since the cursor.
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq, JsonSchema)]
 pub struct Change {
     pub seq: i64,
     pub id: String,
@@ -202,10 +168,12 @@ pub struct TaskState {
     pub last_run_at: Option<String>,
     /// Set while a run holds the task.
     pub lease_until: Option<String>,
+    /// The next tick fires the task, whatever its schedule says.
+    pub run_requested: bool,
 }
 
 /// Everything `task check` shows and `tick` decides on.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema)]
 pub struct Evaluation {
     /// The revision that runs: the deployed one, or the head when dormant.
     pub task: Doc,
@@ -224,15 +192,23 @@ pub struct Evaluation {
     pub running: bool,
     /// The interval has elapsed since the last run.
     pub time_due: bool,
-    /// Ready to fire: enabled, not running, time due, and changes when `when` is set.
+    /// Ready to fire: enabled, not running, and either a run was requested or
+    /// time due, with changes when `when` is set.
     pub due: bool,
     pub changes: Vec<Change>,
     #[serde(skip)]
+    #[schemars(skip)]
     pub parsed: Task,
     /// The runner revision that would run, resolved once per evaluation,
-    /// or why it could not be loaded.
-    #[serde(skip)]
+    /// or why it could not be loaded. Serialized as `runner_error`: why
+    /// the runner cannot run, or null.
+    #[serde(rename = "runner_error", serialize_with = "runner_error")]
+    #[schemars(with = "Option<String>")]
     pub runner: Result<Runner, String>,
+}
+
+fn runner_error<S: serde::Serializer>(runner: &Result<Runner, String>, s: S) -> Result<S::Ok, S::Error> {
+    runner.as_ref().err().serialize(s)
 }
 
 fn head_seq(conn: &Connection) -> Result<i64, StoreError> {
@@ -247,7 +223,7 @@ fn elapsed_secs(conn: &Connection, from: &str, to: &str) -> Result<i64, StoreErr
 fn state_in(conn: &Connection, task_id: &str) -> Result<Option<TaskState>, StoreError> {
     Ok(conn
         .query_row(
-            "SELECT task_id, task_rev, runner, enabled, enabled_at, cursor, last_run_at, lease_until
+            "SELECT task_id, task_rev, runner, enabled, enabled_at, cursor, last_run_at, lease_until, run_requested
                FROM task_state WHERE task_id = ?1",
             [task_id],
             |r| {
@@ -260,6 +236,7 @@ fn state_in(conn: &Connection, task_id: &str) -> Result<Option<TaskState>, Store
                     cursor: r.get(5)?,
                     last_run_at: r.get(6)?,
                     lease_until: r.get(7)?,
+                    run_requested: r.get(8)?,
                 })
             },
         )
@@ -279,10 +256,15 @@ pub struct Deploy {
     pub task_rev: String,
     /// The pinned runner reference.
     pub runner: String,
-    pub argv: Vec<String>,
+    /// The runner's command.
+    pub command: Vec<String>,
     pub every: String,
     pub when: Option<When>,
     pub prompt: String,
+    /// The task's `cwd`. `None`: the default folder.
+    pub cwd: Option<String>,
+    /// The runner's timeout, for example `10m`.
+    pub timeout: String,
     /// What is deployed now. `None`: dormant.
     pub current: Option<TaskState>,
 }
@@ -301,7 +283,12 @@ impl Deploy {
             let _ = writeln!(text, "  when:    {}", w.summary());
         }
         let _ = writeln!(text, "  runner:  {}", self.runner);
-        let _ = writeln!(text, "  command: {}", self.argv.join(" "));
+        let _ = writeln!(text, "  command: {}", self.command.join(" "));
+        let _ = match &self.cwd {
+            Some(cwd) => writeln!(text, "  cwd:     {cwd}"),
+            None => writeln!(text, "  cwd:     {DEFAULT_CWD} (default)"),
+        };
+        let _ = writeln!(text, "  timeout: {}", self.timeout);
         text.push_str("  prompt:\n");
         for line in self.prompt.lines() {
             let _ = writeln!(text, "    {line}");
@@ -341,10 +328,12 @@ pub fn plan_deploy(store: &Store, id: Option<&str>) -> Result<Vec<Deploy>, Store
             task_id: id,
             task_rev: head.rev.clone(),
             runner: runner_ref,
-            argv: runner.argv,
+            command: runner.command,
             every: head.field::<String>("every").unwrap_or_default(),
             when: task.when,
             prompt: task.prompt,
+            cwd: task.cwd,
+            timeout: format_duration(runner.timeout_secs),
             current,
         });
     }
@@ -387,6 +376,18 @@ pub fn apply_deploy(store: &mut Store, plan: &[Deploy]) -> Result<Vec<TaskState>
         .collect::<Result<Vec<_>, StoreError>>()?;
     tx.commit()?;
     Ok(states)
+}
+
+/// Ask the scheduler to fire a task on its next tick, at its deployed
+/// revisions. Only a task enabled on this vault: the person confirmed
+/// exactly what runs when they deployed it.
+pub fn request_run(store: &mut Store, task_id: &str) -> Result<TaskState, StoreError> {
+    let conn = store.connection();
+    if conn.execute("UPDATE task_state SET run_requested = 1 WHERE task_id = ?1 AND enabled = 1", [task_id])? == 0 {
+        Task::from_doc(&store.get(task_id)?)?;
+        return Err(StoreError::invalid(format!("{task_id} is not deployed on this vault; deploy it first")));
+    }
+    Ok(state_in(conn, task_id)?.expect("the row exists"))
 }
 
 /// Stop running a task on this vault. It keeps its pins and cursor.
@@ -493,7 +494,9 @@ pub fn evaluate(store: &Store, now: &str, only: Option<&str>) -> Result<Vec<Eval
             }
         };
         let enabled = state.as_ref().is_some_and(|s| s.enabled);
-        let due = enabled && !running && time_due && (parsed.when.is_none() || !changes.is_empty());
+        let requested = state.as_ref().is_some_and(|s| s.run_requested);
+        let scheduled = time_due && (parsed.when.is_none() || !changes.is_empty());
+        let due = enabled && !running && (requested || scheduled);
         out.push(Evaluation {
             task: doc,
             head_rev,
@@ -540,7 +543,7 @@ pub fn prompt_text(eval: &Evaluation) -> String {
 /// A lease on a task, taken before the agent starts.
 #[derive(Debug, Clone)]
 pub struct Claim {
-    /// `runs/<task>/<UUID v7>.md`, the id of the receipt.
+    /// `runs/<task id without extension>/<UUID v7>.md`, the id of the receipt.
     pub run_id: String,
     pub task_id: String,
     /// The task revision that runs.
@@ -571,7 +574,8 @@ pub fn claim(store: &mut Store, eval: &Evaluation, now: &str, force: bool) -> Re
         params![task_id, eval.task.rev, runner, now, eval.head],
     )?;
     let taken = tx.execute(
-        "UPDATE task_state SET lease_until = strftime('%Y-%m-%dT%H:%M:%fZ', unixepoch(?2) + ?3, 'unixepoch')
+        "UPDATE task_state SET lease_until = strftime('%Y-%m-%dT%H:%M:%fZ', unixepoch(?2) + ?3, 'unixepoch'),
+                run_requested = 0
           WHERE task_id = ?1
             AND (?5 OR (last_run_at IS ?4 AND (lease_until IS NULL OR unixepoch(lease_until) <= unixepoch(?2))))",
         params![task_id, now, lease_secs, eval.last_run_at, force],
@@ -581,7 +585,7 @@ pub fn claim(store: &mut Store, eval: &Evaluation, now: &str, force: bool) -> Re
         return Ok(None);
     }
     Ok(Some(Claim {
-        run_id: format!("runs/{task_id}/{}.md", new_id()),
+        run_id: format!("runs/{}/{}.md", stem(&task_id), new_id()),
         task_rev: eval.task.rev.clone(),
         task_id,
         runner,
@@ -771,7 +775,7 @@ async fn fire_as_task(
         (Ok(runner), Ok(())) => {
             let timeout = Duration::from_secs(runner.timeout_secs);
             let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
-            let argv = ctx.resolve(&runner.argv);
+            let argv = ctx.resolve(&runner.command);
             (spawn(&argv, &ctx.env(), &cwd, &prompt_text(eval), timeout).await, timeout)
         }
     };
@@ -797,7 +801,7 @@ pub struct TickReport {
 }
 
 /// One pass over every task enabled on this vault. Sequential; one failure never stops
-/// the others.
+/// the others. Records `now` as the last tick when the pass ends.
 pub async fn tick(store: &mut Store, db: &Path, now: &str) -> Result<TickReport, StoreError> {
     let mut report = TickReport::default();
     for eval in evaluate(store, now, None)? {
@@ -810,7 +814,46 @@ pub async fn tick(store: &mut Store, db: &Path, now: &str) -> Result<TickReport,
             Err(e) => report.errors.push((eval.task.id.clone(), e.to_string())),
         }
     }
+    store.vault_id()?;
+    store.connection().execute("UPDATE vault SET last_tick = ?1", [now])?;
     Ok(report)
+}
+
+/// A scheduler that has not ticked for this long is taken as stopped. The
+/// daemon ticks at least every minute by default.
+pub const STALE_AFTER_SECS: i64 = 300;
+
+/// Whether a scheduler runs on this vault, as far as its ticks show.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct SchedulerStatus {
+    /// When the last scheduler pass ended. `None`: never on this vault.
+    pub last_tick: Option<String>,
+    /// No tick in the last five minutes: deployed tasks do not fire.
+    pub stale: bool,
+}
+
+/// Every task on this vault, and whether a scheduler fires them.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct TaskList {
+    pub tasks: Vec<Evaluation>,
+    pub scheduler: SchedulerStatus,
+}
+
+/// Every task evaluated now, with the scheduler's status.
+pub fn list(store: &Store) -> Result<TaskList, StoreError> {
+    let now = store.now()?;
+    Ok(TaskList { tasks: evaluate(store, &now, None)?, scheduler: scheduler_status(store, &now)? })
+}
+
+pub fn scheduler_status(store: &Store, now: &str) -> Result<SchedulerStatus, StoreError> {
+    let conn = store.connection();
+    let last_tick: Option<String> =
+        conn.query_row("SELECT last_tick FROM vault", [], |r| r.get(0)).optional()?.flatten();
+    let stale = match &last_tick {
+        Some(t) => elapsed_secs(conn, t, now)? > STALE_AFTER_SECS,
+        None => true,
+    };
+    Ok(SchedulerStatus { last_tick, stale })
 }
 
 #[cfg(test)]
@@ -824,6 +867,9 @@ mod tests {
         assert_eq!(parse_duration("2h").unwrap(), 7200);
         assert_eq!(parse_duration("1d").unwrap(), 86_400);
         assert_eq!(parse_duration("1w").unwrap(), 604_800);
+        for text in ["30s", "90s", "10m", "2h", "1d", "1w", "8d"] {
+            assert_eq!(format_duration(parse_duration(text).unwrap()), text);
+        }
         for bad in ["0m", "15", "m", "", "1.5h", "-1m"] {
             assert!(parse_duration(bad).is_err(), "{bad}");
         }

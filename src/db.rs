@@ -5,60 +5,11 @@ use std::time::Duration;
 
 use rusqlite::{Connection, TransactionBehavior};
 
+use crate::error::StoreError;
+
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
-
-/// Local state that never replicates. `vault` holds this vault's id, one
-/// row, made on first use. `task_state` is the schedule of each task this
-/// vault runs: a task document with no row is dormant here. A row pins the
-/// deployed task revision and runner reference; `cursor` is the change-feed
-/// position the last run consumed; `lease_until` is set while a run holds
-/// the task. A row lives only while its document is a live task: the
-/// trigger drops it on a tombstone or a type change, local or replicated.
-const MIGRATION_5: &str = r#"
-CREATE TABLE vault (id TEXT NOT NULL);
-CREATE TABLE task_state (
-  task_id     TEXT PRIMARY KEY,
-  task_rev    TEXT NOT NULL,
-  runner      TEXT NOT NULL,
-  enabled     INTEGER NOT NULL CHECK (enabled IN (0,1)),
-  enabled_at  TEXT NOT NULL,
-  cursor      INTEGER NOT NULL,
-  last_run_at TEXT,
-  lease_until TEXT
-);
-CREATE TRIGGER task_state_follows_doc AFTER INSERT ON docs BEGIN
-  DELETE FROM task_state WHERE task_id = new._id
-    AND NOT EXISTS (SELECT 1 FROM docs_winners w
-                     WHERE w._id = new._id AND w._deleted = 0 AND w._type_path = 'doc://schemas/task');
-END;
-"#;
-
-/// Replication checkpoints, one per source vault this vault pulls from.
-/// `rev` is the source's revision at `seq`; a mismatch means the source was
-/// replaced, and the next pull starts again from zero.
-const MIGRATION_4: &str = r#"
-CREATE TABLE checkpoints (
-  peer TEXT PRIMARY KEY,
-  seq  INTEGER NOT NULL,
-  rev  TEXT NOT NULL
-);
-"#;
-
-/// Who wrote the revision. Set by `serve --actor` and the CLI `--actor`
-/// flag; a scheduled task's writes carry its id so the task does not wake
-/// itself. Not part of the revision hash.
-const MIGRATION_2: &str = "ALTER TABLE docs ADD COLUMN actor TEXT;";
-
-/// Schemas became documents. `_type` is now a `doc://` reference, pinned
-/// to one schema revision; `_type_path` is the reference without the pin,
-/// so filters can match every revision of a schema.
-const MIGRATION_3: &str = r#"
-ALTER TABLE docs ADD COLUMN _type_path TEXT GENERATED ALWAYS AS
-  (CASE WHEN instr(_type, '?rev=') > 0 THEN substr(_type, 1, instr(_type, '?rev=') - 1) ELSE _type END) VIRTUAL;
-DROP TABLE schemas;
-"#;
+const MIGRATIONS: &[&str] = &[MIGRATION_1];
 
 const MIGRATION_1: &str = r#"
 -- One row per revision. Append-only.
@@ -75,7 +26,13 @@ CREATE TABLE docs (
   _rev_hash   TEXT    GENERATED ALWAYS AS (substr(_rev, instr(_rev,'-') + 1)) STORED,
   -- Blessed scalars. VIRTUAL so content is not stored twice. Promoted only when the JSON type is right.
   title       TEXT GENERATED ALWAYS AS (CASE WHEN json_type(body,'$.title')   = 'text' THEN json_extract(body,'$.title')   END) VIRTUAL,
-  content     TEXT GENERATED ALWAYS AS (CASE WHEN json_type(body,'$.content') = 'text' THEN json_extract(body,'$.content') END) VIRTUAL
+  content     TEXT GENERATED ALWAYS AS (CASE WHEN json_type(body,'$.content') = 'text' THEN json_extract(body,'$.content') END) VIRTUAL,
+  -- Who wrote the revision: `serve --actor`, the CLI `--actor` flag, or the task a
+  -- scheduled agent runs for, so the task does not wake itself. Not part of the hash.
+  actor       TEXT,
+  -- `_type` without its `?rev=` pin, so filters match every revision of a schema.
+  _type_path  TEXT GENERATED ALWAYS AS
+    (CASE WHEN instr(_type, '?rev=') > 0 THEN substr(_type, 1, instr(_type, '?rev=') - 1) ELSE _type END) VIRTUAL
 );
 CREATE INDEX docs_id_idx     ON docs(_id);
 CREATE INDEX docs_parent_idx ON docs(_parent);
@@ -138,16 +95,47 @@ CREATE TRIGGER docs_project_ai AFTER INSERT ON docs BEGIN
      WHERE h._id = new._id AND d._deleted = 0;
 END;
 
--- Schema registry. Immutable per id.
-CREATE TABLE schemas (
-  id         TEXT PRIMARY KEY,
-  schema     TEXT NOT NULL CHECK (json_valid(schema)),
-  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+-- Replication checkpoints, one per source vault this vault pulls from. `rev` is
+-- the source's revision at `seq`; a mismatch means the source was replaced, and
+-- the next pull starts again from zero.
+CREATE TABLE checkpoints (
+  peer TEXT PRIMARY KEY,
+  seq  INTEGER NOT NULL,
+  rev  TEXT NOT NULL
 );
+
+-- Local state that never replicates. `vault` holds this vault's id, one row, made
+-- on first use, and when a scheduler last finished a pass. `task_state` is the
+-- schedule of each task this vault runs: a task document with no row is dormant
+-- here. A row pins the deployed task revision and runner reference; `cursor` is
+-- the change-feed position the last run consumed; `lease_until` is set while a run
+-- holds the task; `run_requested` asks the next tick to fire it. A row lives only
+-- while its document is a live task: the trigger drops it on a tombstone or a type
+-- change, local or replicated.
+CREATE TABLE vault (
+  id        TEXT NOT NULL,
+  last_tick TEXT
+);
+CREATE TABLE task_state (
+  task_id       TEXT PRIMARY KEY,
+  task_rev      TEXT NOT NULL,
+  runner        TEXT NOT NULL,
+  enabled       INTEGER NOT NULL CHECK (enabled IN (0,1)),
+  enabled_at    TEXT NOT NULL,
+  cursor        INTEGER NOT NULL,
+  last_run_at   TEXT,
+  lease_until   TEXT,
+  run_requested INTEGER NOT NULL DEFAULT 0 CHECK (run_requested IN (0,1))
+);
+CREATE TRIGGER task_state_follows_doc AFTER INSERT ON docs BEGIN
+  DELETE FROM task_state WHERE task_id = new._id
+    AND NOT EXISTS (SELECT 1 FROM docs_winners w
+                     WHERE w._id = new._id AND w._deleted = 0 AND w._type_path = 'doc://schemas/task.json');
+END;
 "#;
 
 /// Open (or create) the database file and bring it up to date.
-pub fn open(path: &Path) -> rusqlite::Result<Connection> {
+pub fn open(path: &Path) -> Result<Connection, StoreError> {
     let mut conn = Connection::open(path)?;
     configure(&conn)?;
     migrate(&mut conn)?;
@@ -155,7 +143,7 @@ pub fn open(path: &Path) -> rusqlite::Result<Connection> {
 }
 
 /// An in-memory database with the full schema, for tests.
-pub fn open_in_memory() -> rusqlite::Result<Connection> {
+pub fn open_in_memory() -> Result<Connection, StoreError> {
     let mut conn = Connection::open_in_memory()?;
     configure(&conn)?;
     migrate(&mut conn)?;
@@ -171,10 +159,16 @@ fn configure(conn: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
-pub fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
+pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)",
     )?;
+    // The migrations were squashed into one. A vault that has applied more
+    // than this build knows was made by an older build, with other seed ids.
+    let newest: Option<i64> = conn.query_row("SELECT MAX(version) FROM migrations", [], |r| r.get(0))?;
+    if newest.is_some_and(|v| v > MIGRATIONS.len() as i64) {
+        return Err(StoreError::invalid("this vault was made by an older build of dreams; delete it and start again"));
+    }
     for (i, sql) in MIGRATIONS.iter().enumerate() {
         let version = i as i64 + 1;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -205,7 +199,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_3_adds_type_path_and_drops_schemas() {
+    fn type_path_is_generated_and_there_is_no_schemas_table() {
         let conn = open_in_memory().unwrap();
         let hidden: i64 = conn
             .query_row("SELECT hidden FROM pragma_table_xinfo('docs') WHERE name = '_type_path'", [], |r| r.get(0))
@@ -226,7 +220,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_4_adds_checkpoints() {
+    fn checkpoints_hold_a_position_per_peer() {
         let conn = open_in_memory().unwrap();
         conn.execute("INSERT INTO checkpoints(peer, seq, rev) VALUES ('/a.db', 3, '1-ab')", []).unwrap();
         let seq: i64 = conn.query_row("SELECT seq FROM checkpoints WHERE peer = '/a.db'", [], |r| r.get(0)).unwrap();
@@ -234,7 +228,7 @@ mod tests {
     }
 
     #[test]
-    fn migration_5_adds_vault_and_task_state() {
+    fn task_state_lives_only_with_its_task() {
         let conn = open_in_memory().unwrap();
         conn.execute("INSERT INTO vault(id) VALUES ('v')", []).unwrap();
         let row = "INSERT INTO task_state(task_id, task_rev, runner, enabled, enabled_at, cursor)
@@ -245,17 +239,37 @@ mod tests {
         };
         // a live task keeps its row; a tombstone or a type change drops it
         conn.execute_batch(
-            "INSERT INTO docs(_rev,_id,_type,body) VALUES ('1-t','t','doc://schemas/task?rev=1-s','{}'),
-                                                        ('1-u','u','doc://schemas/task?rev=1-s','{}');",
+            "INSERT INTO docs(_rev,_id,_type,body) VALUES ('1-t','t','doc://schemas/task.json?rev=1-s','{}'),
+                                                        ('1-u','u','doc://schemas/task.json?rev=1-s','{}');",
         )
         .unwrap();
         conn.execute(row, rusqlite::params!["t", 1]).unwrap();
         conn.execute(row, rusqlite::params!["u", 1]).unwrap();
-        conn.execute("INSERT INTO docs(_rev,_id,_parent,_type,body) VALUES ('2-t','t','1-t','doc://schemas/task?rev=1-s','{\"a\":1}')", []).unwrap();
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,_type,body) VALUES ('2-t','t','1-t','doc://schemas/task.json?rev=1-s','{\"a\":1}')", []).unwrap();
         assert_eq!(state("t"), 1);
-        conn.execute("INSERT INTO docs(_rev,_id,_parent,_deleted,_type,body) VALUES ('3-t','t','2-t',1,'doc://schemas/task?rev=1-s','{}')", []).unwrap();
+        conn.execute("INSERT INTO docs(_rev,_id,_parent,_deleted,_type,body) VALUES ('3-t','t','2-t',1,'doc://schemas/task.json?rev=1-s','{}')", []).unwrap();
         assert_eq!(state("t"), 0);
         conn.execute("INSERT INTO docs(_rev,_id,_parent,body) VALUES ('2-u','u','1-u','{}')", []).unwrap();
         assert_eq!(state("u"), 0);
+    }
+
+    #[test]
+    fn run_requested_is_a_flag() {
+        let conn = open_in_memory().unwrap();
+        conn.execute(
+            "INSERT INTO task_state(task_id, task_rev, runner, enabled, enabled_at, cursor) VALUES ('t', '1-a', 'r', 1, 'now', 0)",
+            [],
+        )
+        .unwrap();
+        assert!(conn.execute("UPDATE task_state SET run_requested = 2", []).is_err());
+        assert!(conn.execute("UPDATE task_state SET run_requested = 1", []).is_ok());
+    }
+
+    #[test]
+    fn a_vault_from_an_older_build_is_refused() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute("INSERT INTO migrations(version, applied_at) VALUES (6, 'then')", []).unwrap();
+        let err = migrate(&mut conn).unwrap_err().to_string();
+        assert!(err.contains("older build") && err.contains("start again"), "{err}");
     }
 }

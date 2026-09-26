@@ -1,4 +1,4 @@
-//! Prompts: documents typed `doc://schemas/prompt`, served as MCP prompts.
+//! Prompts: documents typed `doc://schemas/prompt.json`, served as MCP prompts.
 //! A prompt is instructions only: it declares no arguments. The user's own
 //! text reaches the model beside it, as the user's input. When two
 //! documents share a name, the most recently modified one wins.
@@ -10,22 +10,7 @@ use crate::error::StoreError;
 use crate::store::Store;
 
 /// The seeded schema document for prompts, as a type path.
-pub const PROMPT_TYPE: &str = "doc://schemas/prompt";
-
-/// The body of `schemas/prompt`. `name` follows the skill naming rule.
-pub const PROMPT_SCHEMA: &str = r#"{
-  "title": "Prompt",
-  "description": "Instructions a user runs as a command. Served over MCP as a prompt named <name>, with no arguments; content is the message.",
-  "type": "object",
-  "required": ["name", "description", "content"],
-  "properties": {
-    "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
-    "description": {"type": "string", "minLength": 1, "maxLength": 1024},
-    "content": {"type": "string"},
-    "title": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
+pub const PROMPT_TYPE: &str = "doc://schemas/prompt.json";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Prompt {

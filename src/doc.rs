@@ -180,6 +180,16 @@ pub fn new_id() -> String {
     Uuid::now_v7().to_string()
 }
 
+/// An id without the extension of its last segment, as a folder for the
+/// documents that belong to it: `tasks/brief.json` gives `tasks/brief`.
+pub fn stem(id: &str) -> &str {
+    let name = id.rfind('/').map_or(0, |i| i + 1);
+    match id[name..].rfind('.') {
+        Some(dot) if dot > 0 => &id[..name + dot],
+        _ => id,
+    }
+}
+
 pub fn check_id(id: &str) -> Result<(), StoreError> {
     if id.is_empty() {
         return Err(StoreError::invalid("_id must not be empty"));
@@ -313,8 +323,8 @@ mod tests {
         for bad in ["a/b", "doc://", "doc://a?rev=bad", "doc://a?rev=1-x?rev=1-y", "doc://?rev=1-a", "doc://_x"] {
             assert!(DocRef::parse(bad).is_err(), "{bad}");
         }
-        assert_eq!(DocRef::from_cli("runners/claude").unwrap().to_string(), "doc://runners/claude");
-        assert_eq!(DocRef::from_cli("doc://runners/claude?rev=2-ff").unwrap().rev.as_deref(), Some("2-ff"));
+        assert_eq!(DocRef::from_cli("runners/claude.json").unwrap().to_string(), "doc://runners/claude.json");
+        assert_eq!(DocRef::from_cli("doc://runners/claude.json?rev=2-ff").unwrap().rev.as_deref(), Some("2-ff"));
         assert_eq!(DocRef::path_of("doc://x?rev=1-a"), "doc://x");
         assert_eq!(DocRef::path_of("doc://x"), "doc://x");
     }
@@ -341,5 +351,15 @@ mod tests {
         assert_eq!(d.type_path(), None);
         let typed = Doc { type_id: Some("doc://schemas/note?rev=1-aa".into()), ..d };
         assert_eq!(typed.type_path(), Some("doc://schemas/note"));
+    }
+
+    #[test]
+    fn stem_drops_only_the_last_extension() {
+        assert_eq!(stem("tasks/brief.json"), "tasks/brief");
+        assert_eq!(stem("feeds/example-com.md"), "feeds/example-com");
+        assert_eq!(stem("a/b"), "a/b");
+        assert_eq!(stem("a.b/c"), "a.b/c");
+        assert_eq!(stem("a/.hidden"), "a/.hidden");
+        assert_eq!(stem("x.tar.gz"), "x.tar");
     }
 }

@@ -1,0 +1,7 @@
+{
+  "_type": "doc://schemas/task.json",
+  "title": "Daily brief",
+  "runner": "doc://runners/claude.json",
+  "every": "1d",
+  "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \"## Brief\", an empty line, and the brief to the end of the note's content, with the steps in \"Add to a daily note\"."
+}
