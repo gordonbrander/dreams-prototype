@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use crate::error::StoreError;
 use crate::store::Store;
 use crate::task;
+use crate::text::xml_escape;
 
 fn data_version(store: &Store) -> Result<i64, StoreError> {
     Ok(store.connection().query_row("PRAGMA data_version", [], |r| r.get(0))?)
@@ -75,10 +76,6 @@ pub fn service_name(vault_id: &str) -> String {
 
 const PLIST: &str = ".plist";
 const UNIT: &str = ".service";
-
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
-}
 
 /// A launchd user agent that keeps the daemon running.
 pub fn render_plist(label: &str, exe: &Path, db: &Path, log: &Path, path_env: &str) -> String {

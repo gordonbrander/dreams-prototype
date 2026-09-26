@@ -150,20 +150,9 @@ impl NewItem {
         NewItem {
             href: DocRef::pinned(&doc.id, &doc.rev).to_string(),
             title: text("title").to_string(),
-            description: clip_words(&content, DESCRIPTION_CHARS),
+            description: crate::text::truncate(&content, DESCRIPTION_CHARS),
         }
     }
-}
-
-/// Collapse whitespace, then cut to `max` characters, with `…` when cut.
-fn clip_words(text: &str, max: usize) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= max {
-        return flat;
-    }
-    let mut cut: String = flat.chars().take(max).collect();
-    cut.push('…');
-    cut
 }
 
 /// Turn fetched bytes into the items to write. Pure.
@@ -448,15 +437,6 @@ mod tests {
     fn default_ids_use_the_origin_slug() {
         assert_eq!(default_id("https://news.ycombinator.com/rss").unwrap(), "feeds/news-ycombinator-com.md");
         assert!(default_id("https://").is_err());
-    }
-
-    #[test]
-    fn descriptions_are_plain_short_text() {
-        assert_eq!(clip_words("  a \n\n b\tc ", 150), "a b c");
-        let long = "é".repeat(200);
-        let cut = clip_words(&long, 150);
-        assert_eq!(cut.chars().count(), 151);
-        assert!(cut.ends_with('…'));
     }
 
     #[test]

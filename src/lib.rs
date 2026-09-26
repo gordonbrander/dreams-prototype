@@ -27,6 +27,7 @@ pub mod slug;
 pub mod store;
 pub mod sync;
 pub mod task;
+pub mod text;
 
 pub use doc::{Doc, DocRef, PutInput};
 pub use error::StoreError;
