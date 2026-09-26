@@ -1549,6 +1549,10 @@ fn walk_docs(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<(), St
     let entries = std::fs::read_dir(dir).map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
     for entry in entries {
         let entry = entry.map_err(|e| StoreError::invalid(format!("reading {}: {e}", dir.display())))?;
+        // Skip hidden entries, such as .git, .obsidian, or editor lock files.
+        if entry.file_name().to_string_lossy().starts_with('.') {
+            continue;
+        }
         let path = entry.path();
         if path.is_dir() {
             walk_docs(&path, root, files)?;
