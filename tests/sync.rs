@@ -185,7 +185,7 @@ fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
     body["_id"] = json!("runners/claude.json");
     body["_parent"] = json!(claude.rev);
     body["_type"] = json!(RUNNER_TYPE);
-    body["argv"] = json!(["claude", "-p", "--edited"]);
+    body["command"] = json!(["claude", "-p", "--edited"]);
     put(&mut b, body);
 
     let r = pull(&mut a, &b, "b").unwrap();
@@ -193,7 +193,7 @@ fn tasks_runs_and_runners_replicate_but_tasks_arrive_dormant() {
     assert_eq!(a.get("runs/1").unwrap().body["vault"], b.vault_id().unwrap());
     assert_ne!(a.vault_id().unwrap(), b.vault_id().unwrap());
     let runner = Runner::get(&a, "doc://runners/claude.json").unwrap();
-    assert_eq!(runner.argv, ["claude", "-p", "--edited"]);
+    assert_eq!(runner.command, ["claude", "-p", "--edited"]);
 
     // deployed on b, dormant on a until a deploys it
     let now = a.now().unwrap();

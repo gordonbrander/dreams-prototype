@@ -1,7 +1,7 @@
 {
   "_type": "doc://schemas/runner.json",
   "title": "Codex CLI, non-interactive",
-  "argv": [
+  "command": [
     "codex",
     "exec",
     "-c",

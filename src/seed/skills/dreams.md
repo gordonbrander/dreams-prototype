@@ -73,7 +73,7 @@ After the task is set up:
 A runner is the command that starts an agent. Write one only when the user wants an agent or a program that no runner starts.
 
 The body has these fields:
-- `argv`: the command and its arguments, as a list of strings. No shell runs it: pipes, `&&`, and `$VAR` do not work.
+- `command`: the program and its arguments, as a list of strings. No shell runs it: pipes, `&&`, and `$VAR` do not work.
 - `timeout` (optional): the longest run, for example `10m`. The default is `10m`.
 - `title`: a short name for the user.
 

@@ -435,7 +435,7 @@ fn runners_are_documents_seeded_once() {
     assert_eq!(text.lines().count(), 1 + seeded.len() - 1 + 4, "{text}");
     let doc = sb.json(&["doc", "get", "runners/slow"], "");
     assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner.json?rev=1-"), "{doc}");
-    assert_eq!(doc["argv"], json!(["sleep", "30"]));
+    assert_eq!(doc["command"], json!(["sleep", "30"]));
     assert_eq!(doc["timeout"], "1s");
     let err = sb.fails(&["runner", "add", "runners/bad", "--timeout", "soon", "--", "cat"], "");
     assert_eq!(err["name"], "invalid_input");
@@ -536,7 +536,7 @@ fn task_lifecycle_with_change_trigger() {
     let changed: Vec<&str> = check["changes"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
     assert_eq!(changed, ["in1"]);
     assert_eq!(check["due"], false);
-    assert_eq!(check["argv"], json!(["cat"]));
+    assert_eq!(check["command"], json!(["cat"]));
     assert!(check["prompt"].as_str().unwrap().contains("- in1  rev 1-"), "{check}");
     let text = sb.ok(&["task", "check", "t1"], "");
     assert!(text.contains("status:    "), "{text}");
@@ -711,7 +711,7 @@ fn run_refuses_while_a_claim_is_open_unless_forced() {
 fn serve_protects_runner_and_run_documents() {
     // the boundary itself is covered in tests/store.rs; here: the CLI never sets it
     let sb = Sandbox::new();
-    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"doc://schemas/runner.json","argv":["cat"]}"#);
+    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"doc://schemas/runner.json","command":["cat"]}"#);
     assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner.json?rev="), "{doc}");
     let tomb = sb.json(&["doc", "delete", "runners/x"], "");
     assert_eq!(tomb["_deleted"], true);

@@ -302,7 +302,7 @@ enum RunnerCmd {
         timeout: Option<String>,
         /// The command and its arguments.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true, required = true, num_args = 1..)]
-        argv: Vec<String>,
+        command: Vec<String>,
     },
     /// Every runner.
     List,
@@ -718,14 +718,14 @@ fn task_cmd(
                 None => store.now()?,
             };
             let eval = task::evaluate(store, &now, Some(&task_id))?.remove(0);
-            let argv = match &eval.runner {
-                Ok(r) => r.argv.clone(),
+            let command = match &eval.runner {
+                Ok(r) => r.command.clone(),
                 Err(e) => vec![format!("(runner error: {e})")],
             };
             let cwd = task::work_dir(db, eval.parsed.cwd.as_deref());
             if json {
                 let mut v = serde_json::to_value(&eval)?;
-                v["argv"] = json_array(&argv);
+                v["command"] = json_array(&command);
                 v["cwd"] = Value::String(cwd.to_string_lossy().into_owned());
                 v["prompt"] = Value::String(task::prompt_text(&eval));
                 print_json(out, &v)?;
@@ -761,7 +761,7 @@ fn task_cmd(
                     table(out, &["SEQ", "ID", "REV", "DELETED"], &rows)?;
                 }
                 writeln!(out, "\ncwd:       {}", cwd.display())?;
-                writeln!(out, "command:   {}", argv.join(" "))?;
+                writeln!(out, "command:   {}", command.join(" "))?;
             }
         }
         TaskCmd::Run { task_id, force } => {
@@ -912,10 +912,10 @@ fn json_array(items: &[String]) -> Value {
 
 fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write) -> anyhow::Result<()> {
     match cmd {
-        RunnerCmd::Add { runner_id, title, timeout, argv } => {
+        RunnerCmd::Add { runner_id, title, timeout, command } => {
             let mut map = Map::new();
             map.insert("_type".into(), Value::String(runner::RUNNER_TYPE.into()));
-            map.insert("argv".into(), json_array(&argv));
+            map.insert("command".into(), json_array(&command));
             if let Some(t) = title {
                 map.insert("title".into(), Value::String(t));
             }
@@ -947,16 +947,16 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
                 let rows: Vec<Vec<String>> = docs
                     .iter()
                     .map(|d| {
-                        let argv = d.field::<Vec<&str>>("argv").map(|a| a.join(" ")).unwrap_or_default();
+                        let command = d.field::<Vec<&str>>("command").map(|a| a.join(" ")).unwrap_or_default();
                         vec![
                             d.id.clone(),
                             title_of(d),
                             d.field::<&str>("timeout").unwrap_or(runner::DEFAULT_TIMEOUT).to_string(),
-                            clip(&argv, 80),
+                            clip(&command, 80),
                         ]
                     })
                     .collect();
-                table(out, &["ID", "TITLE", "TIMEOUT", "ARGV"], &rows)?;
+                table(out, &["ID", "TITLE", "TIMEOUT", "COMMAND"], &rows)?;
             }
         }
         RunnerCmd::Rm { runner_id } => {

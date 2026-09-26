@@ -533,12 +533,12 @@ fn protected_types_and_ids_are_read_only() {
     ));
     assert!(matches!(s.delete("runs/t/0", &run.rev), Err(StoreError::Protected { .. })));
     // a new runner is writable: it runs only after a confirmed deploy
-    let doc = s.put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    let doc = s.put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "command": ["cat"]}))).unwrap();
     // the seeded runners are protected by id
     let claude = s.get("runners/claude.json").unwrap();
     assert!(matches!(
         s.put(input(
-            json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})
+            json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "command": ["cat"]})
         )),
         Err(StoreError::Protected { id: Some(_), .. })
     ));
@@ -560,7 +560,7 @@ fn protected_types_and_ids_are_read_only() {
         ));
     }
     // reads and ordinary writes still work
-    assert_eq!(s.get("runners/x").unwrap().body["argv"], json!(["cat"]));
+    assert_eq!(s.get("runners/x").unwrap().body["command"], json!(["cat"]));
     assert!(s.put(input(json!({"_id": "note", "title": "n"}))).is_ok());
     assert!(s.delete("runners/x", &doc.rev).is_ok());
     s.set_protected(&[], &[]);
@@ -586,8 +586,10 @@ fn seed_rewrites_edited_and_deleted_defaults() {
     let mut s = store();
     seed::seed(&mut s).unwrap();
     let claude = s.get("runners/claude.json").unwrap();
-    s.put(input(json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})))
-        .unwrap();
+    s.put(input(
+        json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "command": ["cat"]}),
+    ))
+    .unwrap();
     let skill = s.get("skills/daily-note.md").unwrap();
     s.delete("skills/daily-note.md", &skill.rev).unwrap();
 
@@ -620,7 +622,7 @@ fn evaluate_time_and_change_rules() {
     seed::seed_schemas(&mut s).unwrap();
     let base = s.last_seq().unwrap();
     let cat =
-        s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "1m"}))).unwrap();
+        s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"], "timeout": "1m"}))).unwrap();
     let plain = add_task(&mut s, "tasks/plain", "1h", None);
     let watch = add_task(&mut s, "tasks/watch", "15m", Some(json!({"tag": "inbox"})));
     let created = watch.created_at.clone();
@@ -740,7 +742,7 @@ fn evaluate_time_and_change_rules() {
 fn a_deploy_pins_the_task_and_runner_revisions() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    let cat = s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"]}))).unwrap();
     let v1 = add_task(&mut s, "tasks/t", "1h", None);
     deploy(&mut s, "tasks/t");
     let now = s.now().unwrap();
@@ -753,10 +755,11 @@ fn a_deploy_pins_the_task_and_runner_revisions() {
     let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
     assert_eq!((e.task.rev.as_str(), e.head_rev.as_str(), e.drift), (v1.rev.as_str(), v2.rev.as_str(), true));
     assert_eq!(e.parsed.prompt, "go");
-    let cat2 =
-        s.put(input(json!({"_id": "runners/cat", "_parent": cat.rev, "_type": RUNNER_TYPE, "argv": ["tac"]}))).unwrap();
+    let cat2 = s
+        .put(input(json!({"_id": "runners/cat", "_parent": cat.rev, "_type": RUNNER_TYPE, "command": ["tac"]})))
+        .unwrap();
     let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
-    assert_eq!(e.runner.as_ref().unwrap().argv, ["cat"]);
+    assert_eq!(e.runner.as_ref().unwrap().command, ["cat"]);
 
     // a plan made before an edit cannot be applied after it
     let plan = task::plan_deploy(&s, None).unwrap();
@@ -790,7 +793,7 @@ fn a_deploy_pins_the_task_and_runner_revisions() {
 fn a_tombstone_ends_the_task_and_a_revived_task_is_dormant() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"]}))).unwrap();
     let t = add_task(&mut s, "tasks/t", "1h", None);
     deploy(&mut s, "tasks/t");
     let tomb = s.delete("tasks/t", &t.rev).unwrap();
@@ -813,7 +816,7 @@ fn a_tombstone_ends_the_task_and_a_revived_task_is_dormant() {
 fn a_manual_run_of_a_dormant_task_keeps_it_dormant() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"]}))).unwrap();
     add_task(&mut s, "tasks/t", "1h", None);
     let now = s.now().unwrap();
     let e = task::evaluate(&s, &now, Some("tasks/t")).unwrap().remove(0);
@@ -847,7 +850,7 @@ fn vault_id_is_made_once() {
 fn a_run_request_fires_a_deployed_task_once() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"]}))).unwrap();
     add_task(&mut s, "tasks/watch", "1h", Some(json!({"tag": "inbox"})));
     let now = s.now().unwrap();
 
@@ -890,7 +893,7 @@ async fn a_tick_records_the_scheduler_heartbeat() {
 fn the_deploy_text_shows_cwd_and_timeout() {
     let mut s = store();
     seed::seed_schemas(&mut s).unwrap();
-    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "90s"}))).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "command": ["cat"], "timeout": "90s"}))).unwrap();
     add_task(&mut s, "tasks/t", "1h", None);
     let text = task::plan_deploy(&s, Some("tasks/t")).unwrap().remove(0).describe();
     assert!(text.contains("  cwd:     workspace (default)\n"), "{text}");

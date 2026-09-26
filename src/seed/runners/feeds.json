@@ -1,7 +1,7 @@
 {
   "_type": "doc://schemas/runner.json",
   "title": "Pull every feed",
-  "argv": [
+  "command": [
     "{exe}",
     "--json",
     "feed",

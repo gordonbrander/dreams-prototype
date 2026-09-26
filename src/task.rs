@@ -256,7 +256,8 @@ pub struct Deploy {
     pub task_rev: String,
     /// The pinned runner reference.
     pub runner: String,
-    pub argv: Vec<String>,
+    /// The runner's command.
+    pub command: Vec<String>,
     pub every: String,
     pub when: Option<When>,
     pub prompt: String,
@@ -282,7 +283,7 @@ impl Deploy {
             let _ = writeln!(text, "  when:    {}", w.summary());
         }
         let _ = writeln!(text, "  runner:  {}", self.runner);
-        let _ = writeln!(text, "  command: {}", self.argv.join(" "));
+        let _ = writeln!(text, "  command: {}", self.command.join(" "));
         let _ = match &self.cwd {
             Some(cwd) => writeln!(text, "  cwd:     {cwd}"),
             None => writeln!(text, "  cwd:     {DEFAULT_CWD} (default)"),
@@ -327,7 +328,7 @@ pub fn plan_deploy(store: &Store, id: Option<&str>) -> Result<Vec<Deploy>, Store
             task_id: id,
             task_rev: head.rev.clone(),
             runner: runner_ref,
-            argv: runner.argv,
+            command: runner.command,
             every: head.field::<String>("every").unwrap_or_default(),
             when: task.when,
             prompt: task.prompt,
@@ -774,7 +775,7 @@ async fn fire_as_task(
         (Ok(runner), Ok(())) => {
             let timeout = Duration::from_secs(runner.timeout_secs);
             let _ = std::fs::write(&ctx.mcp, ctx.mcp_config());
-            let argv = ctx.resolve(&runner.argv);
+            let argv = ctx.resolve(&runner.command);
             (spawn(&argv, &ctx.env(), &cwd, &prompt_text(eval), timeout).await, timeout)
         }
     };
