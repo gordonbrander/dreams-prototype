@@ -127,6 +127,12 @@ dreams [--db PATH] [--json] <command>
   runner list
   runner rm   <id>
 
+  feed add    <url> [--id ID] [--kind rss|html] [--title T] [--instructions TEXT]
+                                                  default id feeds/<origin-slug>.md
+  feed list
+  feed pull   [<id>]                              fetch one feed, or all; print only the new items
+  feed rm     <id>                                write a tombstone; the items stay
+
   tick                                            one scheduler pass
   daemon [--interval 60s] [--poll 2s]             run the scheduler until stopped
   daemon install | uninstall                      start it at login (launchd or systemd)
@@ -315,7 +321,7 @@ Tasks, runners, and runs are documents in the vault. A task document is a templa
    dreams runner list
    ```
 
-   You get `runners/claude`, `runners/codex`, and `runners/pi`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in.
+   You get `runners/claude`, `runners/codex`, and `runners/pi`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in. (`runners/feeds` is not an agent. See [Feeds](#feeds).)
 
 2. Write the prompt in a file.
 
@@ -471,6 +477,72 @@ dreams daemon install | uninstall  start it at login (launchd on macOS, systemd 
 - An agent that answers "not logged in" needs its own login: `claude`, `codex login`, or `pi`. The daemon has no terminal to ask you.
 - A run with empty `content` and exit 0 from Codex means Codex could not reach its API. It exits 0 either way.
 
+## Feeds
+
+A feed is a resource that changes, such as an RSS feed or a web page. A pull fetches it, writes each new item as a document, and returns only the new items. Tasks can then wake an agent on those items.
+
+```
+dreams feed add https://news.ycombinator.com/rss
+dreams feed pull
+```
+
+A feed is a document typed `doc://schemas/feed`, with `url`, `kind`, and an optional `title` and `instructions`. It does nothing until something pulls it. An agent can add one with `put_doc`. There are two kinds:
+
+- **`rss`** reads RSS or Atom. Each entry is one item. The item keeps the entry's `title`, `url`, `published`, `guid`, and `content` (the content or summary, verbatim).
+- **`html`** reads one web page as text. The page is one item. When the text changes, the next pull writes a new revision of the item, and reports it as new.
+
+Items are documents typed `doc://schemas/feed-item`. They go under the feed's id without `.md`: the items of `feeds/news-ycombinator-com.md` are at `feeds/news-ycombinator-com/<key>.md`. The key comes from the entry's guid, else its link, else its title and date. Thus the same entry always has the same id.
+
+The item documents are the record of what was seen. A pull skips an item that exists, or that has a tombstone. So a pull never reports an item two times, and an item that you delete does not come back. An RSS entry that the feed edits later is not new. There is no retention: delete old items like any other document.
+
+`feed pull` with no id pulls every feed. With an id, it pulls one feed. It prints the new items. With `--json`, or from the `pull_feeds` tool, it gives the new items grouped by feed:
+
+```json
+{
+  "feeds": [
+    {
+      "feed": "doc://feeds/news-ycombinator-com.md",
+      "title": "Hacker News",
+      "instructions": "Most posts come from a small tech audience. Say when a claim needs a wider view.",
+      "items": [{"href": "doc://feeds/news-ycombinator-com/035d4c4c31796bf3.md?rev=1-8c24…", "title": "…", "description": "the first 150 characters of the content, as text"}]
+    }
+  ],
+  "errors": []
+}
+```
+
+A feed with no new items is not in `feeds`. A feed that fails goes in `errors`, and the other feeds are still pulled. `feed pull` then exits 1.
+
+`feed add` makes the id from the origin of the URL. A second feed from the same site needs `--id`. For a web page, pass `--kind html`. On an existing feed, `feed add` changes only the fields that you give.
+
+### Instructions
+
+`instructions` is text for the agent that processes the items of a feed. Use it to correct for a known bias of the source, or to say what matters in it:
+
+```
+dreams feed add https://example.com/rss --instructions "This outlet favors one side of most debates. For each claim, name the strongest view against it."
+```
+
+A pull gives each feed's instructions next to its items. The instructions are not copied into the items. An agent that has only an item reads the feed document named in the item's `feed` field. `--instructions ""` removes them.
+
+### Wake an agent on new items
+
+The seeded runner `runners/feeds` runs `dreams feed pull`. It is not an agent. The seeded task `tasks/pull-feeds` uses it every hour. Like every task, it is dormant until you deploy it. Then add a task that waits for new items:
+
+```
+dreams task deploy tasks/pull-feeds
+dreams task add tasks/read-hn --runner runners/claude --every 1h \
+  --glob 'feeds/news-ycombinator-com/*' read-hn.md
+```
+
+The pull runs as the actor `tasks/pull-feeds`, so the reading task sees its writes. The reading task gets the ids of the new items at the end of its prompt. It does not get the instructions, so tell its prompt to read the feed document of each item and follow its `instructions`. Use `--type doc://schemas/feed-item` in place of `--glob` to read the items of every feed.
+
+The first pull writes every item that the feed has now. To skip them, deploy the reading task after the first pull. A deploy starts the task at the current end of the change feed.
+
+An agent can also pull by itself: a task with an agent runner and a prompt that says to call `pull_feeds`, then read the items it returns.
+
+Item text comes from outside the vault, and the agent that reads it has tools. Write prompts that treat item text as data, not as instructions.
+
 ## MCP
 
 `dreams serve` speaks the stateless MCP protocol, version 2026-07-28, over stdio. Older protocol versions are refused. The host starts the binary as a child process and talks to it through its stdin and stdout. Logs go to stderr, controlled by `RUST_LOG`.
@@ -511,6 +583,7 @@ Each store operation is one tool:
 | `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
+| `pull_feeds` | Fetch one feed (`id`), or every feed, and return only the new items. See [Feeds](#feeds). |
 
 Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
@@ -607,7 +680,7 @@ One SQLite file in WAL mode. Migrations run on open.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, the three default runners, the `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` task.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, `schemas/feed`, `schemas/feed-item`, the default runners (three agents and `runners/feeds`), the `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` and `tasks/pull-feeds` tasks.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 

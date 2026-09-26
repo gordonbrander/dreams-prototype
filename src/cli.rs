@@ -16,7 +16,7 @@ use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, SearchPage, Store};
 use crate::sync::{self, PullReport};
 use crate::task::{self, Deploy, Evaluation, TaskState, TickReport, When};
-use crate::{daemon, markdown, mcp, resolve, rev, seed};
+use crate::{daemon, feed, markdown, mcp, resolve, rev, seed};
 
 /// Dreams: a versioned document vault in SQLite, with a CLI and an MCP server.
 #[derive(Parser)]
@@ -57,6 +57,9 @@ enum Command {
     /// Agent commands that tasks run (documents typed doc://schemas/runner). Never writable over MCP.
     #[command(subcommand)]
     Runner(RunnerCmd),
+    /// Feeds to pull (documents typed doc://schemas/feed). A pull writes new items and prints them.
+    #[command(subcommand)]
+    Feed(FeedCmd),
     /// One scheduler pass: fire every due task, then exit.
     Tick {
         /// Evaluate as if it were this time (store format, for example 2026-09-23T10:00:00.000Z).
@@ -315,6 +318,34 @@ enum RunnerCmd {
 }
 
 #[derive(Subcommand)]
+enum FeedCmd {
+    /// Create or update a feed. A pull writes its items under the feed's id without `.md`.
+    /// On an existing feed, fields that are not given stay as they are.
+    Add {
+        url: String,
+        /// Feed id. Default: feeds/<origin-slug>.md, for example feeds/example-com.md.
+        #[arg(long)]
+        id: Option<String>,
+        /// rss reads RSS or Atom, one item per entry. html reads one page as text. Default for a new feed: rss.
+        #[arg(long, value_parser = ["rss", "html"])]
+        kind: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        /// Instructions for the agent that processes the items, for example to correct
+        /// for a known bias of the source. An empty TEXT removes them.
+        #[arg(long, value_name = "TEXT")]
+        instructions: Option<String>,
+    },
+    /// Every feed.
+    List,
+    /// Fetch one feed, or every feed. Writes the items not seen before and prints them.
+    /// Exits 1 when a feed failed; the other feeds are still pulled.
+    Pull { feed_id: Option<String> },
+    /// Delete a feed (a tombstone; its items stay).
+    Rm { feed_id: String },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Start the daemon at login and keep it running (launchd on macOS, systemd on Linux).
     Install,
@@ -459,6 +490,10 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
         Command::Runner(cmd) => {
             let mut store = open()?;
             runner_cmd(&mut store, cmd, json, out)?;
+        }
+        Command::Feed(cmd) => {
+            let mut store = open()?;
+            feed_cmd(&mut store, cmd, json, out)?;
         }
         Command::Tick { now } => {
             let mut store = open()?;
@@ -915,6 +950,108 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
                 print_json(out, &tomb)?;
             } else {
                 writeln!(out, "removed {runner_id}")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) -> anyhow::Result<()> {
+    match cmd {
+        FeedCmd::Add { url, id, kind, title, instructions } => {
+            let id = match id {
+                Some(id) => id,
+                None => feed::default_id(&url)?,
+            };
+            // An existing feed keeps the fields that are not given.
+            let mut map = Map::new();
+            if let Ok(head) = store.get(&id) {
+                let old = feed::Feed::from_doc(&head)
+                    .map_err(|_| StoreError::invalid(format!("{id} exists and is not a feed; pass another --id")))?;
+                if old.url != url {
+                    return Err(StoreError::invalid(format!(
+                        "{id} is the feed for {}; pass --id to add another feed",
+                        old.url
+                    ))
+                    .into());
+                }
+                map = head.body;
+            }
+            map.insert("_type".into(), Value::String(feed::FEED_TYPE.into()));
+            map.insert("url".into(), Value::String(url));
+            match kind {
+                Some(k) => {
+                    map.insert("kind".into(), Value::String(k));
+                }
+                None => {
+                    map.entry("kind").or_insert_with(|| Value::String("rss".into()));
+                }
+            }
+            if let Some(t) = title {
+                map.insert("title".into(), Value::String(t));
+            }
+            match instructions {
+                Some(i) if i.is_empty() => {
+                    map.remove("instructions");
+                }
+                Some(i) => {
+                    map.insert("instructions".into(), Value::String(i));
+                }
+                None => {}
+            }
+            let (doc, status) = upsert_unless_same(store, &id, map)?;
+            if json {
+                print_json(out, &doc)?;
+            } else {
+                writeln!(out, "{} {} {}", format!("{status:?}").to_lowercase(), doc.id, short_rev(&doc.rev))?;
+            }
+        }
+        FeedCmd::List => {
+            let mut docs = store.list_all(Some(feed::FEED_TYPE))?;
+            docs.sort_by(|a, b| a.id.cmp(&b.id));
+            if json {
+                print_json(out, &docs)?;
+            } else {
+                let text = |d: &Doc, key: &str| d.body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+                let rows: Vec<Vec<String>> =
+                    docs.iter().map(|d| vec![d.id.clone(), text(d, "kind"), text(d, "url"), title_of(d)]).collect();
+                table(out, &["ID", "KIND", "URL", "TITLE"], &rows)?;
+            }
+        }
+        FeedCmd::Pull { feed_id } => {
+            let report = feed::pull(store, feed_id.as_deref())?;
+            if json {
+                print_json(out, &report)?;
+            } else {
+                if report.feeds.is_empty() {
+                    writeln!(out, "no new items")?;
+                } else {
+                    let rows: Vec<Vec<String>> = report
+                        .feeds
+                        .iter()
+                        .flat_map(|f| {
+                            let feed = f.feed.trim_start_matches(DocRef::SCHEME).to_string();
+                            f.items.iter().map(move |i| vec![feed.clone(), i.href.clone(), clip(&i.title, 60)])
+                        })
+                        .collect();
+                    table(out, &["FEED", "HREF", "TITLE"], &rows)?;
+                }
+                for e in &report.errors {
+                    writeln!(out, "failed {}: {}", e.feed, e.error)?;
+                }
+            }
+            if !report.errors.is_empty() {
+                anyhow::bail!("{} feed(s) failed", report.errors.len());
+            }
+        }
+        FeedCmd::Rm { feed_id } => {
+            let parent = head_rev(store, &feed_id)?;
+            feed::Feed::from_doc(&store.get_rev(&parent)?)?;
+            let tomb = store.delete(&feed_id, &parent)?;
+            if json {
+                print_json(out, &tomb)?;
+            } else {
+                writeln!(out, "removed {feed_id}")?;
             }
         }
     }

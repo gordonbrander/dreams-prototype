@@ -421,14 +421,16 @@ fn runners_are_documents_seeded_once() {
     assert!(task_schema["_type"].is_null());
     let text = sb.ok(&["runner", "list"], "");
     let ids: Vec<&str> = text.lines().skip(1).map(|l| l.split_whitespace().next().unwrap()).collect();
-    assert_eq!(ids, ["runners/claude", "runners/codex", "runners/pi"]);
+    let mut seeded: Vec<&str> = seed::RUNNERS.iter().map(|(id, _, _)| *id).collect();
+    seeded.sort();
+    assert_eq!(ids, seeded);
     add_test_runners(&sb);
     let out = sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "");
     assert!(out.starts_with("unchanged runners/cat"), "{out}");
     sb.ok(&["runner", "rm", "runners/pi"], "");
     let text = sb.ok(&["runner", "list"], "");
     assert!(!text.contains("runners/pi"), "{text}");
-    assert_eq!(text.lines().count(), 1 + 6, "{text}");
+    assert_eq!(text.lines().count(), 1 + seeded.len() - 1 + 4, "{text}");
     let doc = sb.json(&["doc", "get", "runners/slow"], "");
     assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner?rev=1-"), "{doc}");
     assert_eq!(doc["argv"], json!(["sleep", "30"]));
@@ -901,4 +903,125 @@ fn mcp_json_prints_a_server_entry_with_absolute_paths() {
 
     let entry: Value = serde_json::from_str(&sb.ok(&["--actor", "claude", "mcp-json"], "")).unwrap();
     assert_eq!(entry["args"], json!(["--db", sb.db(), "--actor", "claude", "serve"]));
+}
+
+type Pages = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>;
+
+/// Serve `pages` (path to body) over HTTP on a local port until the test
+/// ends. A path with no page is a 404. Returns the base URL.
+fn serve_pages(pages: Pages) -> String {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            let _ = reader.read_line(&mut request);
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap_or(0) <= 2 {
+                    break;
+                }
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or("/").to_string();
+            let page = pages.lock().unwrap().get(&path).cloned();
+            let (status, body) = match &page {
+                Some(b) => ("200 OK", b.as_str()),
+                None => ("404 Not Found", ""),
+            };
+            let _ = write!(
+                stream,
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    base
+}
+
+const FEED_RSS: &str = r#"<?xml version="1.0"?>
+<rss version="2.0"><channel><title>Local</title><link>http://localhost/</link>
+  <item><title>Two</title><guid>two</guid><description>The second item</description></item>
+  <item><title>One</title><guid>one</guid><description>The first item</description></item>
+</channel></rss>"#;
+
+#[test]
+fn feeds_pull_only_new_items() {
+    let sb = Sandbox::new();
+    sb.ok(&["init"], "");
+    let pages: Pages = Default::default();
+    pages.lock().unwrap().insert("/rss".into(), FEED_RSS.into());
+    pages.lock().unwrap().insert("/page".into(), "<p>Version one</p>".into());
+    let base = serve_pages(pages.clone());
+    let rss_url = format!("{base}/rss");
+
+    // The default id comes from the origin.
+    let advice = "This source leans one way; look for the other side.";
+    let doc = sb.json(&["feed", "add", &rss_url, "--title", "Local", "--instructions", advice], "");
+    let rss_id = format!("feeds/{}.md", dreams::feed::origin_slug(&base));
+    assert_eq!(doc["_id"], rss_id.as_str());
+    assert_eq!(doc["kind"], "rss");
+    // A second add with no flags keeps the fields that it does not give.
+    assert!(sb.ok(&["feed", "add", &rss_url], "").starts_with("unchanged "));
+    // A second feed on the same origin needs its own id.
+    let err = sb.fails(&["feed", "add", &format!("{base}/page")], "");
+    assert_eq!(err["name"], "invalid_input");
+    assert!(err["message"].as_str().unwrap().contains("--id"), "{err}");
+    sb.ok(&["feed", "add", &format!("{base}/page"), "--kind", "html", "--id", "feeds/page.md"], "");
+    assert_eq!(sb.json(&["feed", "add", &format!("{base}/page"), "--id", "feeds/page.md"], "")["kind"], "html");
+    let list = sb.ok(&["feed", "list"], "");
+    assert!(list.contains(&rss_id) && list.contains("feeds/page.md"), "{list}");
+
+    // New items are grouped by feed, with each feed's instructions.
+    let report = sb.json(&["feed", "pull"], "");
+    assert_eq!(report["errors"], json!([]));
+    let group = |report: &Value, id: &str| {
+        report["feeds"].as_array().unwrap().iter().find(|f| f["feed"] == format!("doc://{id}")).cloned()
+    };
+    let rss = group(&report, &rss_id).expect("the rss feed has new items");
+    assert_eq!(rss["title"], "Local");
+    assert_eq!(rss["instructions"], advice);
+    let items = rss["items"].as_array().unwrap();
+    assert_eq!(items.len(), FEED_RSS.matches("<item>").count(), "{report}");
+    let page = group(&report, "feeds/page.md").expect("the page is new");
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page.get("instructions").is_none(), "{page}");
+    let one = items.iter().find(|i| i["title"] == "One").unwrap();
+    assert_eq!(one["description"], "The first item");
+    let doc = sb.json(&["doc", "get", one["href"].as_str().unwrap()], "");
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/feed-item?rev="), "{doc}");
+    assert_eq!(doc["feed"], format!("doc://{rss_id}"));
+    assert!(doc["_id"].as_str().unwrap().starts_with(rss_id.trim_end_matches(".md")));
+
+    assert_eq!(sb.json(&["feed", "pull"], "")["feeds"], json!([]), "a second pull sees nothing new");
+    assert!(sb.ok(&["feed", "pull"], "").contains("no new items"));
+
+    // A page whose text changed is new again.
+    pages.lock().unwrap().insert("/page".into(), "<p>Version two</p>".into());
+    let report = sb.json(&["feed", "pull", "feeds/page.md"], "");
+    assert_eq!(report["feeds"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["feeds"][0]["items"][0]["description"], "Version two");
+
+    // One broken feed fails the command, but the others are still pulled.
+    pages.lock().unwrap().insert("/page".into(), "<p>Version three</p>".into());
+    sb.ok(&["feed", "add", &format!("{base}/missing"), "--id", "feeds/missing.md"], "");
+    let (code, out, _) = sb.run(&["--json", "feed", "pull"], "");
+    assert_eq!(code, 1);
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["errors"].as_array().unwrap().len(), 1, "{report}");
+    assert_eq!(report["errors"][0]["feed"], "feeds/missing.md");
+    assert!(group(&report, "feeds/page.md").is_some(), "{report}");
+
+    // An empty text removes the instructions.
+    let doc = sb.json(&["feed", "add", &rss_url, "--instructions", ""], "");
+    assert!(doc.get("instructions").is_none(), "{doc}");
+    assert_eq!(doc["title"], "Local");
+
+    sb.ok(&["feed", "rm", "feeds/missing.md"], "");
+    assert_eq!(sb.json(&["feed", "pull"], "")["errors"], json!([]));
+    sb.ok(&["doc", "put", "-"], r#"{"_id": "note", "title": "not a feed"}"#);
+    assert_eq!(sb.fails(&["feed", "rm", "note"], "")["name"], "invalid_input");
+    assert_eq!(sb.fails(&["feed", "pull", "note"], "")["name"], "invalid_input");
 }
