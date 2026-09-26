@@ -393,7 +393,7 @@ An agent over MCP is the agent that merges, so it gets the same work as a runner
 
 1. `list_conflicts` finds the documents.
 2. `diff_doc_conflicts` merges what code can, and returns `settled`, `contested` (each field to decide, with the ancestor's value and each side's value), `draft` (the merged body, with the marked blocks in `content`), `marked` (the revisions of the lines in the blocks), and `conflicts`.
-3. `resolve_doc` with `id`, `conflicts`, `fields`, and `content_edits`, the same as a runner's reply. The server makes the draft again, applies them, and writes the merge on the winner. If new conflicts arrived since the read, the call fails, and the agent reads again.
+3. `resolve_doc_conflicts` with `id`, `conflicts`, `fields`, and `content_edits`, the same as a runner's reply. The server makes the draft again, applies them, and writes the merge on the winner. If new conflicts arrived since the read, the call fails, and the agent reads again.
 
 An agent can also send a whole document in `merged` (in the same shape as `put_doc`). A `merged` with conflict markers in `content` is refused.
 
@@ -683,7 +683,7 @@ Each store operation is one tool:
 | `delete_doc` | Tombstone with `id` and `parent`. |
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
 | `diff_doc_conflicts` | The conflicts of `id`, merged as far as code can: `settled`, `contested`, `marked`, `draft`, and `conflicts`. See [Conflicts over MCP](#conflicts-over-mcp). |
-| `resolve_doc` | Tombstone every conflict of `id`, after it writes a merge on the winner if given: `fields` and `content_edits` for the draft of `diff_doc_conflicts`, or a whole document in `merged`. Pass the `conflicts` you read to fail if they changed; `fields` and `content_edits` need them. |
+| `resolve_doc_conflicts` | Tombstone every conflict of `id`, after it writes a merge on the winner if given: `fields` and `content_edits` for the draft of `diff_doc_conflicts`, or a whole document in `merged`. Pass the `conflicts` you read to fail if they changed; `fields` and `content_edits` need them. |
 | `list_docs` | Current documents, newest first, with `type`, `tag`, `prefix` (of `_id`), `before`, `limit`. |
 | `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
 | `doc_history` | Revisions of one document, newest first. |

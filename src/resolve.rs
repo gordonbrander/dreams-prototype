@@ -70,7 +70,7 @@ pub struct Conflict {
     /// The winner's _type, unpinned, so a merge validates against the current schema.
     #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
     pub type_id: Option<String>,
-    /// The other live revisions. Pass them to resolve_doc.
+    /// The other live revisions. Pass them to resolve_doc_conflicts.
     pub conflicts: Vec<String>,
     /// The last revision that every side shared. Absent when the sides share none.
     #[serde(skip_serializing_if = "Option::is_none")]
