@@ -69,7 +69,7 @@ impl Runner {
         }
         let argv: Vec<String> = doc.field("argv").unwrap_or_default();
         if argv.is_empty() {
-            return Err(StoreError::invalid(format!("runner {} has an empty argv", doc.id)));
+            return Err(StoreError::invalid(format!("runner {}: argv must be a non-empty array of strings", doc.id)));
         }
         let timeout = doc.field::<&str>("timeout").unwrap_or(DEFAULT_TIMEOUT);
         Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
@@ -246,6 +246,13 @@ mod tests {
         assert_eq!(r.argv, ["cat"]);
         assert_eq!(r.timeout_secs, 120);
         assert_eq!(r.pinned(), "doc://runners/x?rev=1-a");
+        for argv in [json!([]), json!("cat"), json!(["cat", 5])] {
+            doc.body.insert("argv".into(), argv.clone());
+            let err = Runner::from_doc(&doc).unwrap_err().to_string();
+            assert!(err.contains("argv must be a non-empty array of strings"), "{argv}: {err}");
+        }
+        doc.body.remove("argv");
+        assert!(Runner::from_doc(&doc).is_err(), "a missing argv");
         doc.type_id = Some("doc://schemas/note?rev=1-a".into());
         assert!(Runner::from_doc(&doc).is_err());
     }
