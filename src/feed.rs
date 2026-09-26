@@ -96,7 +96,7 @@ impl Feed {
         if doc.type_path() != Some(FEED_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {FEED_TYPE} document", doc.id)));
         }
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).map(str::to_string);
+        let text = |key: &str| doc.str_field(key).map(str::to_string);
         Ok(Feed {
             id: doc.id.clone(),
             url: text("url").unwrap_or_default(),
@@ -139,7 +139,7 @@ pub struct NewItem {
 
 impl NewItem {
     fn of(kind: Kind, doc: &Doc) -> NewItem {
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).unwrap_or_default();
+        let text = |key: &str| doc.str_field(key).unwrap_or_default();
         let content = match kind {
             // Feed content is often HTML.
             Kind::Rss => html2text::config::plain_no_decorate()
@@ -336,7 +336,7 @@ pub fn apply_all(store: &mut Store, gathered: Vec<Result<(Feed, Vec<ItemDraft>),
         match applied {
             Ok((_, items)) if items.is_empty() => {}
             Ok((feed, items)) => report.feeds.push(FeedItems {
-                feed: format!("{}{}", DocRef::SCHEME, feed.id),
+                feed: DocRef::uri(&feed.id),
                 title: feed.title,
                 instructions: feed.instructions,
                 items,

@@ -589,16 +589,12 @@ const RESOURCE_PAGE: usize = 1000;
 const LISTEN_POLL: Duration = Duration::from_secs(1);
 
 fn title_of(doc: &Doc) -> Option<String> {
-    doc.body.get("title").and_then(Value::as_str).map(str::to_string)
-}
-
-fn doc_uri(id: &str) -> String {
-    format!("{}{id}", DocRef::SCHEME)
+    doc.str_field("title").map(str::to_string)
 }
 
 /// A current document as a listed resource.
 fn doc_resource(doc: &Doc) -> Resource {
-    let resource = Resource::new(doc_uri(&doc.id), &doc.id).with_mime_type("text/markdown");
+    let resource = Resource::new(DocRef::uri(&doc.id), &doc.id).with_mime_type("text/markdown");
     match title_of(doc) {
         Some(title) => resource.with_title(title),
         None => resource,
@@ -679,7 +675,7 @@ impl Watch {
             match (before, now) {
                 (Some(old), Some(new)) => {
                     changed.resources |= old != new;
-                    changed.updated.push(doc_uri(&id));
+                    changed.updated.push(DocRef::uri(&id));
                 }
                 (None, None) => {}
                 _ => changed.resources = true,

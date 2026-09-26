@@ -147,7 +147,7 @@ impl Task {
         if doc.type_path() != Some(TASK_TYPE) {
             return Err(StoreError::invalid(format!("{} is not a {TASK_TYPE} document", doc.id)));
         }
-        let text = |key: &str| doc.body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+        let text = |key: &str| doc.str_field(key).unwrap_or_default().to_string();
         let when = match doc.body.get("when") {
             Some(v) => Some(serde_json::from_value::<When>(v.clone())?),
             None => None,
@@ -158,7 +158,7 @@ impl Task {
             every_secs: parse_duration(&text("every"))?,
             when,
             prompt: text("prompt"),
-            cwd: doc.body.get("cwd").and_then(Value::as_str).map(str::to_string),
+            cwd: doc.str_field("cwd").map(str::to_string),
         })
     }
 }
@@ -342,7 +342,7 @@ pub fn plan_deploy(store: &Store, id: Option<&str>) -> Result<Vec<Deploy>, Store
             task_rev: head.rev.clone(),
             runner: runner_ref,
             argv: runner.argv,
-            every: head.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
+            every: head.str_field("every").unwrap_or_default().to_string(),
             when: task.when,
             prompt: task.prompt,
             current,
@@ -783,7 +783,7 @@ async fn fire_as_task(
         task: eval.task.id.clone(),
         run: done.id.clone(),
         exit_code: outcome.0.exit_code,
-        error: done.body.get("error").and_then(Value::as_str).map(str::to_string),
+        error: done.str_field("error").map(str::to_string),
     }))
 }
 

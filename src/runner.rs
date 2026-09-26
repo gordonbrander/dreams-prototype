@@ -76,7 +76,7 @@ impl Runner {
         if argv.is_empty() {
             return Err(StoreError::invalid(format!("runner {} has an empty argv", doc.id)));
         }
-        let timeout = doc.body.get("timeout").and_then(Value::as_str).unwrap_or(DEFAULT_TIMEOUT);
+        let timeout = doc.str_field("timeout").unwrap_or(DEFAULT_TIMEOUT);
         Ok(Runner { id: doc.id.clone(), rev: doc.rev.clone(), argv, timeout_secs: parse_duration(timeout)? })
     }
 

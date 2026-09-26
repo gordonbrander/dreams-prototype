@@ -51,7 +51,12 @@ impl DocRef {
 
     /// `doc://<id>`, without the revision.
     pub fn path(&self) -> String {
-        format!("{}{}", Self::SCHEME, self.id)
+        Self::uri(&self.id)
+    }
+
+    /// `doc://<id>` for a bare id.
+    pub fn uri(id: &str) -> String {
+        format!("{}{id}", Self::SCHEME)
     }
 
     /// The part of a reference before `?rev=`.
@@ -114,6 +119,11 @@ impl Doc {
     /// `_type` without its `?rev=` pin: the schema's `doc://` path.
     pub fn type_path(&self) -> Option<&str> {
         self.type_id.as_deref().map(DocRef::path_of)
+    }
+
+    /// The body field `key`, when it is a string.
+    pub fn str_field(&self, key: &str) -> Option<&str> {
+        self.body.get(key).and_then(Value::as_str)
     }
 }
 

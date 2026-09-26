@@ -663,7 +663,7 @@ fn task_cmd(
                             e.task.id.clone(),
                             state_word(e),
                             e.parsed.runner.clone(),
-                            e.task.body.get("every").and_then(Value::as_str).unwrap_or_default().to_string(),
+                            e.task.str_field("every").unwrap_or_default().to_string(),
                             e.parsed.when.as_ref().map(When::summary).unwrap_or_default(),
                             e.last_run_at.clone().unwrap_or_default(),
                             due_word(e).to_string(),
@@ -727,11 +727,7 @@ fn task_cmd(
             } else {
                 writeln!(out, "task:      {}", eval.task.id)?;
                 writeln!(out, "runner:    {}", eval.parsed.runner)?;
-                writeln!(
-                    out,
-                    "every:     {}",
-                    eval.task.body.get("every").and_then(Value::as_str).unwrap_or_default()
-                )?;
+                writeln!(out, "every:     {}", eval.task.str_field("every").unwrap_or_default())?;
                 if let Some(w) = &eval.parsed.when {
                     writeln!(out, "when:      {}", w.summary())?;
                 }
@@ -797,7 +793,7 @@ fn task_cmd(
             if json {
                 print_json(out, &page)?;
             } else {
-                let field = |d: &Doc, k: &str| d.body.get(k).and_then(Value::as_str).unwrap_or_default().to_string();
+                let field = |d: &Doc, k: &str| d.str_field(k).unwrap_or_default().to_string();
                 let rows: Vec<Vec<String>> = page
                     .docs
                     .iter()
@@ -930,11 +926,7 @@ fn runner_cmd(store: &mut Store, cmd: RunnerCmd, json: bool, out: &mut dyn Write
                         vec![
                             d.id.clone(),
                             title_of(d),
-                            d.body
-                                .get("timeout")
-                                .and_then(Value::as_str)
-                                .unwrap_or(runner::DEFAULT_TIMEOUT)
-                                .to_string(),
+                            d.str_field("timeout").unwrap_or(runner::DEFAULT_TIMEOUT).to_string(),
                             clip(&argv, 80),
                         ]
                     })
@@ -1017,7 +1009,7 @@ fn feed_cmd(store: &mut Store, cmd: FeedCmd, json: bool, out: &mut dyn Write) ->
             if json {
                 print_json(out, &docs)?;
             } else {
-                let text = |d: &Doc, key: &str| d.body.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+                let text = |d: &Doc, key: &str| d.str_field(key).unwrap_or_default().to_string();
                 let rows: Vec<Vec<String>> =
                     docs.iter().map(|d| vec![d.id.clone(), text(d, "kind"), text(d, "url"), title_of(d)]).collect();
                 table(out, &["ID", "KIND", "URL", "TITLE"], &rows)?;
@@ -1558,7 +1550,7 @@ fn clip(s: &str, max: usize) -> String {
 }
 
 fn title_of(doc: &Doc) -> String {
-    doc.body.get("title").and_then(Value::as_str).map(|t| clip(t, 60)).unwrap_or_default()
+    doc.str_field("title").map(|t| clip(t, 60)).unwrap_or_default()
 }
 
 fn tags_of(doc: &Doc) -> String {
