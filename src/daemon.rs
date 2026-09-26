@@ -65,16 +65,16 @@ pub async fn run(store: &mut Store, db: &Path, interval: Duration, poll: Duratio
 
 // ---- install ------------------------------------------------------------
 
-/// The name of a vault's service: `vault-<id>`. The id never replicates, so
-/// two vaults never share a name, and a vault that moves keeps its name.
+/// The name of a vault's service on every platform: `io.dreams.vault-<id>`.
+/// It is the launchd label, the systemd unit without `.service`, and the stem
+/// of the service and log files. The id never replicates, so two vaults never
+/// share a name, and a vault that moves keeps its name.
 pub fn service_name(vault_id: &str) -> String {
-    format!("vault-{vault_id}")
+    format!("io.dreams.vault-{vault_id}")
 }
 
-const LABEL_PREFIX: &str = "io.dreams.";
-const PLIST_SUFFIX: &str = ".plist";
-const UNIT_PREFIX: &str = "dreams-";
-const UNIT_SUFFIX: &str = ".service";
+const PLIST: &str = ".plist";
+const UNIT: &str = ".service";
 
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
@@ -140,9 +140,10 @@ fn unit_fragment(db: &Path) -> String {
     format!(" --db {} daemon\n", db.to_string_lossy())
 }
 
-/// The names of the services in `dir` whose file is `<prefix><name><suffix>`
-/// and contains `fragment`. A missing `dir` has none.
-fn services_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str) -> Vec<String> {
+/// The names of the services in `dir` whose file is `<name><ext>` and
+/// contains `fragment`. Any name matches, so older names are found too. A
+/// missing `dir` has none.
+fn services_for(dir: &Path, ext: &str, fragment: &str) -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -150,7 +151,7 @@ fn services_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str) -> Vec<S
         .filter_map(Result::ok)
         .filter_map(|e| {
             let file = e.file_name().to_string_lossy().into_owned();
-            let name = file.strip_prefix(prefix)?.strip_suffix(suffix)?.to_string();
+            let name = file.strip_suffix(ext)?.to_string();
             std::fs::read_to_string(e.path()).ok()?.contains(fragment).then_some(name)
         })
         .collect();
@@ -161,11 +162,11 @@ fn services_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str) -> Vec<S
 /// The services of a vault: every one that points at its database, and
 /// the one its id names, if that is installed. Old names and the service of
 /// a deleted vault are found by the path.
-fn installed_for(dir: &Path, prefix: &str, suffix: &str, fragment: &str, vault_id: Option<&str>) -> Vec<String> {
-    let mut names = services_for(dir, prefix, suffix, fragment);
+fn installed_for(dir: &Path, ext: &str, fragment: &str, vault_id: Option<&str>) -> Vec<String> {
+    let mut names = services_for(dir, ext, fragment);
     if let Some(name) = vault_id.map(service_name)
         && !names.contains(&name)
-        && dir.join(format!("{prefix}{name}{suffix}")).exists()
+        && dir.join(format!("{name}{ext}")).exists()
     {
         names.push(name);
     }
@@ -213,16 +214,15 @@ fn remove_file(path: &Path) -> Result<(), StoreError> {
     }
 }
 
-/// Stop a launchd agent and remove its plist.
+/// Stop the launchd agent `name` (its label) and remove its plist.
 fn remove_agent(home: &Path, name: &str) -> Result<(), StoreError> {
-    let label = format!("{LABEL_PREFIX}{name}");
-    let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{label}", uid(home)?)]).output();
-    remove_file(&agents_dir(home).join(format!("{label}{PLIST_SUFFIX}")))
+    let _ = Command::new("launchctl").args(["bootout", &format!("gui/{}/{name}", uid(home)?)]).output();
+    remove_file(&agents_dir(home).join(format!("{name}{PLIST}")))
 }
 
-/// Stop a systemd user unit and remove its file.
+/// Stop the systemd user unit `name.service` and remove its file.
 fn remove_unit(home: &Path, name: &str) -> Result<(), StoreError> {
-    let unit = format!("{UNIT_PREFIX}{name}{UNIT_SUFFIX}");
+    let unit = format!("{name}{UNIT}");
     let _ = Command::new("systemctl").args(["--user", "disable", "--now", &unit]).output();
     remove_file(&units_dir(home).join(&unit))?;
     let _ = Command::new("systemctl").args(["--user", "daemon-reload"]).output();
@@ -237,15 +237,15 @@ pub fn install(db: &Path, vault_id: &str, exe: &Path, out: &mut dyn Write) -> Re
     let home = home()?;
     let name = service_name(vault_id);
     if cfg!(target_os = "macos") {
-        for old in services_for(&agents_dir(&home), LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db)) {
+        for old in services_for(&agents_dir(&home), PLIST, &plist_fragment(db)) {
             if old != name {
                 remove_agent(&home, &old)?;
-                writeln!(out, "removed {LABEL_PREFIX}{old}").map_err(io)?;
+                writeln!(out, "removed {old}").map_err(io)?;
             }
         }
-        let label = format!("{LABEL_PREFIX}{name}");
-        let plist = agents_dir(&home).join(format!("{label}{PLIST_SUFFIX}"));
-        let log = home.join("Library/Logs/dreams").join(format!("{name}.log"));
+        let label = name;
+        let plist = agents_dir(&home).join(format!("{label}{PLIST}"));
+        let log = home.join("Library/Logs/dreams").join(format!("{label}.log"));
         std::fs::create_dir_all(plist.parent().unwrap()).map_err(io)?;
         std::fs::create_dir_all(log.parent().unwrap()).map_err(io)?;
         std::fs::write(&plist, render_plist(&label, exe, db, &log, &path_env)).map_err(io)?;
@@ -254,13 +254,13 @@ pub fn install(db: &Path, vault_id: &str, exe: &Path, out: &mut dyn Write) -> Re
         sh("launchctl", &["bootstrap".into(), domain, plist.to_string_lossy().into_owned()])?;
         writeln!(out, "installed {label}\n  {}\nlogs: {}", plist.display(), log.display()).map_err(io)?;
     } else if cfg!(target_os = "linux") {
-        for old in services_for(&units_dir(&home), UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db)) {
+        for old in services_for(&units_dir(&home), UNIT, &unit_fragment(db)) {
             if old != name {
                 remove_unit(&home, &old)?;
-                writeln!(out, "removed {UNIT_PREFIX}{old}{UNIT_SUFFIX}").map_err(io)?;
+                writeln!(out, "removed {old}{UNIT}").map_err(io)?;
             }
         }
-        let unit_name = format!("{UNIT_PREFIX}{name}{UNIT_SUFFIX}");
+        let unit_name = format!("{name}{UNIT}");
         let unit = units_dir(&home).join(&unit_name);
         std::fs::create_dir_all(unit.parent().unwrap()).map_err(io)?;
         std::fs::write(&unit, render_unit(exe, db, &path_env)).map_err(io)?;
@@ -287,17 +287,17 @@ pub fn install(db: &Path, vault_id: &str, exe: &Path, out: &mut dyn Write) -> Re
 pub fn uninstall(db: &Path, vault_id: Option<&str>, out: &mut dyn Write) -> Result<(), StoreError> {
     let home = home()?;
     let removed: Vec<String> = if cfg!(target_os = "macos") {
-        let names = installed_for(&agents_dir(&home), LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db), vault_id);
+        let names = installed_for(&agents_dir(&home), PLIST, &plist_fragment(db), vault_id);
         for name in &names {
             remove_agent(&home, name)?;
         }
-        names.iter().map(|n| format!("{LABEL_PREFIX}{n}")).collect()
+        names
     } else if cfg!(target_os = "linux") {
-        let names = installed_for(&units_dir(&home), UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db), vault_id);
+        let names = installed_for(&units_dir(&home), UNIT, &unit_fragment(db), vault_id);
         for name in &names {
             remove_unit(&home, name)?;
         }
-        names.iter().map(|n| format!("{UNIT_PREFIX}{n}{UNIT_SUFFIX}")).collect()
+        names.iter().map(|n| format!("{n}{UNIT}")).collect()
     } else {
         return Err(StoreError::invalid("no installer for this platform"));
     };
@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn each_vault_id_names_its_own_service() {
-        assert_eq!(service_name("01a0"), "vault-01a0");
+        assert_eq!(service_name("01a0"), "io.dreams.vault-01a0");
         assert_ne!(service_name("01a0"), service_name("01a1"));
     }
 
@@ -354,22 +354,26 @@ mod tests {
         let other = Path::new("/v/home/vault.db");
         let log = Path::new("/l/x.log");
         let write = |file: &str, text: String| std::fs::write(dir.join(file), text).unwrap();
-        write("io.dreams.vault.plist", render_plist("io.dreams.vault", exe, db, log, ""));
+        // The new name, and the older names that install moves over.
         write("io.dreams.vault-01a0.plist", render_plist("io.dreams.vault-01a0", exe, db, log, ""));
+        write("io.dreams.vault.plist", render_plist("io.dreams.vault", exe, db, log, ""));
         write("io.dreams.vault-01a1.plist", render_plist("io.dreams.vault-01a1", exe, other, log, ""));
-        write("com.other.plist", render_plist("com.other", exe, db, log, ""));
+        write("com.other.plist", "<plist><string>--db</string></plist>".into());
+        write("io.dreams.vault-01a0.service", render_unit(exe, db, ""));
         write("dreams-vault.service", render_unit(exe, db, ""));
+        write("dreams-vault-01a0.service", render_unit(exe, db, ""));
         write("dreams-vault-01a1.service", render_unit(exe, other, ""));
 
-        let plists = |db: &Path| services_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &plist_fragment(db));
-        assert_eq!(plists(db), ["vault", "vault-01a0"]);
-        assert_eq!(plists(other), ["vault-01a1"]);
-        let units = |db: &Path| services_for(&dir, UNIT_PREFIX, UNIT_SUFFIX, &unit_fragment(db));
-        assert_eq!(units(db), ["vault"]);
-        assert_eq!(units(other), ["vault-01a1"]);
+        let plists = |db: &Path| services_for(&dir, PLIST, &plist_fragment(db));
+        assert_eq!(plists(db), ["io.dreams.vault", "io.dreams.vault-01a0"]);
+        assert_eq!(plists(other), ["io.dreams.vault-01a1"]);
+        let units = |db: &Path| services_for(&dir, UNIT, &unit_fragment(db));
+        assert_eq!(units(db), ["dreams-vault", "dreams-vault-01a0", "io.dreams.vault-01a0"]);
+        assert_eq!(units(other), ["dreams-vault-01a1"]);
         // A path that another path starts with is not the same database.
         assert_eq!(plists(Path::new("/v/work/vault")), Vec::<String>::new());
-        assert_eq!(services_for(&dir.join("missing"), LABEL_PREFIX, PLIST_SUFFIX, "x"), Vec::<String>::new());
+        assert_eq!(units(Path::new("/v/work/vault")), Vec::<String>::new());
+        assert_eq!(services_for(&dir.join("missing"), PLIST, "x"), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -381,9 +385,9 @@ mod tests {
         let old = render_plist("io.dreams.vault-01a0", exe, Path::new("/old/vault.db"), log, "");
         std::fs::write(dir.join("io.dreams.vault-01a0.plist"), old).unwrap();
         let fragment = plist_fragment(Path::new("/new/vault.db"));
-        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, None), Vec::<String>::new());
-        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, Some("01a0")), ["vault-01a0"]);
-        assert_eq!(installed_for(&dir, LABEL_PREFIX, PLIST_SUFFIX, &fragment, Some("01a1")), Vec::<String>::new());
+        assert_eq!(installed_for(&dir, PLIST, &fragment, None), Vec::<String>::new());
+        assert_eq!(installed_for(&dir, PLIST, &fragment, Some("01a0")), ["io.dreams.vault-01a0"]);
+        assert_eq!(installed_for(&dir, PLIST, &fragment, Some("01a1")), Vec::<String>::new());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
