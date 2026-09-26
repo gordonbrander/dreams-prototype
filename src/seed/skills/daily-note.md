@@ -35,5 +35,5 @@ Do the steps in "Add to a daily note", with these changes:
 
 ## Find daily notes
 
-- To list daily notes, call `list_docs` with `tag` set to `daily`. The newest changes come first.
+- To list daily notes, call `search_docs` with no `query` and `tag` set to `daily`. The newest changes come first.
 - To find a daily note by its text, call `search_docs`.

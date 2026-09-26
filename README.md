@@ -509,7 +509,7 @@ An agent that uses the MCP server creates a task by writing a document, then ask
 
 `run_task` takes the `id` of a deployed task and asks the scheduler to fire it on its next tick, at the deployed revisions, whatever its schedule says. It asks no question, because you already confirmed what runs. It spawns nothing itself: the scheduler runs the agent, as for every run. It refuses a dormant or disabled task.
 
-The agent finds runners with `list_docs` and `type: doc://schemas/runner.json`, and reads past runs with `list_docs`, `type: doc://schemas/run.json`, and `tag: <task id>`. It can write new runners; see [Runners](#runners). It cannot write run documents, the seeded runners, or the seeded schemas. Those are read-only over MCP.
+The agent finds runners with `search_docs` and `type: doc://schemas/runner.json`, and finds past runs with `search_docs`, `type: doc://schemas/run.json`, and `tag: <task id>`. It reads a run with `get_doc`. It can write new runners; see [Runners](#runners). It cannot write run documents, the seeded runners, or the seeded schemas. Those are read-only over MCP.
 
 ### Where an agent runs, and what it can use
 
@@ -669,7 +669,7 @@ Then turn on protocol negotiation in Claude Code. Without it, Claude Code does n
 
 Or export `MCP_PROTOCOL_NEGOTIATION=auto` in your shell profile.
 
-To check, start Claude Code and run `/mcp`. `dreams` shows as connected, and its tools have names like `mcp__dreams__list_docs`.
+To check, start Claude Code and run `/mcp`. `dreams` shows as connected, and its tools have names like `mcp__dreams__search_docs`.
 
 ### Tools
 
@@ -684,8 +684,7 @@ Each store operation is one tool:
 | `list_conflicts` | Documents with conflicts, in id order, with `after` and `limit`. |
 | `diff_doc_conflicts` | The conflicts of `id`, merged as far as code can: `settled`, `contested`, `marked`, `draft`, and `conflicts`. See [Conflicts over MCP](#conflicts-over-mcp). |
 | `resolve_doc_conflicts` | Tombstone every conflict of `id`, after it writes a merge on the winner if given: `fields` and `content_edits` for the draft of `diff_doc_conflicts`, or a whole document in `merged`. Pass the `conflicts` you read to fail if they changed; `fields` and `content_edits` need them. |
-| `list_docs` | Current documents, newest first, with `type`, `tag`, `prefix` (of `_id`), `before`, `limit`. |
-| `search_docs` | Full-text search with `query` and the same filters. Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, and `content_matches`. |
+| `search_docs` | Full-text search with `query`, and filters `type`, `tag`, `prefix` (of `_id`), `limit` (up to 200). Each result has `_id`, `_rev`, `_type`, `_created_at`, `_actor`, `title`, `tags`, and `content_matches`. With no `query`, it lists current documents, newest first, with the first 150 characters of `content` as `content_matches`, and pages with `before`. |
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
 | `pull_feeds` | Fetch one feed (`id`), or every feed, and return only the new items. See [Feeds](#feeds). |
@@ -694,7 +693,7 @@ Each store operation is one tool:
 | `list_tasks` | Every task with its state here, and whether a scheduler ticks. |
 | `run_task` | Fire a deployed task (`id`) on the next tick. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task or a runner with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner.json`, and reads runs the same way. Writes to run documents, the seeded runners, and the seeded schemas are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task or a runner with `put_doc`, finds runners with `search_docs` and `type: doc://schemas/runner.json`, and reads runs the same way. Writes to run documents, the seeded runners, and the seeded schemas are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
 ### Skills
 
@@ -755,13 +754,13 @@ Every vault is seeded with the skill `skills/dreams.md` (`skill://dreams/SKILL.m
 
 ### Daily notes
 
-Every vault is seeded with the skill `skills/daily-note.md` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily.json`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
+Every vault is seeded with the skill `skills/daily-note.md` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily.json`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `search_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
 
 Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
 
 ### Bookmarks
 
-Every vault is also seeded with the skill `skills/bookmark.md` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark.json`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<origin-slug>/<path-slug>.md`, and the agent makes the slugs from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. All bookmarks from one site share a prefix, so `list_docs` with `prefix` set to `bookmarks/example-com/` lists them. The agent gets the page with its own web fetch tool, so the host must give it one.
+Every vault is also seeded with the skill `skills/bookmark.md` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark.json`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<origin-slug>/<path-slug>.md`, and the agent makes the slugs from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. All bookmarks from one site share a prefix, so `search_docs` with `prefix` set to `bookmarks/example-com/` lists them. The agent gets the page with its own web fetch tool, so the host must give it one.
 
 The seeded prompt `/dreams:bookmark <url> [notes]` saves a bookmark.
 

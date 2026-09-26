@@ -14,6 +14,7 @@ use crate::doc::{Doc, DocRef, Draft, PutInput, check_body, check_id, new_id};
 use crate::error::StoreError;
 use crate::rev;
 use crate::schema;
+use crate::text;
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 1000;
@@ -57,7 +58,7 @@ pub struct ListQuery {
     /// Keyset cursor: only heads with a sequence below this (from a previous page's `next`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before: Option<i64>,
-    /// Page size, 1..=1000. Default 50.
+    /// Page size. Default 50; each caller caps it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
 }
@@ -85,8 +86,10 @@ pub struct SearchResult {
     pub actor: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Snippet of the best-matching field, matched terms in `**`. Absent
-    /// when an empty query listed instead.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Snippet of the best-matching field, matched terms in `**`. When an
+    /// empty query listed instead: the start of `content`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content_matches: Option<String>,
 }
@@ -94,6 +97,8 @@ pub struct SearchResult {
 impl From<Doc> for SearchResult {
     fn from(d: Doc) -> Self {
         let title = d.field::<String>("title");
+        let tags = d.field::<Vec<String>>("tags").unwrap_or_default();
+        let content_matches = d.field::<&str>("content").map(|c| text::truncate(c, PREVIEW_CHARS));
         SearchResult {
             id: d.id,
             rev: d.rev,
@@ -101,10 +106,14 @@ impl From<Doc> for SearchResult {
             created_at: d.created_at,
             actor: d.actor,
             title,
-            content_matches: None,
+            tags,
+            content_matches,
         }
     }
 }
+
+/// Characters of `content` a listed search result keeps.
+pub const PREVIEW_CHARS: usize = 150;
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct SearchPage {
@@ -807,7 +816,8 @@ impl Store {
         let limit = clamp_limit(q.limit);
         let (exact, path) = type_filter(q.type_id.as_deref());
         let sql = "SELECT d._id, d._rev, d._type, d._created_at, d.actor, d.title,
-                    snippet(docs_fts, -1, '**', '**', '…', 16)
+                    snippet(docs_fts, -1, '**', '**', '…', 16),
+                    (SELECT json_group_array(t.tag) FROM doc_tags t WHERE t._id = d._id)
                FROM docs_fts f JOIN docs d ON d._local_seq = f.rowid
               WHERE docs_fts MATCH ?1
                 AND (?2 IS NULL OR d._type = ?2) AND (?3 IS NULL OR d._type_path = ?3)
@@ -816,6 +826,9 @@ impl Store {
               ORDER BY bm25(docs_fts, 10.0, 1.0, 5.0) LIMIT ?5";
         let mut stmt = self.conn.prepare_cached(sql)?;
         let rows = stmt.query_map(params![match_expr, exact, path, q.tag, limit as i64, q.prefix], |r| {
+            let tags: String = r.get(7)?;
+            let tags = serde_json::from_str(&tags)
+                .map_err(|e| rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, Box::new(e)))?;
             Ok(SearchResult {
                 id: r.get(0)?,
                 rev: r.get(1)?,
@@ -823,6 +836,7 @@ impl Store {
                 created_at: r.get(3)?,
                 actor: r.get(4)?,
                 title: r.get(5)?,
+                tags,
                 content_matches: r.get(6)?,
             })
         })?;
