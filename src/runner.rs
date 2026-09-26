@@ -1,9 +1,9 @@
 //! Runners: documents typed `doc://schemas/runner` that hold an argv
 //! template. A task names one by `doc://` reference. The template is
 //! spawned directly, never through a shell, with tokens replaced inside
-//! each element. Runner commands are code, so they enter only through the
-//! CLI: `serve` marks the type protected. The default runners are seeded
-//! by `seed::seed`.
+//! each element. Runner commands are code, so none runs until a person
+//! confirms a deploy that shows it. The default runners are seeded by
+//! `seed::seed`, and `serve` keeps them read-only.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::doc::{Doc, DocRef};
 use crate::error::StoreError;
+use crate::seed;
 use crate::store::Store;
 use crate::task::{self, parse_duration};
 
@@ -18,20 +19,15 @@ use crate::task::{self, parse_duration};
 pub const RUNNER_TYPE: &str = "doc://schemas/runner";
 
 /// Type paths that MCP clients may read but not write or delete.
-pub const PROTECTED_TYPES: &[&str] = &[RUNNER_TYPE, task::RUN_TYPE];
+pub const PROTECTED_TYPES: &[&str] = &[task::RUN_TYPE];
 
-/// Seeded schema documents that MCP clients may not change.
-pub const PROTECTED_IDS: &[&str] = &[
-    "schemas/task",
-    "schemas/run",
-    "schemas/runner",
-    "schemas/skill",
-    "schemas/prompt",
-    "schemas/daily",
-    "schemas/bookmark",
-    "schemas/feed",
-    "schemas/feed-item",
-];
+/// Seeded documents that MCP clients may not change: the schemas, and the
+/// runners. Other runners are writable over MCP, because a runner runs only
+/// after a person confirms a deploy that shows its command. The seeded
+/// runners also run without a deploy, from `doc resolve --auto`.
+pub fn protected_ids() -> Vec<&'static str> {
+    seed::SCHEMAS.iter().map(|(id, _)| *id).chain(seed::RUNNERS.iter().map(|(id, _, _)| *id)).collect()
+}
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
 

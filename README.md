@@ -272,7 +272,7 @@ dreams doc resolve notes/plan.md plan.md
 
 A resolve does not delete the losing revisions. It writes a tombstone on each one, and you can still read them. As in CouchDB, `doc get <id> --deleted-conflicts` lists these tombstones as `_deleted_conflicts`.
 
-Vaults seeded by different versions of this binary can have different built-in schemas, runners, skills, or prompts. A sync then makes conflicts on those documents. MCP clients cannot write the schemas or runners, so resolve them with the CLI.
+Vaults seeded by different versions of this binary can have different built-in schemas, runners, skills, or prompts. A sync then makes conflicts on those documents. MCP clients cannot write the seeded schemas or runners, so resolve them with the CLI.
 
 ### Let an agent merge
 
@@ -392,7 +392,7 @@ Changes collect until a run consumes them. So the task fires at most once per in
 
 ### From an agent
 
-An agent that uses the MCP server creates a task by writing a document, then asks to deploy it with the `deploy_task` tool. A task document that is not deployed does not run.
+An agent that uses the MCP server creates a task by writing a document, then asks to deploy it with the `deploy_task` tool. A task document that is not deployed does not run. The seeded skill `skills/dreams` gives the agent the steps; see [The dreams skill](#the-dreams-skill).
 
 ```json
 {
@@ -405,11 +405,15 @@ An agent that uses the MCP server creates a task by writing a document, then ask
 }
 ```
 
-`deploy_task` takes a task `id`, or no id for every task that is not deployed at its current revisions. It never deploys on its own: it asks you, through your MCP client, to confirm the exact prompt and command. Your client shows the question; the agent cannot answer it. If you decline, nothing is deployed. If the task or runner changed before you answered, you are asked again. A client that cannot ask questions (MCP elicitation) cannot deploy; run `dreams task deploy` in a terminal instead. A scheduled agent runs with no person to ask, so it cannot deploy tasks.
+`deploy_task` takes a task `id`, or no id for every task that is not deployed at its current revisions. It never deploys on its own: it asks you, through your MCP client, to confirm the exact prompt, command, folder (`cwd`), and timeout. Your client shows the question; the agent cannot answer it. If you decline, nothing is deployed. If the task or runner changed before you answered, you are asked again. A client that cannot ask questions (MCP elicitation) cannot deploy; the error gives the agent the `dreams task deploy <id>` command to give you. A scheduled agent runs with no person to ask, so it cannot deploy tasks.
 
 `disable_task` takes a task `id` and stops it on this vault, with no question.
 
-It finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It cannot write runner or run documents, or the seeded schemas. Those are read-only over MCP.
+`list_tasks` returns what `dreams task list --json` prints: each task with its state on this vault, `drift`, `due`, and `runner_error`, and `scheduler`, which says when a scheduler last ticked. `scheduler.stale` is true when no tick came in the last five minutes; then no deployed task fires.
+
+`run_task` takes the `id` of a deployed task and asks the scheduler to fire it on its next tick, at the deployed revisions, whatever its schedule says. It asks no question, because you already confirmed what runs. It spawns nothing itself: the scheduler runs the agent, as for every run. It refuses a dormant or disabled task.
+
+The agent finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It can write new runners; see [Runners](#runners). It cannot write run documents, the seeded runners, or the seeded schemas. Those are read-only over MCP.
 
 ### Where an agent runs, and what it can use
 
@@ -450,7 +454,7 @@ dreams runner add runners/claude-fast --timeout 5m -- claude -p --model claude-s
 dreams runner rm runners/pi
 ```
 
-Runner commands are code. They enter only through the CLI, or from a vault that you [sync](#what-replicates) with, and a runner revision runs only after you confirm it in a deploy. An agent can choose a runner for a task; it cannot define or change one. Deleted defaults stay deleted. `doc resolve --auto` also uses runners.
+Runner commands are code. A runner revision runs only after you confirm it in a deploy, which shows its full command. An agent can write new runners over MCP, because a runner that nobody deploys never runs. The seeded runners (`runners/claude`, `runners/codex`, `runners/pi`, `runners/feeds`) are read-only over MCP, because `doc resolve --auto` runs them without a deploy. Deleted defaults stay deleted.
 
 The command inherits these variables: `DREAMS_DB`, `DREAMS_TASK`, `DREAMS_RUN`, `DREAMS_ACTOR` (the task id), `DREAMS_MCP` (a generated MCP config for this vault), and `DREAMS_OUT`. `PATH` starts with the directory of this binary.
 
@@ -469,6 +473,8 @@ dreams daemon install | uninstall  start it at login (launchd on macOS, systemd 
 ```
 
 `daemon install` writes the service with your current `PATH`. Agents use their own stored logins; nothing else is copied. The service is named by the vault's id, which each vault makes the first time it needs one and never shares. The name is `io.dreams.vault-<id>` on both platforms: a launchd agent on macOS, and the systemd user unit `io.dreams.vault-<id>.service` on Linux. Thus each vault gets its own service, even two vaults with the same file name, and a vault that you move keeps its name. `install` prints the name. Logs go to `~/Library/Logs/dreams/io.dreams.vault-<id>.log` on macOS. On Linux, read them with `journalctl --user -u io.dreams.vault-<id>`.
+
+Each pass records the time it ended in the vault's local state. `task list` and the `list_tasks` tool show it, and warn when no pass came in the last five minutes while a task is deployed.
 
 `install` and `uninstall` also find the services that run the same database path, so they remove services installed under older names. `uninstall` works after you delete the vault: it finds the service by the path. Set `RUST_LOG=debug` for more. Two schedulers on one database do no harm: the first one takes the lease before the agent starts, so the second one sees the task as running and skips it.
 
@@ -586,8 +592,12 @@ Each store operation is one tool:
 | `doc_history` | Revisions of one document, newest first. |
 | `changes` | Every revision after `since`. |
 | `pull_feeds` | Fetch one feed (`id`), or every feed, and return only the new items. See [Feeds](#feeds). |
+| `deploy_task` | Deploy a task (`id`), or every task, after the person confirms. See [From an agent](#from-an-agent). |
+| `disable_task` | Stop a task (`id`) on this vault. |
+| `list_tasks` | Every task with its state here, and whether a scheduler ticks. |
+| `run_task` | Fire a deployed task (`id`) on the next tick. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas and scheduled tasks need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to runner, run, and seeded schema documents are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task or a runner with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to run documents, the seeded runners, and the seeded schemas are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
 ### Skills
 
@@ -642,6 +652,10 @@ A host that opens a `subscriptions/listen` stream gets notifications. While the 
 
 A write that changes nothing a host sees sends nothing. A deleted resource sends only `list_changed`. A pinned `?rev=` URI never changes. Claude Code asks for the two `list_changed` notifications. It does not subscribe to single resources.
 
+### The dreams skill
+
+Every vault is seeded with the skill `skills/dreams` (`skill://dreams/SKILL.md`). It teaches the agent the vault: how to write and update documents, where each kind of document goes, and the steps to set up a scheduled task, a runner, a skill, a prompt, a feed, or a schema. For a task, the steps are: check `list_tasks`, choose a runner, write the task, deploy it with your confirmation, test it with `run_task`, read the receipt, and tell you to run `dreams daemon install` when no scheduler ticks. The server instructions tell the agent to read this skill before it sets up anything, so hosts without the Skills Extension find it too.
+
 ### Daily notes
 
 Every vault is seeded with the skill `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
@@ -679,10 +693,11 @@ dreams task deploy tasks/brief
 One SQLite file in WAL mode. Migrations run on open.
 
 - `docs` holds one row per revision. Triggers refuse updates and deletes, and enforce the parent chain.
+- `vault` and `task_state` are local and never replicate: the vault's id and the time of the last scheduler pass, and each deployed task's pins, cursor, lease, and run request.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, `schemas/feed`, `schemas/feed-item`, the default runners (three agents and `runners/feeds`), the `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` and `tasks/pull-feeds` tasks.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, `schemas/feed`, `schemas/feed-item`, the default runners (three agents and `runners/feeds`), the `skills/dreams`, `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` and `tasks/pull-feeds` tasks.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 

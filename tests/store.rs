@@ -444,15 +444,17 @@ fn reopening_a_file_keeps_data_and_does_not_remigrate() {
     let dir = std::env::temp_dir().join(format!("dreams-test-{}", uuid::Uuid::now_v7()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("vault.db");
-    {
+    let migrations =
+        |s: &Store| -> i64 { s.connection().query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap() };
+    let applied = {
         let mut s = Store::open(&path).unwrap();
         s.put(input(json!({"_id": "a", "title": "persisted"}))).unwrap();
-    }
+        migrations(&s)
+    };
     {
         let s = Store::open(&path).unwrap();
         assert_eq!(s.get("a").unwrap().body["title"], "persisted");
-        let n: i64 = s.connection().query_row("SELECT count(*) FROM migrations", [], |r| r.get(0)).unwrap();
-        assert_eq!(n, 5);
+        assert_eq!(migrations(&s), applied);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -468,7 +470,7 @@ fn opening_creates_missing_folders() {
 
 // ---- scheduled tasks ------------------------------------------------------
 
-use dreams::runner::{PROTECTED_IDS, PROTECTED_TYPES, RUNNER_TYPE};
+use dreams::runner::{PROTECTED_TYPES, RUNNER_TYPE, protected_ids};
 use dreams::seed;
 use dreams::task::{self, RUN_TYPE, TASK_TYPE};
 
@@ -516,20 +518,29 @@ fn put_if_writes_only_when_the_check_passes() {
 }
 
 #[test]
-fn protected_types_are_read_only() {
+fn protected_types_and_ids_are_read_only() {
     let mut s = store();
-    seed::seed_schemas(&mut s).unwrap();
+    seed::seed(&mut s).unwrap();
+    let run = s
+        .put(input(json!({"_id": "runs/t/0", "_type": RUN_TYPE, "task": "t", "runner": "r", "vault": "v",
+            "started_at": "x", "finished_at": "y", "tags": ["t"]})))
+        .unwrap();
+    s.set_protected(PROTECTED_TYPES, &protected_ids());
+    // an update that drops the type is still an update of a protected document
+    assert!(matches!(
+        s.put(input(json!({"_id": "runs/t/0", "_parent": run.rev, "title": "plain"}))),
+        Err(StoreError::Protected { .. })
+    ));
+    assert!(matches!(s.delete("runs/t/0", &run.rev), Err(StoreError::Protected { .. })));
+    // a new runner is writable: it runs only after a confirmed deploy
     let doc = s.put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
-    s.set_protected(PROTECTED_TYPES, PROTECTED_IDS);
+    // the seeded runners are protected by id
+    let claude = s.get("runners/claude").unwrap();
     assert!(matches!(
-        s.put(input(json!({"_id": "runners/y", "_type": RUNNER_TYPE, "argv": ["cat"]}))),
-        Err(StoreError::Protected { .. })
+        s.put(input(json!({"_id": "runners/claude", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]}))),
+        Err(StoreError::Protected { id: Some(_), .. })
     ));
-    // pinning to a specific schema revision does not get around the path check
-    assert!(matches!(
-        s.put(input(json!({"_id": "runners/y", "_type": doc.type_id, "argv": ["cat"]}))),
-        Err(StoreError::Protected { .. })
-    ));
+    assert!(matches!(s.delete("runners/claude", &claude.rev), Err(StoreError::Protected { .. })));
     // the seeded schema documents are protected by id
     let task_schema = s.get("schemas/task").unwrap();
     assert!(matches!(
@@ -537,21 +548,21 @@ fn protected_types_are_read_only() {
         Err(StoreError::Protected { id: Some(_), .. })
     ));
     assert!(matches!(s.delete("schemas/task", &task_schema.rev), Err(StoreError::Protected { .. })));
-    // an update that drops the type is still an update of a protected document
-    assert!(matches!(
-        s.put(input(json!({"_id": "runners/x", "_parent": doc.rev, "title": "plain"}))),
-        Err(StoreError::Protected { .. })
-    ));
-    assert!(matches!(s.delete("runners/x", &doc.rev), Err(StoreError::Protected { .. })));
-    assert!(matches!(
-        s.put(input(json!({"_id": "runs/t/1", "_type": RUN_TYPE, "task": "t", "runner": "r", "started_at": "x", "seq": 1, "tags": ["t"]}))),
-        Err(StoreError::Protected { .. })
-    ));
+    // run receipts are protected by type, also when the type is pinned
+    let run_schema = s.get("schemas/run").unwrap();
+    for type_id in [RUN_TYPE.to_string(), pinned("schemas/run", &run_schema.rev)] {
+        assert!(matches!(
+            s.put(input(json!({"_id": "runs/t/1", "_type": type_id, "task": "t", "runner": "r", "vault": "v",
+                "started_at": "x", "finished_at": "y", "tags": ["t"]}))),
+            Err(StoreError::Protected { .. })
+        ));
+    }
     // reads and ordinary writes still work
     assert_eq!(s.get("runners/x").unwrap().body["argv"], json!(["cat"]));
     assert!(s.put(input(json!({"_id": "note", "title": "n"}))).is_ok());
-    s.set_protected(&[], &[]);
     assert!(s.delete("runners/x", &doc.rev).is_ok());
+    s.set_protected(&[], &[]);
+    assert!(s.delete("runners/claude", &claude.rev).is_ok());
 }
 
 #[test]
@@ -835,4 +846,65 @@ fn vault_id_is_made_once() {
     let id = s.vault_id().unwrap();
     assert_eq!(uuid::Uuid::parse_str(&id).unwrap().get_version_num(), 7);
     assert_eq!(s.vault_id().unwrap(), id);
+}
+
+#[test]
+fn a_run_request_fires_a_deployed_task_once() {
+    let mut s = store();
+    seed::seed_schemas(&mut s).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
+    add_task(&mut s, "tasks/watch", "1h", Some(json!({"tag": "inbox"})));
+    let now = s.now().unwrap();
+
+    // only a task enabled on this vault takes a request
+    assert!(task::request_run(&mut s, "tasks/watch").unwrap_err().to_string().contains("not deployed"));
+    deploy(&mut s, "tasks/watch");
+    task::disable(&mut s, "tasks/watch").unwrap();
+    assert!(task::request_run(&mut s, "tasks/watch").is_err(), "a disabled task");
+    assert!(task::request_run(&mut s, "nope").is_err());
+    deploy(&mut s, "tasks/watch");
+
+    // not time due and no changes, but requested: due
+    let e = task::evaluate(&s, &now, Some("tasks/watch")).unwrap().remove(0);
+    assert!(!e.due && !e.time_due);
+    assert!(task::request_run(&mut s, "tasks/watch").unwrap().run_requested);
+    let e = task::evaluate(&s, &now, Some("tasks/watch")).unwrap().remove(0);
+    assert!(e.due && e.changes.is_empty());
+
+    // the claim spends the request
+    task::claim(&mut s, &e, &now, false).unwrap().unwrap();
+    assert!(!task::state(&s, "tasks/watch").unwrap().unwrap().run_requested);
+}
+
+#[tokio::test]
+async fn a_tick_records_the_scheduler_heartbeat() {
+    let mut s = store();
+    let now = s.now().unwrap();
+    let status = task::scheduler_status(&s, &now).unwrap();
+    assert!(status.last_tick.is_none() && status.stale, "no tick yet");
+
+    task::tick(&mut s, std::path::Path::new("/nonexistent/vault.db"), &now).await.unwrap();
+    let status = task::scheduler_status(&s, &plus_secs(&s, &now, 60)).unwrap();
+    assert_eq!(status.last_tick.as_deref(), Some(now.as_str()));
+    assert!(!status.stale);
+    let later = plus_secs(&s, &now, task::STALE_AFTER_SECS + 1);
+    assert!(task::scheduler_status(&s, &later).unwrap().stale);
+}
+
+#[test]
+fn the_deploy_text_shows_cwd_and_timeout() {
+    let mut s = store();
+    seed::seed_schemas(&mut s).unwrap();
+    s.put(input(json!({"_id": "runners/cat", "_type": RUNNER_TYPE, "argv": ["cat"], "timeout": "90s"}))).unwrap();
+    add_task(&mut s, "tasks/t", "1h", None);
+    let text = task::plan_deploy(&s, Some("tasks/t")).unwrap().remove(0).describe();
+    assert!(text.contains("  cwd:     workspace (default)\n"), "{text}");
+    assert!(text.contains("  timeout: 90s\n"), "{text}");
+
+    let head = s.get("tasks/t").unwrap();
+    s.put(input(json!({"_id": "tasks/t", "_parent": head.rev, "_type": TASK_TYPE,
+        "runner": "doc://runners/cat", "every": "1h", "prompt": "go", "cwd": "~/notes"})))
+        .unwrap();
+    let text = task::plan_deploy(&s, Some("tasks/t")).unwrap().remove(0).describe();
+    assert!(text.contains("  cwd:     ~/notes\n"), "{text}");
 }

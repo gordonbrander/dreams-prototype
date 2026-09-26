@@ -115,6 +115,15 @@ pub fn defaults() -> Vec<PutInput> {
     });
     let skills = [
         json!({
+            "_id": "skills/dreams",
+            "_type": SKILL_TYPE,
+            "name": "dreams",
+            "description": "How the Dreams vault works, and how to set up scheduled tasks, runners, skills, prompts, \
+                feeds, and schemas in it. Use before you set up, automate, schedule, or configure anything in Dreams, \
+                or when the user asks how Dreams works.",
+            "content": include_str!("seed/dreams.md"),
+        }),
+        json!({
             "_id": "skills/daily-note",
             "_type": SKILL_TYPE,
             "name": "daily-note",

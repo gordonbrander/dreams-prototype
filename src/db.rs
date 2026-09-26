@@ -7,7 +7,16 @@ use rusqlite::{Connection, TransactionBehavior};
 
 /// Each entry is one migration, applied once, in order, inside its own
 /// IMMEDIATE transaction. Append only; never edit an applied entry.
-const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5];
+const MIGRATIONS: &[&str] = &[MIGRATION_1, MIGRATION_2, MIGRATION_3, MIGRATION_4, MIGRATION_5, MIGRATION_6];
+
+/// Local state, like migration 5. `run_requested` asks the scheduler to fire
+/// a deployed task on its next tick, whatever its schedule says.
+/// `last_tick` is when the scheduler last finished a pass, so a client can
+/// see that a scheduler runs.
+const MIGRATION_6: &str = r#"
+ALTER TABLE task_state ADD COLUMN run_requested INTEGER NOT NULL DEFAULT 0 CHECK (run_requested IN (0,1));
+ALTER TABLE vault ADD COLUMN last_tick TEXT;
+"#;
 
 /// Local state that never replicates. `vault` holds this vault's id, one
 /// row, made on first use. `task_state` is the schedule of each task this

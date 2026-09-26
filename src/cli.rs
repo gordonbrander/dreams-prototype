@@ -43,7 +43,7 @@ enum Command {
     /// Seed the built-in schemas, runners, skills, and prompts. Writes each one whose current
     /// revision differs from the default, and revives deleted ones. Earlier revisions stay in history.
     RestoreDefaults,
-    /// Serve MCP (2026-07-28, stateless) over stdio. Runner, run, and seeded schema documents are read-only.
+    /// Serve MCP (2026-07-28, stateless) over stdio. Run receipts, seeded runners, and seeded schemas are read-only.
     Serve,
     /// Print how a host starts `serve` on this vault, as the JSON of one `mcpServers` entry.
     /// Paths are absolute. For example: claude mcp add-json dreams "$(dreams mcp-json)"
@@ -54,7 +54,7 @@ enum Command {
     /// Scheduled agent tasks (documents typed doc://schemas/task).
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Agent commands that tasks run (documents typed doc://schemas/runner). Never writable over MCP.
+    /// Agent commands that tasks run (documents typed doc://schemas/runner). Over MCP, only the seeded ones are read-only.
     #[command(subcommand)]
     Runner(RunnerCmd),
     /// Feeds to pull (documents typed doc://schemas/feed). A pull writes new items and prints them.
@@ -453,7 +453,7 @@ fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm
         }
         Command::Serve => {
             let mut store = open()?;
-            store.set_protected(runner::PROTECTED_TYPES, runner::PROTECTED_IDS);
+            store.set_protected(runner::PROTECTED_TYPES, &runner::protected_ids());
             tokio::runtime::Runtime::new()?.block_on(mcp::serve(store))?;
         }
         Command::McpJson => {
@@ -657,12 +657,12 @@ fn task_cmd(
             }
         }
         TaskCmd::List => {
-            let now = store.now()?;
-            let evals = task::evaluate(store, &now, None)?;
+            let list = task::list(store)?;
             if json {
-                print_json(out, &evals)?;
+                print_json(out, &list)?;
             } else {
-                let rows: Vec<Vec<String>> = evals
+                let rows: Vec<Vec<String>> = list
+                    .tasks
                     .iter()
                     .map(|e| {
                         vec![
@@ -677,6 +677,12 @@ fn task_cmd(
                     })
                     .collect();
                 table(out, &["ID", "STATE", "RUNNER", "EVERY", "WHEN", "LAST RUN", "DUE"], &rows)?;
+                let deployed = list.tasks.iter().any(|e| e.state.as_ref().is_some_and(|s| s.enabled));
+                if deployed && list.scheduler.stale {
+                    let since = list.scheduler.last_tick.as_deref().unwrap_or("never");
+                    writeln!(out, "\nno scheduler ticked (last tick: {since}); deployed tasks do not fire.")?;
+                    writeln!(out, "Run `dreams daemon install` to start one.")?;
+                }
             }
         }
         TaskCmd::Deploy { task_id, yes } => {

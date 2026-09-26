@@ -447,7 +447,7 @@ fn task_lifecycle_with_change_trigger() {
     let sb = Sandbox::new();
     add_test_runners(&sb);
     let prompt = sb.file("prompt.md", "Triage these.\n");
-    let seeded_tasks = sb.json(&["task", "list"], "").as_array().unwrap().len();
+    let seeded_tasks = sb.json(&["task", "list"], "")["tasks"].as_array().unwrap().len();
 
     let err = sb.fails(&["task", "add", "t1", "--runner", "runners/nope", "--every", "1h", &prompt], "");
     assert_eq!(err["name"], "not_found");
@@ -473,7 +473,7 @@ fn task_lifecycle_with_change_trigger() {
     assert!(sb.asked.borrow().is_empty(), "nothing new to deploy, so nothing to confirm");
 
     let list: Value = sb.json(&["task", "list"], "");
-    let list = list.as_array().unwrap();
+    let list = list["tasks"].as_array().unwrap();
     assert_eq!(list.len(), seeded_tasks + 1);
     let list = list.iter().find(|t| t["task"]["_id"] == "t1").unwrap();
     assert_eq!(list["due"], false);
@@ -560,7 +560,11 @@ fn task_lifecycle_with_change_trigger() {
 
     let out = sb.ok(&["task", "rm", "t1"], "");
     assert_eq!(out, "removed t1\n");
-    assert_eq!(sb.json(&["task", "list"], "").as_array().unwrap().len(), seeded_tasks, "only seeded tasks are left");
+    assert_eq!(
+        sb.json(&["task", "list"], "")["tasks"].as_array().unwrap().len(),
+        seeded_tasks,
+        "only seeded tasks are left"
+    );
     let err = sb.fails(&["task", "rm", "runners/cat"], "");
     assert_eq!(err["name"], "invalid_input");
 }
@@ -569,7 +573,7 @@ fn task_lifecycle_with_change_trigger() {
 fn the_seeded_brief_task_is_listed_dormant() {
     let sb = Sandbox::new();
     let list: Value = sb.json(&["task", "list"], "");
-    let brief = list.as_array().unwrap().iter().find(|t| t["task"]["_id"] == "tasks/brief").unwrap();
+    let brief = list["tasks"].as_array().unwrap().iter().find(|t| t["task"]["_id"] == "tasks/brief").unwrap();
     assert!(brief["state"].is_null(), "{brief}");
 }
 
