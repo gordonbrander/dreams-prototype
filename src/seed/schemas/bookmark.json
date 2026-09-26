@@ -1,0 +1,12 @@
+{
+  "title": "Bookmark",
+  "description": "A saved web page. The _id is bookmarks/<origin-slug>/<path-slug>.md, with the slugs made from url. content is a summary of the page and any notes from the user.",
+  "type": "object",
+  "required": ["url"],
+  "properties": {
+    "title": {"type": "string"},
+    "url": {"type": "string"},
+    "content": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

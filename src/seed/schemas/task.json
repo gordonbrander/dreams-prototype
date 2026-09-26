@@ -1,0 +1,24 @@
+{
+  "title": "Scheduled task",
+  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document. `cwd` is the folder the agent runs in: a relative path is relative to the vault's folder, and the default is `workspace`.",
+  "type": "object",
+  "required": ["runner", "every", "prompt"],
+  "properties": {
+    "runner": {"type": "string", "pattern": "^doc://"},
+    "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
+    "prompt": {"type": "string"},
+    "cwd": {"type": "string", "minLength": 1},
+    "when": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "glob": {"type": "string", "minLength": 1},
+        "tag": {"type": "string", "minLength": 1},
+        "type": {"type": "string", "minLength": 1},
+        "ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+      }
+    },
+    "title": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

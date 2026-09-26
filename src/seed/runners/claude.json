@@ -1,0 +1,18 @@
+{
+  "_type": "doc://schemas/runner.json",
+  "title": "Claude Code, headless",
+  "argv": [
+    "claude",
+    "-p",
+    "--permission-mode",
+    "dontAsk",
+    "--allowedTools",
+    "Bash,Read,Glob,Grep,Edit(./**),WebSearch,WebFetch,mcp__dreams",
+    "--settings",
+    "{\"sandbox\":{\"enabled\":true,\"autoAllowBashIfSandboxed\":true,\"excludedCommands\":[\"dreams\"]}}",
+    "--mcp-config",
+    "{mcp}",
+    "--strict-mcp-config"
+  ],
+  "timeout": "10m"
+}

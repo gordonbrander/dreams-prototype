@@ -1,0 +1,13 @@
+{
+  "title": "Feed",
+  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. The task tasks/pull-feeds.json pulls every feed on a schedule, on a vault where it is deployed. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item.json document under the feed's _id without its extension: feeds/example-com.md has its items under feeds/example-com/. instructions are for the agent that processes the items of this feed, for example to correct for a known bias of the source; read them before you process an item.",
+  "type": "object",
+  "required": ["url", "kind"],
+  "properties": {
+    "url": {"type": "string", "minLength": 1},
+    "kind": {"enum": ["rss", "html"]},
+    "title": {"type": "string"},
+    "instructions": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

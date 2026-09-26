@@ -1,4 +1,4 @@
-//! Runners: documents typed `doc://schemas/runner` that hold an argv
+//! Runners: documents typed `doc://schemas/runner.json` that hold an argv
 //! template. A task names one by `doc://` reference. The template is
 //! spawned directly, never through a shell, with tokens replaced inside
 //! each element. Runner commands are code, so none runs until a person
@@ -16,7 +16,7 @@ use crate::store::Store;
 use crate::task::{self, parse_duration};
 
 /// The seeded schema document for runners, as a type path.
-pub const RUNNER_TYPE: &str = "doc://schemas/runner";
+pub const RUNNER_TYPE: &str = "doc://schemas/runner.json";
 
 /// Type paths that MCP clients may read but not write or delete.
 pub const PROTECTED_TYPES: &[&str] = &[task::RUN_TYPE];
@@ -26,23 +26,14 @@ pub const PROTECTED_TYPES: &[&str] = &[task::RUN_TYPE];
 /// after a person confirms a deploy that shows its command. The seeded
 /// runners also run without a deploy, from `doc resolve --auto`.
 pub fn protected_ids() -> Vec<&'static str> {
-    seed::SCHEMAS.iter().map(|(id, _)| *id).chain(seed::RUNNERS.iter().map(|(id, _, _)| *id)).collect()
+    seed::FILES
+        .iter()
+        .map(|(id, _)| *id)
+        .filter(|id| id.starts_with("schemas/") || id.starts_with("runners/"))
+        .collect()
 }
 
 pub const DEFAULT_TIMEOUT: &str = "10m";
-
-/// The body of `schemas/runner`.
-pub const RUNNER_SCHEMA: &str = r#"{
-  "title": "Runner",
-  "description": "A command that runs an agent: argv with {db} {task} {run} {mcp} {out} {exe} tokens. The prompt arrives on stdin; the last message is read from stdout, or from {out} when the command wrote it.",
-  "type": "object",
-  "required": ["argv"],
-  "properties": {
-    "argv": {"type": "array", "minItems": 1, "items": {"type": "string"}},
-    "timeout": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
-    "title": {"type": "string"}
-  }
-}"#;
 
 #[derive(Debug, Clone)]
 pub struct Runner {

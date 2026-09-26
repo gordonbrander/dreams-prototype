@@ -95,7 +95,7 @@ first draft
 fn frontmatter(md: &str) -> Value {
     let body = md.strip_prefix("---\n").unwrap();
     let end = body.find("\n---\n").unwrap();
-    let map = cli::parse_input(&body[..end], cli::Format::Yaml).unwrap();
+    let map = dreams::format::parse_input(&body[..end], dreams::format::Format::Yaml).unwrap();
     Value::Object(map)
 }
 
@@ -297,7 +297,7 @@ fn export_then_import_round_trip() {
     let out_dir = sb.dir.join("export");
     let out = sb.ok(&["export", out_dir.to_str().unwrap()], "");
     assert!(out.trim_end().ends_with(&format!("{} exported, 0 errors", seeded() + 5)), "{out}");
-    assert!(out_dir.join("schemas/task").exists());
+    assert!(out_dir.join("schemas/task.json").exists());
     assert!(out_dir.join("a.md").exists());
     assert!(out_dir.join("notes/2026/b.md").exists());
     assert!(out_dir.join("plain").exists());
@@ -316,11 +316,11 @@ fn export_then_import_round_trip() {
     assert_eq!(d["_id"], "conf/d.yaml");
     assert_eq!(d["content"], "dee body\n");
 
-    // exported and unchanged: every file is a no-op; `plain` has no format extension and is skipped
+    // exported and unchanged: every file is a no-op, the seeds too; `plain` has no format extension and is skipped
     let report = sb.json(&["import", out_dir.to_str().unwrap()], "");
     let statuses: Vec<&str> =
         report["results"].as_array().unwrap().iter().map(|r| r["status"].as_str().unwrap()).collect();
-    assert_eq!(statuses, ["unchanged"; 4]);
+    assert_eq!(statuses, vec!["unchanged"; seeded() + 4]);
     assert_eq!(report["errors"], 0);
     let changes: Changes = serde_json::from_value(sb.json(&["doc", "changes"], "")).unwrap();
     assert_eq!(changes.results.len(), seeded() + 7);
@@ -340,7 +340,8 @@ fn export_then_import_round_trip() {
     assert!(out.contains("created    notes/new.yml 1-"), "{out}");
     assert!(out.contains("unchanged  notes/2026/b.md"), "{out}");
     assert!(out.contains("unchanged  conf/d.yaml"), "{out}");
-    assert!(out.trim_end().ends_with("3 created, 2 updated, 2 unchanged, 0 errors"), "{out}");
+    let summary = format!("3 created, 2 updated, {} unchanged, 0 errors", seeded() + 2);
+    assert!(out.trim_end().ends_with(&summary), "{out}");
     assert_eq!(sb.json(&["doc", "get", "data/c.json"], "")["n"], 2);
     assert_eq!(sb.json(&["doc", "get", "notes/new.yml"], "")["title"], "Yam");
     assert_eq!(sb.json(&["doc", "get", "a.md"], "")["content"], "alpha edited\n");
@@ -395,45 +396,45 @@ fn seed_writes_the_built_in_documents_again() {
     assert!(out.starts_with("nothing to seed\n"), "{out}");
     let skill = sb.file(
         "skill.json",
-        r#"{"_type": "doc://schemas/skill", "name": "daily-note", "description": "x", "content": "y"}"#,
+        r#"{"_type": "doc://schemas/skill.json", "name": "daily-note", "description": "x", "content": "y"}"#,
     );
-    sb.ok(&["doc", "update", "skills/daily-note", &skill], "");
-    sb.ok(&["runner", "rm", "runners/pi"], "");
+    sb.ok(&["doc", "update", "skills/daily-note.md", &skill], "");
+    sb.ok(&["runner", "rm", "runners/pi.json"], "");
     // other commands leave the edit and the deletion as they are
-    assert_eq!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"], "y");
+    assert_eq!(sb.json(&["doc", "get", "skills/daily-note.md"], "")["content"], "y");
     let out = sb.ok(&["restore-defaults"], "");
-    assert!(out.starts_with("seeded runners/pi\nseeded skills/daily-note\n"), "{out}");
-    assert!(sb.json(&["doc", "get", "skills/daily-note"], "")["content"].as_str().unwrap().contains("daily"));
+    assert!(out.starts_with("seeded runners/pi.json\nseeded skills/daily-note.md\n"), "{out}");
+    assert!(sb.json(&["doc", "get", "skills/daily-note.md"], "")["content"].as_str().unwrap().contains("daily"));
     assert_eq!(sb.json(&["restore-defaults"], "")["seeded"], serde_json::json!([]));
     // init also writes the defaults again
-    sb.ok(&["doc", "update", "skills/daily-note", &skill], "");
-    assert!(sb.ok(&["init"], "").contains("seeded skills/daily-note\n"));
+    sb.ok(&["doc", "update", "skills/daily-note.md", &skill], "");
+    assert!(sb.ok(&["init"], "").contains("seeded skills/daily-note.md\n"));
 }
 
 #[test]
 fn runners_are_documents_seeded_once() {
     let sb = Sandbox::new();
     let out = sb.ok(&["init"], "");
-    assert!(out.contains("seeded schemas/task"), "{out}");
-    assert!(out.contains("seeded runners/claude"), "{out}");
-    assert!(out.contains("seeded skills/daily-note"), "{out}");
-    let task_schema = sb.json(&["doc", "get", "schemas/task"], "");
+    assert!(out.contains("seeded schemas/task.json"), "{out}");
+    assert!(out.contains("seeded runners/claude.json"), "{out}");
+    assert!(out.contains("seeded skills/daily-note.md"), "{out}");
+    let task_schema = sb.json(&["doc", "get", "schemas/task.json"], "");
     assert_eq!(task_schema["title"], "Scheduled task");
     assert!(task_schema["_type"].is_null());
     let text = sb.ok(&["runner", "list"], "");
     let ids: Vec<&str> = text.lines().skip(1).map(|l| l.split_whitespace().next().unwrap()).collect();
-    let mut seeded: Vec<&str> = seed::RUNNERS.iter().map(|(id, _, _)| *id).collect();
+    let mut seeded: Vec<&str> = seed::FILES.iter().map(|(id, _)| *id).filter(|id| id.starts_with("runners/")).collect();
     seeded.sort();
     assert_eq!(ids, seeded);
     add_test_runners(&sb);
     let out = sb.ok(&["runner", "add", "runners/cat", "--", "cat"], "");
     assert!(out.starts_with("unchanged runners/cat"), "{out}");
-    sb.ok(&["runner", "rm", "runners/pi"], "");
+    sb.ok(&["runner", "rm", "runners/pi.json"], "");
     let text = sb.ok(&["runner", "list"], "");
-    assert!(!text.contains("runners/pi"), "{text}");
+    assert!(!text.contains("runners/pi.json"), "{text}");
     assert_eq!(text.lines().count(), 1 + seeded.len() - 1 + 4, "{text}");
     let doc = sb.json(&["doc", "get", "runners/slow"], "");
-    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner?rev=1-"), "{doc}");
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner.json?rev=1-"), "{doc}");
     assert_eq!(doc["argv"], json!(["sleep", "30"]));
     assert_eq!(doc["timeout"], "1s");
     let err = sb.fails(&["runner", "add", "runners/bad", "--timeout", "soon", "--", "cat"], "");
@@ -462,7 +463,7 @@ fn task_lifecycle_with_change_trigger() {
     assert!(asked.contains("Triage these.") && asked.contains("command: cat"), "{asked}");
     assert!(asked.contains("(now dormant)"), "{asked}");
     let task = sb.json(&["doc", "get", "t1"], "");
-    assert!(task["_type"].as_str().unwrap().starts_with("doc://schemas/task?rev=1-"), "{task}");
+    assert!(task["_type"].as_str().unwrap().starts_with("doc://schemas/task.json?rev=1-"), "{task}");
     assert_eq!(task["runner"], "doc://runners/cat");
     assert_eq!(task["when"], json!({"tag": "inbox"}));
     assert_eq!(task["prompt"], "Triage these.\n");
@@ -507,7 +508,7 @@ fn task_lifecycle_with_change_trigger() {
 
     // fire now: the runner echoes the prompt back, and the run records it
     let run = sb.json(&["task", "run", "t1"], "");
-    assert!(run["_type"].as_str().unwrap().starts_with("doc://schemas/run?rev=1-"), "{run}");
+    assert!(run["_type"].as_str().unwrap().starts_with("doc://schemas/run.json?rev=1-"), "{run}");
     assert!(run["runner"].as_str().unwrap().starts_with("doc://runners/cat?rev=1-"), "{run}");
     assert_eq!(run["_actor"], "t1");
     assert!(run["task"].as_str().unwrap().starts_with("doc://t1?rev=1-"), "{run}");
@@ -573,7 +574,7 @@ fn task_lifecycle_with_change_trigger() {
 fn the_seeded_brief_task_is_listed_dormant() {
     let sb = Sandbox::new();
     let list: Value = sb.json(&["task", "list"], "");
-    let brief = list["tasks"].as_array().unwrap().iter().find(|t| t["task"]["_id"] == "tasks/brief").unwrap();
+    let brief = list["tasks"].as_array().unwrap().iter().find(|t| t["task"]["_id"] == "tasks/brief.json").unwrap();
     assert!(brief["state"].is_null(), "{brief}");
 }
 
@@ -710,8 +711,8 @@ fn run_refuses_while_a_claim_is_open_unless_forced() {
 fn serve_protects_runner_and_run_documents() {
     // the boundary itself is covered in tests/store.rs; here: the CLI never sets it
     let sb = Sandbox::new();
-    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"doc://schemas/runner","argv":["cat"]}"#);
-    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner?rev="), "{doc}");
+    let doc = sb.json(&["doc", "put"], r#"{"_id":"runners/x","_type":"doc://schemas/runner.json","argv":["cat"]}"#);
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/runner.json?rev="), "{doc}");
     let tomb = sb.json(&["doc", "delete", "runners/x"], "");
     assert_eq!(tomb["_deleted"], true);
 }
@@ -1030,7 +1031,7 @@ fn feeds_pull_only_new_items() {
     let one = items.iter().find(|i| i["title"] == "One").unwrap();
     assert_eq!(one["description"], "The first item");
     let doc = sb.json(&["doc", "get", one["href"].as_str().unwrap()], "");
-    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/feed-item?rev="), "{doc}");
+    assert!(doc["_type"].as_str().unwrap().starts_with("doc://schemas/feed-item.json?rev="), "{doc}");
     assert_eq!(doc["feed"], format!("doc://{rss_id}"));
     assert!(doc["_id"].as_str().unwrap().starts_with(rss_id.trim_end_matches(".md")));
 

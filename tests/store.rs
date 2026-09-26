@@ -535,22 +535,24 @@ fn protected_types_and_ids_are_read_only() {
     // a new runner is writable: it runs only after a confirmed deploy
     let doc = s.put(input(json!({"_id": "runners/x", "_type": RUNNER_TYPE, "argv": ["cat"]}))).unwrap();
     // the seeded runners are protected by id
-    let claude = s.get("runners/claude").unwrap();
+    let claude = s.get("runners/claude.json").unwrap();
     assert!(matches!(
-        s.put(input(json!({"_id": "runners/claude", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]}))),
+        s.put(input(
+            json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})
+        )),
         Err(StoreError::Protected { id: Some(_), .. })
     ));
-    assert!(matches!(s.delete("runners/claude", &claude.rev), Err(StoreError::Protected { .. })));
+    assert!(matches!(s.delete("runners/claude.json", &claude.rev), Err(StoreError::Protected { .. })));
     // the seeded schema documents are protected by id
-    let task_schema = s.get("schemas/task").unwrap();
+    let task_schema = s.get("schemas/task.json").unwrap();
     assert!(matches!(
-        s.put(input(json!({"_id": "schemas/task", "_parent": task_schema.rev, "type": "object"}))),
+        s.put(input(json!({"_id": "schemas/task.json", "_parent": task_schema.rev, "type": "object"}))),
         Err(StoreError::Protected { id: Some(_), .. })
     ));
-    assert!(matches!(s.delete("schemas/task", &task_schema.rev), Err(StoreError::Protected { .. })));
+    assert!(matches!(s.delete("schemas/task.json", &task_schema.rev), Err(StoreError::Protected { .. })));
     // run receipts are protected by type, also when the type is pinned
-    let run_schema = s.get("schemas/run").unwrap();
-    for type_id in [RUN_TYPE.to_string(), pinned("schemas/run", &run_schema.rev)] {
+    let run_schema = s.get("schemas/run.json").unwrap();
+    for type_id in [RUN_TYPE.to_string(), pinned("schemas/run.json", &run_schema.rev)] {
         assert!(matches!(
             s.put(input(json!({"_id": "runs/t/1", "_type": type_id, "task": "t", "runner": "r", "vault": "v",
                 "started_at": "x", "finished_at": "y", "tags": ["t"]}))),
@@ -562,7 +564,7 @@ fn protected_types_and_ids_are_read_only() {
     assert!(s.put(input(json!({"_id": "note", "title": "n"}))).is_ok());
     assert!(s.delete("runners/x", &doc.rev).is_ok());
     s.set_protected(&[], &[]);
-    assert!(s.delete("runners/claude", &claude.rev).is_ok());
+    assert!(s.delete("runners/claude.json", &claude.rev).is_ok());
 }
 
 #[test]
@@ -572,36 +574,29 @@ fn seed_is_idempotent() {
     let ids: Vec<String> = seed::defaults().into_iter().map(|d| d.id.unwrap()).collect();
     assert_eq!(first, ids);
     assert!(seed::seed(&mut s).unwrap().is_empty());
-    let pi = s.get("runners/pi").unwrap();
+    let pi = s.get("runners/pi.json").unwrap();
     assert_eq!(pi.type_path(), Some(RUNNER_TYPE));
-    let runner_schema = s.get("schemas/runner").unwrap();
-    assert_eq!(pi.type_id.as_deref(), Some(pinned("schemas/runner", &runner_schema.rev).as_str()));
+    let runner_schema = s.get("schemas/runner.json").unwrap();
+    assert_eq!(pi.type_id.as_deref(), Some(pinned("schemas/runner.json", &runner_schema.rev).as_str()));
     assert_eq!(runner_schema.type_id, None);
-
-    // a vault from before doc:// types is refused
-    let mut old = store();
-    old.connection()
-        .execute("INSERT INTO docs(_rev,_id,_parent,_type,_deleted,body) VALUES ('1-aa','x',NULL,'note/v1',0,'{}')", [])
-        .unwrap();
-    assert!(seed::seed(&mut old).unwrap_err().to_string().contains("predates"));
 }
 
 #[test]
 fn seed_rewrites_edited_and_deleted_defaults() {
     let mut s = store();
     seed::seed(&mut s).unwrap();
-    let claude = s.get("runners/claude").unwrap();
-    s.put(input(json!({"_id": "runners/claude", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})))
+    let claude = s.get("runners/claude.json").unwrap();
+    s.put(input(json!({"_id": "runners/claude.json", "_parent": claude.rev, "_type": RUNNER_TYPE, "argv": ["cat"]})))
         .unwrap();
-    let skill = s.get("skills/daily-note").unwrap();
-    s.delete("skills/daily-note", &skill.rev).unwrap();
+    let skill = s.get("skills/daily-note.md").unwrap();
+    s.delete("skills/daily-note.md", &skill.rev).unwrap();
 
-    assert_eq!(seed::seed(&mut s).unwrap(), ["runners/claude", "skills/daily-note"]);
-    assert_eq!(s.get("runners/claude").unwrap().body, claude.body);
-    assert_eq!(s.get("skills/daily-note").unwrap().body, skill.body);
+    assert_eq!(seed::seed(&mut s).unwrap(), ["runners/claude.json", "skills/daily-note.md"]);
+    assert_eq!(s.get("runners/claude.json").unwrap().body, claude.body);
+    assert_eq!(s.get("skills/daily-note.md").unwrap().body, skill.body);
     assert!(seed::seed(&mut s).unwrap().is_empty());
     // the edit stays in history
-    assert_eq!(s.history("runners/claude", None).unwrap().revisions.len(), 3);
+    assert_eq!(s.history("runners/claude.json", None).unwrap().revisions.len(), 3);
 }
 
 /// Deploy one task without a confirmation; the front ends ask.

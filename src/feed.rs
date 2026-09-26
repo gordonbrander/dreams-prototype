@@ -1,7 +1,7 @@
-//! Feeds: documents typed `doc://schemas/feed` that name a resource to
+//! Feeds: documents typed `doc://schemas/feed.json` that name a resource to
 //! fetch. A pull reads the resource with the adaptor for its `kind` and
-//! writes each item as a `doc://schemas/feed-item` document under the
-//! feed's id without `.md`. The item documents are the record of what was
+//! writes each item as a `doc://schemas/feed-item.json` document under the
+//! feed's id without its extension. The item documents are the record of what was
 //! seen: an item that exists, or that has a tombstone, is not new. A pull
 //! returns only the new items.
 //!
@@ -14,16 +14,16 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::doc::{Doc, DocRef, PutInput};
+use crate::doc::{self, Doc, DocRef, PutInput};
 use crate::error::StoreError;
 use crate::hash::sha256_hex;
 use crate::store::Store;
 
 /// Seeded schema documents, as type paths.
-pub const FEED_TYPE: &str = "doc://schemas/feed";
-pub const ITEM_TYPE: &str = "doc://schemas/feed-item";
+pub const FEED_TYPE: &str = "doc://schemas/feed.json";
+pub const ITEM_TYPE: &str = "doc://schemas/feed-item.json";
 /// The seeded task that pulls every feed, once it is deployed.
-pub const PULL_TASK: &str = "tasks/pull-feeds";
+pub const PULL_TASK: &str = "tasks/pull-feeds.json";
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
@@ -31,38 +31,6 @@ const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 const TEXT_WIDTH: usize = 100;
 /// Characters in a new item's `description`.
 pub const DESCRIPTION_CHARS: usize = 150;
-
-/// The body of `schemas/feed`.
-pub const FEED_SCHEMA: &str = r#"{
-  "title": "Feed",
-  "description": "A resource to pull: `dreams feed pull`, or the pull_feeds tool. The task tasks/pull-feeds pulls every feed on a schedule, on a vault where it is deployed. kind rss reads RSS or Atom, one item per entry. kind html reads one web page as text, and a change in the text is a new item. Each item is a doc://schemas/feed-item document under the feed's _id without .md: feeds/example-com.md has its items under feeds/example-com/. instructions are for the agent that processes the items of this feed, for example to correct for a known bias of the source; read them before you process an item.",
-  "type": "object",
-  "required": ["url", "kind"],
-  "properties": {
-    "url": {"type": "string", "minLength": 1},
-    "kind": {"enum": ["rss", "html"]},
-    "title": {"type": "string"},
-    "instructions": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
-
-/// The body of `schemas/feed-item`.
-pub const ITEM_SCHEMA: &str = r#"{
-  "title": "Feed item",
-  "description": "One item that a pull of `feed` wrote, as the feed gave it. content is the item's content or summary, verbatim; for an html feed it is the text of the page. Before you process an item, read the instructions of its feed document, if it has them.",
-  "type": "object",
-  "required": ["feed"],
-  "properties": {
-    "feed": {"type": "string", "pattern": "^doc://"},
-    "url": {"type": "string"},
-    "title": {"type": "string"},
-    "published": {"type": "string"},
-    "guid": {"type": "string"},
-    "content": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -108,9 +76,9 @@ impl Feed {
         })
     }
 
-    /// Where the items go: the id without `.md`.
+    /// Where the items go: the id without its extension.
     pub fn base(&self) -> &str {
-        self.id.strip_suffix(".md").unwrap_or(&self.id)
+        doc::stem(&self.id)
     }
 }
 

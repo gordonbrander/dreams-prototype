@@ -1,0 +1,11 @@
+{
+  "_type": "doc://schemas/runner.json",
+  "title": "Pi, print mode",
+  "argv": [
+    "pi",
+    "-p",
+    "--no-extensions",
+    "-"
+  ],
+  "timeout": "10m"
+}

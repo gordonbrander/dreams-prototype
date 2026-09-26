@@ -5,12 +5,13 @@ use std::ffi::OsString;
 use std::io::{self, BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand};
 use serde::Serialize;
 use serde_json::{Map, Value};
 
 use crate::doc::{Doc, DocRef, PutInput};
 use crate::error::StoreError;
+use crate::format::{Format, detect_format, parse_input};
 use crate::rev::short_rev;
 use crate::runner::{self, Runner};
 use crate::store::{Changes, History, ListQuery, Page, SearchPage, Store};
@@ -51,13 +52,13 @@ enum Command {
     /// Documents. A schema is a document too: put one, then reference it as `_type: doc://<id>`.
     #[command(subcommand)]
     Doc(DocCmd),
-    /// Scheduled agent tasks (documents typed doc://schemas/task).
+    /// Scheduled agent tasks (documents typed doc://schemas/task.json).
     #[command(subcommand)]
     Task(TaskCmd),
-    /// Agent commands that tasks run (documents typed doc://schemas/runner). Over MCP, only the seeded ones are read-only.
+    /// Agent commands that tasks run (documents typed doc://schemas/runner.json). Over MCP, only the seeded ones are read-only.
     #[command(subcommand)]
     Runner(RunnerCmd),
-    /// Feeds to pull (documents typed doc://schemas/feed). A pull writes new items and prints them.
+    /// Feeds to pull (documents typed doc://schemas/feed.json). A pull writes new items and prints them.
     #[command(subcommand)]
     Feed(FeedCmd),
     /// One scheduler pass: fire every due task, then exit.
@@ -98,14 +99,6 @@ enum Command {
     Pull { peer: PathBuf },
     /// Pull from the vault at PEER, then push to it. Afterwards both hold the same revisions.
     Sync { peer: PathBuf },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
-pub enum Format {
-    Json,
-    Yaml,
-    /// Markdown with YAML frontmatter; the body is `content`.
-    Md,
 }
 
 #[derive(Args)]
@@ -198,7 +191,7 @@ enum DocCmd {
         /// Ask an agent to merge the winner and every conflict, then write the merge.
         #[arg(long, conflicts_with = "file")]
         auto: bool,
-        /// The runner that merges: runners/claude or doc://runners/claude.
+        /// The runner that merges: runners/claude.json or doc://runners/claude.json.
         #[arg(long, requires = "auto", default_value = resolve::DEFAULT_RUNNER)]
         runner: String,
         /// Print the agent's merge as input for `doc resolve <id> FILE`, and write nothing.
@@ -226,7 +219,7 @@ enum TaskCmd {
     Add {
         /// Task id, for example tasks/triage-inbox.
         task_id: String,
-        /// The runner document: runners/claude or doc://runners/claude. Pin a revision with ?rev=.
+        /// The runner document: runners/claude.json or doc://runners/claude.json. Pin a revision with ?rev=.
         #[arg(long)]
         runner: String,
         /// Interval between runs: 30s, 15m, 2h, 1d, 1w.
@@ -300,7 +293,7 @@ enum RunnerCmd {
     /// Create or replace a runner. The command follows `--` and is spawned without a shell.
     /// Tokens {db} {task} {run} {mcp} {out} {exe} are replaced inside each argument.
     Add {
-        /// Runner id, for example runners/claude.
+        /// Runner id, for example runners/claude.json.
         runner_id: String,
         #[arg(long)]
         title: Option<String>,
@@ -319,7 +312,7 @@ enum RunnerCmd {
 
 #[derive(Subcommand)]
 enum FeedCmd {
-    /// Create or update a feed. A pull writes its items under the feed's id without `.md`.
+    /// Create or update a feed. A pull writes its items under the feed's id without its extension.
     /// On an existing feed, fields that are not given stay as they are.
     Add {
         url: String,
@@ -1465,15 +1458,6 @@ mod tests {
 
 // ---- input --------------------------------------------------------------
 
-fn detect_format(path: &Path) -> Option<Format> {
-    match path.extension()?.to_str()? {
-        "json" => Some(Format::Json),
-        "yaml" | "yml" => Some(Format::Yaml),
-        "md" | "markdown" => Some(Format::Md),
-        _ => None,
-    }
-}
-
 fn read_input(input: &Input, stdin: &mut dyn Read) -> Result<Map<String, Value>, StoreError> {
     let file = input.file.as_deref().filter(|p| *p != Path::new("-"));
     let (text, format) = match file {
@@ -1492,17 +1476,6 @@ fn read_input(input: &Input, stdin: &mut dyn Read) -> Result<Map<String, Value>,
         }
     };
     parse_input(&text, format)
-}
-
-pub fn parse_input(text: &str, format: Format) -> Result<Map<String, Value>, StoreError> {
-    match format {
-        Format::Json => match serde_json::from_str::<Value>(text)? {
-            Value::Object(map) => Ok(map),
-            _ => Err(StoreError::invalid("JSON input must be an object")),
-        },
-        Format::Yaml => markdown::yaml_to_map(text),
-        Format::Md => markdown::parse(text),
-    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

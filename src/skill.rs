@@ -1,4 +1,4 @@
-//! Skills: documents typed `doc://schemas/skill`, served to MCP hosts
+//! Skills: documents typed `doc://schemas/skill.json`, served to MCP hosts
 //! through the Skills Extension (`io.modelcontextprotocol/skills`). Each
 //! skill is one file, `skill://<name>/SKILL.md`: a `name` and
 //! `description` frontmatter, then `content`. When two documents share a
@@ -15,25 +15,10 @@ use crate::hash::sha256_hex;
 use crate::store::Store;
 
 /// The seeded schema document for skills, as a type path.
-pub const SKILL_TYPE: &str = "doc://schemas/skill";
+pub const SKILL_TYPE: &str = "doc://schemas/skill.json";
 
 /// The MCP extension identifier.
 pub const EXTENSION_ID: &str = "io.modelcontextprotocol/skills";
-
-/// The body of `schemas/skill`. `name` follows the Agent Skills naming rule.
-pub const SKILL_SCHEMA: &str = r#"{
-  "title": "Skill",
-  "description": "Instructions an agent loads on demand. Served over MCP as skill://<name>/SKILL.md, with name and description as frontmatter and content as the body.",
-  "type": "object",
-  "required": ["name", "description", "content"],
-  "properties": {
-    "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
-    "description": {"type": "string", "minLength": 1, "maxLength": 1024},
-    "content": {"type": "string"},
-    "title": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Skill {

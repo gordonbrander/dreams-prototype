@@ -1,10 +1,10 @@
-//! Scheduled tasks: documents typed `doc://schemas/task` that wake an agent
+//! Scheduled tasks: documents typed `doc://schemas/task.json` that wake an agent
 //! every interval, optionally only when watched documents changed. A task
 //! document is a template and replicates. Each vault keeps its own schedule
 //! in the local `task_state` table: a task with no row is dormant there.
 //! A deploy pins the task revision and the runner revision that run, so an
 //! edit, local or synced, runs only after the next deploy. Each run writes
-//! a receipt, a document typed `doc://schemas/run`, which also replicates.
+//! a receipt, a document typed `doc://schemas/run.json`, which also replicates.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::doc::{Doc, DocRef, PutInput, new_id};
+use crate::doc::{Doc, DocRef, PutInput, new_id, stem};
 use crate::error::StoreError;
 use crate::rev::short_rev;
 use crate::runner::{Context, Runner};
@@ -26,57 +26,12 @@ use crate::store::{DOC_COLS, Store, row_to_doc, type_filter};
 use crate::text::truncate_bytes;
 
 /// Seeded schema documents, as type paths.
-pub const TASK_TYPE: &str = "doc://schemas/task";
-pub const RUN_TYPE: &str = "doc://schemas/run";
+pub const TASK_TYPE: &str = "doc://schemas/task.json";
+pub const RUN_TYPE: &str = "doc://schemas/run.json";
 
 /// Agent output above this is cut, and the run records the cut.
 pub const MAX_CONTENT_BYTES: usize = 512 * 1024;
 const MAX_STDERR_BYTES: usize = 4 * 1024;
-
-/// The body of `schemas/task`.
-pub const TASK_SCHEMA: &str = r#"{
-  "title": "Scheduled task",
-  "description": "Wake an agent every interval with a prompt. With `when`, only when a matching document changed since the last run. `runner` is a doc:// reference to a runner document. `cwd` is the folder the agent runs in: a relative path is relative to the vault's folder, and the default is `workspace`.",
-  "type": "object",
-  "required": ["runner", "every", "prompt"],
-  "properties": {
-    "runner": {"type": "string", "pattern": "^doc://"},
-    "every": {"type": "string", "pattern": "^[0-9]+[smhdw]$"},
-    "prompt": {"type": "string"},
-    "cwd": {"type": "string", "minLength": 1},
-    "when": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "glob": {"type": "string", "minLength": 1},
-        "tag": {"type": "string", "minLength": 1},
-        "type": {"type": "string", "minLength": 1},
-        "ids": {"type": "array", "minItems": 1, "items": {"type": "string"}}
-      }
-    },
-    "title": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
-
-/// The body of `schemas/run`.
-pub const RUN_SCHEMA: &str = r#"{
-  "title": "Task run",
-  "description": "The receipt of one firing of a task, written when the agent finished. `task` and `runner` are the pinned doc:// references of the task and runner revisions that ran. `vault` is the id of the vault that ran it.",
-  "type": "object",
-  "required": ["task", "runner", "vault", "started_at", "finished_at", "tags"],
-  "properties": {
-    "task": {"type": "string"},
-    "runner": {"type": "string"},
-    "vault": {"type": "string"},
-    "started_at": {"type": "string"},
-    "finished_at": {"type": "string"},
-    "exit_code": {"type": ["integer", "null"]},
-    "error": {"type": "string"},
-    "content": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
 
 /// `30s`, `15m`, `2h`, `1d`, `1w` to seconds. Zero is an error.
 pub fn parse_duration(text: &str) -> Result<u64, StoreError> {
@@ -587,7 +542,7 @@ pub fn prompt_text(eval: &Evaluation) -> String {
 /// A lease on a task, taken before the agent starts.
 #[derive(Debug, Clone)]
 pub struct Claim {
-    /// `runs/<task>/<UUID v7>.md`, the id of the receipt.
+    /// `runs/<task id without extension>/<UUID v7>.md`, the id of the receipt.
     pub run_id: String,
     pub task_id: String,
     /// The task revision that runs.
@@ -629,7 +584,7 @@ pub fn claim(store: &mut Store, eval: &Evaluation, now: &str, force: bool) -> Re
         return Ok(None);
     }
     Ok(Some(Claim {
-        run_id: format!("runs/{task_id}/{}.md", new_id()),
+        run_id: format!("runs/{}/{}.md", stem(&task_id), new_id()),
         task_rev: eval.task.rev.clone(),
         task_id,
         runner,

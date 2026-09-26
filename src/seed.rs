@@ -1,236 +1,88 @@
-//! Seeding: the built-in documents every vault starts with. `seed` writes
-//! each default whose current revision differs from it, as the next
+//! Seeding: the built-in documents every vault starts with. Each one is a
+//! file under `src/seed/`, and its path there is its `_id`: a document with
+//! `content` is Markdown with frontmatter, and any other is JSON. `seed`
+//! writes each default whose current revision differs from it, as the next
 //! revision, and revives deleted ones. Earlier revisions stay in history.
 //! The CLI seeds on `init`, on `restore-defaults`, and when it creates a database.
 
-use serde_json::{Value, json};
+use std::path::Path;
+
+use serde_json::Value;
 
 use crate::doc::PutInput;
 use crate::error::StoreError;
-use crate::feed;
-use crate::prompt::{self, PROMPT_TYPE};
-use crate::runner::{self, RUNNER_TYPE};
-use crate::skill::{self, SKILL_TYPE};
+use crate::format::{detect_format, parse_input};
 use crate::store::Store;
-use crate::task;
 
-/// The seeded schema documents: id and body.
-pub const SCHEMAS: &[(&str, &str)] = &[
-    ("schemas/task", task::TASK_SCHEMA),
-    ("schemas/run", task::RUN_SCHEMA),
-    ("schemas/runner", runner::RUNNER_SCHEMA),
-    ("schemas/skill", skill::SKILL_SCHEMA),
-    ("schemas/prompt", prompt::PROMPT_SCHEMA),
-    ("schemas/daily", DAILY_SCHEMA),
-    ("schemas/bookmark", BOOKMARK_SCHEMA),
-    ("schemas/feed", feed::FEED_SCHEMA),
-    ("schemas/feed-item", feed::ITEM_SCHEMA),
-];
+/// One seed file: its `_id`, and its text.
+macro_rules! seed {
+    ($id:literal) => {
+        ($id, include_str!(concat!("seed/", $id)))
+    };
+}
 
-/// The body of `schemas/daily`: one note per day, see `seed/daily-note.md`.
-pub const DAILY_SCHEMA: &str = r#"{
-  "title": "Daily note",
-  "description": "One document per day. The _id is the local date as YYYY-MM-DD.md. content is the log for the day; intention is the one intention for the day.",
-  "type": "object",
-  "properties": {
-    "title": {"type": "string"},
-    "content": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}},
-    "intention": {"type": "string"}
-  }
-}"#;
-
-/// The body of `schemas/bookmark`: one saved web page, see `seed/bookmark.md`.
-pub const BOOKMARK_SCHEMA: &str = r#"{
-  "title": "Bookmark",
-  "description": "A saved web page. The _id is bookmarks/<origin-slug>/<path-slug>.md, with the slugs made from url. content is a summary of the page and any notes from the user.",
-  "type": "object",
-  "required": ["url"],
-  "properties": {
-    "title": {"type": "string"},
-    "url": {"type": "string"},
-    "content": {"type": "string"},
-    "tags": {"type": "array", "items": {"type": "string"}}
-  }
-}"#;
-
-/// The runners the binary seeds: id, title, argv.
-pub const RUNNERS: &[(&str, &str, &[&str])] = &[
-    (
-        "runners/claude",
-        "Claude Code, headless",
-        // Not `--bare`: bare mode skips the stored login. Bash runs in the
-        // sandbox: it writes only in the cwd and has no network, and
-        // `dreams` runs outside it to write the vault. `Edit(./**)` covers
-        // every file-writing tool.
-        &[
-            "claude",
-            "-p",
-            "--permission-mode",
-            "dontAsk",
-            "--allowedTools",
-            "Bash,Read,Glob,Grep,Edit(./**),WebSearch,WebFetch,mcp__dreams",
-            "--settings",
-            r#"{"sandbox":{"enabled":true,"autoAllowBashIfSandboxed":true,"excludedCommands":["dreams"]}}"#,
-            "--mcp-config",
-            "{mcp}",
-            "--strict-mcp-config",
-        ],
-    ),
-    (
-        "runners/codex",
-        "Codex CLI, non-interactive",
-        // `-c approval_policy=never` works on every Codex version; `-a` does not.
-        // The workspace-write sandbox writes only in the cwd.
-        &[
-            "codex",
-            "exec",
-            "-c",
-            "approval_policy=never",
-            "-c",
-            "tools.web_search=true",
-            "--sandbox",
-            "workspace-write",
-            "--skip-git-repo-check",
-            "--output-last-message",
-            "{out}",
-            "-",
-        ],
-    ),
-    ("runners/pi", "Pi, print mode", &["pi", "-p", "--no-extensions", "-"]),
+/// Every seed file. Schemas come first, so that typed documents pin to them.
+pub const FILES: &[(&str, &str)] = &[
+    seed!("schemas/task.json"),
+    seed!("schemas/run.json"),
+    seed!("schemas/runner.json"),
+    seed!("schemas/skill.json"),
+    seed!("schemas/prompt.json"),
+    seed!("schemas/daily.json"),
+    seed!("schemas/bookmark.json"),
+    seed!("schemas/feed.json"),
+    seed!("schemas/feed-item.json"),
+    // Not `--bare`: bare mode skips the stored login. Bash runs in the
+    // sandbox: it writes only in the cwd and has no network, and `dreams`
+    // runs outside it to write the vault. `Edit(./**)` covers every
+    // file-writing tool.
+    seed!("runners/claude.json"),
+    // `-c approval_policy=never` works on every Codex version; `-a` does not.
+    // The workspace-write sandbox writes only in the cwd.
+    seed!("runners/codex.json"),
+    seed!("runners/pi.json"),
     // Not an agent: pulls every feed, as the task's actor. The prompt is not read.
-    ("runners/feeds", "Pull every feed", &["{exe}", "--json", "feed", "pull"]),
+    seed!("runners/feeds.json"),
+    seed!("skills/dreams.md"),
+    seed!("skills/daily-note.md"),
+    seed!("skills/bookmark.md"),
+    seed!("skills/brief.md"),
+    seed!("prompts/daily.md"),
+    seed!("prompts/intention.md"),
+    seed!("prompts/bookmark.md"),
+    seed!("prompts/brief.md"),
+    // Seeded tasks are templates: each runs only where the user deploys it.
+    seed!("tasks/brief.json"),
+    seed!("tasks/pull-feeds.json"),
 ];
 
-/// Every built-in document as put input, schemas first so that typed
-/// documents pin to them.
+/// The seeded schema documents are under this prefix.
+const SCHEMAS: &str = "schemas/";
+
+/// One seed file as put input. The path is the `_id`.
+fn parse(id: &str, text: &str) -> PutInput {
+    let format = detect_format(Path::new(id)).unwrap_or_else(|| panic!("seed {id} has no known extension"));
+    let mut map = parse_input(text, format).unwrap_or_else(|e| panic!("seed {id}: {e}"));
+    map.insert("_id".into(), Value::String(id.to_string()));
+    serde_json::from_value(Value::Object(map)).unwrap_or_else(|e| panic!("seed {id}: {e}"))
+}
+
+/// Every built-in document as put input, in the order of `FILES`.
 pub fn defaults() -> Vec<PutInput> {
-    let schemas = SCHEMAS.iter().map(|(id, body)| {
-        let mut value: Value = serde_json::from_str(body).expect("seeded schemas are valid JSON");
-        value["_id"] = json!(id);
-        value
-    });
-    let runners = RUNNERS.iter().map(|(id, title, argv)| {
-        json!({"_id": id, "_type": RUNNER_TYPE, "title": title, "argv": argv, "timeout": runner::DEFAULT_TIMEOUT})
-    });
-    let skills = [
-        json!({
-            "_id": "skills/dreams",
-            "_type": SKILL_TYPE,
-            "name": "dreams",
-            "description": "How the Dreams vault works, and how to set up scheduled tasks, runners, skills, prompts, \
-                feeds, and schemas in it. Use before you set up, automate, schedule, or configure anything in Dreams, \
-                or when the user asks how Dreams works.",
-            "content": include_str!("seed/dreams.md"),
-        }),
-        json!({
-            "_id": "skills/daily-note",
-            "_type": SKILL_TYPE,
-            "name": "daily-note",
-            "description": "Create, add to, or find daily notes: one document per day, with the date as its id. \
-                Use when the user mentions today's note, a daily note, a journal, or a log for a day.",
-            "content": include_str!("seed/daily-note.md"),
-        }),
-        json!({
-            "_id": "skills/bookmark",
-            "_type": SKILL_TYPE,
-            "name": "bookmark",
-            "description": "Save a web page as a bookmark: fetch it, summarize it, and tag it. \
-                Use when the user wants to bookmark, clip, or save a link, or find saved links.",
-            "content": include_str!("seed/bookmark.md"),
-        }),
-        json!({
-            "_id": "skills/brief",
-            "_type": SKILL_TYPE,
-            "name": "brief",
-            "description": "Make a daily brief: food for thought that brings back ideas from the user's notes, \
-                with today's intention as its theme. Use when the user asks for a brief or a daily review.",
-            "content": include_str!("seed/brief.md"),
-        }),
-    ];
-    let prompts = [
-        json!({
-            "_id": "prompts/daily",
-            "_type": PROMPT_TYPE,
-            "name": "daily",
-            "description": "Add text to today's daily note.",
-            "content": "Use the daily-note skill. Add the text the user gave with this command to today's \
-                daily note. If the user gave no text, ask what to add.",
-        }),
-        json!({
-            "_id": "prompts/intention",
-            "_type": PROMPT_TYPE,
-            "name": "intention",
-            "description": "Set today's intention in the daily note.",
-            "content": "Use the daily-note skill. Set today's intention to the text the user gave with this \
-                command. If the user gave no text, ask for the intention.",
-        }),
-        json!({
-            "_id": "prompts/bookmark",
-            "_type": PROMPT_TYPE,
-            "name": "bookmark",
-            "description": "Save a URL as a bookmark.",
-            "content": "Use the bookmark skill. Save the URL the user gave with this command. Use the other \
-                text the user gave as notes. If the user gave no URL, ask for one.",
-        }),
-        json!({
-            "_id": "prompts/brief",
-            "_type": PROMPT_TYPE,
-            "name": "brief",
-            "description": "Make today's brief and show it.",
-            "content": "Use the brief skill. Make today's brief and show it to the user. \
-                Do not write it to the vault.",
-        }),
-    ];
-    // Seeded tasks are templates: each runs only where the user deploys it.
-    let tasks = [
-        json!({
-            "_id": "tasks/brief",
-            "_type": task::TASK_TYPE,
-            "title": "Daily brief",
-            "runner": "doc://runners/claude",
-            "every": "1d",
-            "prompt": "Use the brief skill and the daily-note skill. Get today's daily note. If its content \
-                already has a \"## Brief\" heading, stop. If not, make today's brief. Then add \
-                \"## Brief\", an empty line, and the brief to the end of the note's content, \
-                with the steps in \"Add to a daily note\".",
-        }),
-        json!({
-            "_id": feed::PULL_TASK,
-            "_type": task::TASK_TYPE,
-            "title": "Pull feeds",
-            "runner": "doc://runners/feeds",
-            "every": "1h",
-            "prompt": "Pull every feed. This runner does not read the prompt.",
-        }),
-    ];
-    schemas
-        .chain(runners)
-        .chain(skills)
-        .chain(prompts)
-        .chain(tasks)
-        .map(|v| serde_json::from_value(v).expect("seeded documents are valid put input"))
-        .collect()
+    FILES.iter().map(|(id, text)| parse(id, text)).collect()
 }
 
 /// Write every built-in document whose current revision differs from the
 /// default, as the next revision. A deleted default revives. Returns the
 /// ids written.
 pub fn seed(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    let legacy: bool = store.connection().query_row(
-        "SELECT EXISTS(SELECT 1 FROM docs WHERE _type IS NOT NULL AND _type NOT LIKE 'doc://%')",
-        [],
-        |r| r.get(0),
-    )?;
-    if legacy {
-        return Err(StoreError::invalid("this vault predates doc:// types; delete it and start again"));
-    }
     write_defaults(store, defaults())
 }
 
 /// Seed only the schema documents.
 pub fn seed_schemas(store: &mut Store) -> Result<Vec<String>, StoreError> {
-    write_defaults(store, defaults().into_iter().take(SCHEMAS.len()).collect())
+    let schemas = defaults().into_iter().filter(|d| d.id.as_deref().is_some_and(|id| id.starts_with(SCHEMAS)));
+    write_defaults(store, schemas.collect())
 }
 
 fn write_defaults(store: &mut Store, docs: Vec<PutInput>) -> Result<Vec<String>, StoreError> {
@@ -248,4 +100,49 @@ fn write_defaults(store: &mut Store, docs: Vec<PutInput>) -> Result<Vec<String>,
         written.push(id);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn files_under(dir: &Path, root: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files_under(&path, root, out);
+            } else {
+                out.push(path.strip_prefix(root).unwrap().to_string_lossy().replace('\\', "/"));
+            }
+        }
+    }
+
+    #[test]
+    fn every_seed_file_is_listed() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/seed");
+        let mut on_disk = Vec::new();
+        files_under(&root, &root, &mut on_disk);
+        on_disk.sort();
+        let mut listed: Vec<String> = FILES.iter().map(|(id, _)| id.to_string()).collect();
+        listed.sort();
+        assert_eq!(on_disk, listed);
+    }
+
+    #[test]
+    fn seeds_follow_the_format_rule() {
+        for (id, text) in FILES {
+            let raw = parse_input(text, detect_format(Path::new(id)).unwrap()).unwrap();
+            assert!(!raw.contains_key("_id"), "{id}: the path is the _id");
+            let has_content = raw.contains_key("content");
+            assert_eq!(id.ends_with(".md"), has_content, "{id}: .md if and only if it has content");
+            assert!(id.ends_with(".md") || id.ends_with(".json"), "{id}");
+        }
+    }
+
+    #[test]
+    fn schemas_come_first() {
+        let first_other = FILES.iter().position(|(id, _)| !id.starts_with(SCHEMAS)).unwrap();
+        assert!(FILES[first_other..].iter().all(|(id, _)| !id.starts_with(SCHEMAS)));
+    }
 }

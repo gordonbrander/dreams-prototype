@@ -14,7 +14,7 @@ use crate::runner::{self, Runner};
 use crate::store::Store;
 
 /// The runner `--auto` uses unless told otherwise.
-pub const DEFAULT_RUNNER: &str = "doc://runners/claude";
+pub const DEFAULT_RUNNER: &str = "doc://runners/claude.json";
 
 /// A merge an agent proposed, not yet written.
 #[derive(Debug, Clone)]

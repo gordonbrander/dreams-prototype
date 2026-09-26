@@ -1,0 +1,13 @@
+{
+  "title": "Prompt",
+  "description": "Instructions a user runs as a command. Served over MCP as a prompt named <name>, with no arguments; content is the message.",
+  "type": "object",
+  "required": ["name", "description", "content"],
+  "properties": {
+    "name": {"type": "string", "maxLength": 64, "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"},
+    "description": {"type": "string", "minLength": 1, "maxLength": 1024},
+    "content": {"type": "string"},
+    "title": {"type": "string"},
+    "tags": {"type": "array", "items": {"type": "string"}}
+  }
+}

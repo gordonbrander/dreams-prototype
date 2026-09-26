@@ -43,7 +43,7 @@ A document is a JSON object. Reserved fields start with an underscore.
 | `_id` | The document id. Any string up to 512 bytes. Generated as `<UUID v7>.md` when omitted. |
 | `_rev` | The revision id, `<generation>-<sha256>`. Computed from the content. |
 | `_parent` | The revision this one replaced. Absent on the first revision. |
-| `_type` | A `doc://` reference to a schema document, pinned to one revision: `doc://schemas/note?rev=3-9f2a…`. Optional. |
+| `_type` | A `doc://` reference to a schema document, pinned to one revision: `doc://schemas/note.json?rev=3-9f2a…`. Optional. |
 | `_deleted` | `true` on a tombstone. |
 | `_created_at` | When the revision was written. |
 | `_actor` | Who wrote the revision, when a writer named itself with `--actor`. A scheduled task's agent writes as the task. |
@@ -69,7 +69,7 @@ A schema is a document whose body is a JSON Schema. Put it like any other docume
 
 ```
 cat > note.yaml <<'EOF'
-_id: schemas/note
+_id: schemas/note.json
 title: Note
 description: A note with a required title
 type: object
@@ -81,11 +81,11 @@ EOF
 dreams doc put note.yaml
 ```
 
-A document names its schema with a `doc://` reference: `_type: doc://schemas/note`. On write, the store pins the reference to the schema's current revision, `doc://schemas/note?rev=1-c04d…`, validates the body against that revision, and only then computes the document's `_rev`. So the pinned type is part of the revision, and an unchanged document written again is a no-op until its schema moves.
+A document names its schema with a `doc://` reference: `_type: doc://schemas/note.json`. On write, the store pins the reference to the schema's current revision, `doc://schemas/note.json?rev=1-c04d…`, validates the body against that revision, and only then computes the document's `_rev`. So the pinned type is part of the revision, and an unchanged document written again is a no-op until its schema moves.
 
 Revision ids are content hashes, so a pinned reference names the same schema bytes in every vault, forever. Edit a schema and new writes pin the new revision. Old documents keep their pin and still validate against what they were written with. To re-pin an old document, update it with the unpinned `_type`: `dreams doc update n1 n1.md`, or `put_doc` with `_parent` set. A fetched document carries its pin, so an edit cycle keeps it.
 
-Filters take either form. `--type doc://schemas/note` matches every pinned revision of that schema. `--type doc://schemas/note?rev=1-c04d…` matches one.
+Filters take either form. `--type doc://schemas/note.json` matches every pinned revision of that schema. `--type doc://schemas/note.json?rev=1-c04d…` matches one.
 
 ## Command line
 
@@ -281,7 +281,7 @@ dreams doc resolve notes/plan.md --auto --dry-run   # look first
 dreams doc resolve notes/plan.md --auto
 ```
 
-`--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
+`--auto` gives a runner the winner, every conflicting revision, and the last revision that they all shared. The agent compares each side with that shared revision, keeps the changes from every side, and replies with one merged body in JSON. The default runner is `runners/claude.json`. Use `--runner` to select a different one. The runner starts as it does for a task, with `{task}` set to `resolve/<id>`.
 
 The merge keeps the winner's `_type`, unpinned, so it is validated against the current schema. Its `_actor` is the pinned reference of the runner revision that wrote it, unless you give `--actor`.
 
@@ -321,7 +321,7 @@ Tasks, runners, and runs are documents in the vault. A task document is a templa
    dreams runner list
    ```
 
-   You get `runners/claude`, `runners/codex`, and `runners/pi`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in. (`runners/feeds` is not an agent. See [Feeds](#feeds).)
+   You get `runners/claude.json`, `runners/codex.json`, and `runners/pi.json`. Each is the command that starts one agent. Pick the one whose CLI is installed and logged in. (`runners/feeds.json` is not an agent. See [Feeds](#feeds).)
 
 2. Write the prompt in a file.
 
@@ -337,17 +337,17 @@ Tasks, runners, and runs are documents in the vault. A task document is a templa
 3. Add the task.
 
    ```
-   dreams task add tasks/digest --runner runners/claude --every 1d digest.md
+   dreams task add tasks/digest.json --runner runners/claude.json --every 1d digest.md
    ```
 
-   The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude`. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
+   The id is any document id. `--runner` takes a runner id, or a `doc://` reference; the task stores `doc://runners/claude.json`. The interval takes `30s`, `15m`, `2h`, `1d`, or `1w`. The prompt file is the last argument, or `-` for stdin.
 
    `task add` then shows the prompt and the command, and asks `Deploy? [y/N]` on your terminal. Answer `y` to run the task on this vault. The question goes to the terminal, not to stdin, so a prompt on stdin works. In a script, pass `--yes` to deploy without the question. Without a terminal and without `--yes`, the deploy fails and the task stays dormant.
 
 4. Look before it runs.
 
    ```
-   dreams task check tasks/digest
+   dreams task check tasks/digest.json
    ```
 
    This prints the schedule, the last run, whether the task is due, and the exact command it will spawn. Nothing runs.
@@ -355,8 +355,8 @@ Tasks, runners, and runs are documents in the vault. A task document is a templa
 5. Run it once by hand.
 
    ```
-   dreams task run tasks/digest
-   dreams task runs tasks/digest
+   dreams task run tasks/digest.json
+   dreams task runs tasks/digest.json
    ```
 
    `task run` fires at once and prints the run receipt. `task runs` lists past runs with their exit code and error. The agent's last message is in the run's `content`.
@@ -374,7 +374,7 @@ Tasks, runners, and runs are documents in the vault. A task document is a templa
 Add a `when` filter and the task fires only if a matching document changed since its last run:
 
 ```
-dreams task add tasks/triage --runner runners/claude --every 15m --tag inbox triage.md
+dreams task add tasks/triage.json --runner runners/claude.json --every 15m --tag inbox triage.md
 ```
 
 The filters are `--tag`, `--type`, `--glob` (a SQLite GLOB on `_id`, for example `inbox/*`), and `--id` (repeatable). They are AND-ed. The agent gets the prompt, then a section that lists what changed:
@@ -392,13 +392,13 @@ Changes collect until a run consumes them. So the task fires at most once per in
 
 ### From an agent
 
-An agent that uses the MCP server creates a task by writing a document, then asks to deploy it with the `deploy_task` tool. A task document that is not deployed does not run. The seeded skill `skills/dreams` gives the agent the steps; see [The dreams skill](#the-dreams-skill).
+An agent that uses the MCP server creates a task by writing a document, then asks to deploy it with the `deploy_task` tool. A task document that is not deployed does not run. The seeded skill `skills/dreams.md` gives the agent the steps; see [The dreams skill](#the-dreams-skill).
 
 ```json
 {
-  "_id": "tasks/triage",
-  "_type": "doc://schemas/task",
-  "runner": "doc://runners/claude",
+  "_id": "tasks/triage.json",
+  "_type": "doc://schemas/task.json",
+  "runner": "doc://runners/claude.json",
   "every": "15m",
   "when": { "tag": "inbox" },
   "prompt": "Triage the documents listed below."
@@ -413,7 +413,7 @@ An agent that uses the MCP server creates a task by writing a document, then ask
 
 `run_task` takes the `id` of a deployed task and asks the scheduler to fire it on its next tick, at the deployed revisions, whatever its schedule says. It asks no question, because you already confirmed what runs. It spawns nothing itself: the scheduler runs the agent, as for every run. It refuses a dormant or disabled task.
 
-The agent finds runners with `list_docs` and `type: doc://schemas/runner`, and reads past runs with `list_docs`, `type: doc://schemas/run`, and `tag: <task id>`. It can write new runners; see [Runners](#runners). It cannot write run documents, the seeded runners, or the seeded schemas. Those are read-only over MCP.
+The agent finds runners with `list_docs` and `type: doc://schemas/runner.json`, and reads past runs with `list_docs`, `type: doc://schemas/run.json`, and `tag: <task id>`. It can write new runners; see [Runners](#runners). It cannot write run documents, the seeded runners, or the seeded schemas. Those are read-only over MCP.
 
 ### Where an agent runs, and what it can use
 
@@ -421,9 +421,9 @@ An agent runs in the folder `workspace`, next to the vault, and tasks share it. 
 
 The seeded runners give the agent these tools:
 
-- `runners/claude`: web search, web fetch, Bash, and the file tools. Bash runs in Claude Code's sandbox: it writes only in the cwd and has no network, so the agent uses web fetch for the web. The file tools write only in the cwd, and read anywhere. `dreams` runs outside the sandbox, so it can write the vault. On Linux, the sandbox needs `bubblewrap` and `socat`.
-- `runners/codex`: web search, and a shell in Codex's `workspace-write` sandbox: it writes only in the cwd and has no network.
-- `runners/pi`: Pi's own tools. Pi has no web tools without extensions, and no sandbox.
+- `runners/claude.json`: web search, web fetch, Bash, and the file tools. Bash runs in Claude Code's sandbox: it writes only in the cwd and has no network, so the agent uses web fetch for the web. The file tools write only in the cwd, and read anywhere. `dreams` runs outside the sandbox, so it can write the vault. On Linux, the sandbox needs `bubblewrap` and `socat`.
+- `runners/codex.json`: web search, and a shell in Codex's `workspace-write` sandbox: it writes only in the cwd and has no network.
+- `runners/pi.json`: Pi's own tools. Pi has no web tools without extensions, and no sandbox.
 
 All of them can read and write the vault over MCP. A vault made before these tools gets them with `dreams restore-defaults`. A deployed task keeps the runner revision it has until you run `dreams task deploy` again.
 
@@ -445,22 +445,22 @@ An edit to a task or to its runner, made here or synced from a peer, runs only a
 
 ### Runners
 
-A runner is a document typed `doc://schemas/runner` with the command that starts an agent. The command is an argument list, spawned without a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`, after which the command is killed and the run records the timeout.
+A runner is a document typed `doc://schemas/runner.json` with the command that starts an agent. The command is an argument list, spawned without a shell. Inside each argument, `{db}`, `{task}`, `{run}`, `{mcp}`, `{out}`, and `{exe}` are replaced. The prompt goes to stdin. The last message is read from stdout, or from the `{out}` file when the command wrote one. `timeout` defaults to `10m`, after which the command is killed and the run records the timeout.
 
 Add your own, for example a cheaper model for frequent tasks:
 
 ```
-dreams runner add runners/claude-fast --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
-dreams runner rm runners/pi
+dreams runner add runners/claude-fast.json --timeout 5m -- claude -p --model claude-sonnet-5 --permission-mode dontAsk
+dreams runner rm runners/pi.json
 ```
 
-Runner commands are code. A runner revision runs only after you confirm it in a deploy, which shows its full command. An agent can write new runners over MCP, because a runner that nobody deploys never runs. The seeded runners (`runners/claude`, `runners/codex`, `runners/pi`, `runners/feeds`) are read-only over MCP, because `doc resolve --auto` runs them without a deploy. Deleted defaults stay deleted.
+Runner commands are code. A runner revision runs only after you confirm it in a deploy, which shows its full command. An agent can write new runners over MCP, because a runner that nobody deploys never runs. The seeded runners (`runners/claude.json`, `runners/codex.json`, `runners/pi.json`, `runners/feeds.json`) are read-only over MCP, because `doc resolve --auto` runs them without a deploy. Deleted defaults stay deleted.
 
 The command inherits these variables: `DREAMS_DB`, `DREAMS_TASK`, `DREAMS_RUN`, `DREAMS_ACTOR` (the task id), `DREAMS_MCP` (a generated MCP config for this vault), and `DREAMS_OUT`. `PATH` starts with the directory of this binary.
 
 ### Runs
 
-Each firing writes a receipt when the agent finishes: a document typed `doc://schemas/run` at `runs/<task id>/<UUID v7>.md`, tagged with the task id. It records `task` and `runner` (the pinned references of the task and runner revisions that ran), `vault` (the id of the vault that ran it), `started_at`, `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Receipts replicate, so `task runs` shows runs from every vault.
+Each firing writes a receipt when the agent finishes: a document typed `doc://schemas/run.json` at `runs/<task id without its extension>/<UUID v7>.md`, tagged with the task id. It records `task` and `runner` (the pinned references of the task and runner revisions that ran), `vault` (the id of the vault that ran it), `started_at`, `finished_at`, `exit_code`, `error`, and the agent's last message as `content`. Receipts replicate, so `task runs` shows runs from every vault.
 
 The schedule itself is local to the vault. Before the agent starts, the scheduler takes a lease on the task for the runner's timeout plus one minute. When the agent finishes, the receipt is written, the task's change cursor moves, and the lease is released, all in one transaction. If a run is cut off by a crash, it writes no receipt. The lease expires, and the task fires again with the same changes.
 
@@ -494,12 +494,12 @@ dreams feed add https://news.ycombinator.com/rss
 dreams feed pull
 ```
 
-A feed is a document typed `doc://schemas/feed`, with `url`, `kind`, and an optional `title` and `instructions`. It does nothing until something pulls it. An agent can add one with `put_doc`. There are two kinds:
+A feed is a document typed `doc://schemas/feed.json`, with `url`, `kind`, and an optional `title` and `instructions`. It does nothing until something pulls it. An agent can add one with `put_doc`. There are two kinds:
 
 - **`rss`** reads RSS or Atom. Each entry is one item. The item keeps the entry's `title`, `url`, `published`, `guid`, and `content` (the content or summary, verbatim).
 - **`html`** reads one web page as text. The page is one item. When the text changes, the next pull writes a new revision of the item, and reports it as new.
 
-Items are documents typed `doc://schemas/feed-item`. They go under the feed's id without `.md`: the items of `feeds/news-ycombinator-com.md` are at `feeds/news-ycombinator-com/<key>.md`. The key comes from the entry's guid, else its link, else its title and date. Thus the same entry always has the same id.
+Items are documents typed `doc://schemas/feed-item.json`. They go under the feed's id without its extension: the items of `feeds/news-ycombinator-com.md` are at `feeds/news-ycombinator-com/<key>.md`. The key comes from the entry's guid, else its link, else its title and date. Thus the same entry always has the same id.
 
 The item documents are the record of what was seen. A pull skips an item that exists, or that has a tombstone. So a pull never reports an item two times, and an item that you delete does not come back. An RSS entry that the feed edits later is not new. There is no retention: delete old items like any other document.
 
@@ -535,15 +535,15 @@ A pull gives each feed's instructions next to its items. The instructions are no
 
 ### Wake an agent on new items
 
-The seeded runner `runners/feeds` runs `dreams feed pull`. It is not an agent. The seeded task `tasks/pull-feeds` uses it every hour. Like every task, it is dormant until you deploy it. Deploy it once on each vault: it pulls every feed, and feeds that you add later too. Until you deploy it, `feed add` says so. An agent that adds a feed over MCP calls `deploy_task` for `tasks/pull-feeds`. Then add a task that waits for new items:
+The seeded runner `runners/feeds.json` runs `dreams feed pull`. It is not an agent. The seeded task `tasks/pull-feeds.json` uses it every hour. Like every task, it is dormant until you deploy it. Deploy it once on each vault: it pulls every feed, and feeds that you add later too. Until you deploy it, `feed add` says so. An agent that adds a feed over MCP calls `deploy_task` for `tasks/pull-feeds.json`. Then add a task that waits for new items:
 
 ```
-dreams task deploy tasks/pull-feeds
-dreams task add tasks/read-hn --runner runners/claude --every 1h \
+dreams task deploy tasks/pull-feeds.json
+dreams task add tasks/read-hn.json --runner runners/claude.json --every 1h \
   --glob 'feeds/news-ycombinator-com/*' read-hn.md
 ```
 
-The pull runs as the actor `tasks/pull-feeds`, so the reading task sees its writes. The reading task gets the ids of the new items at the end of its prompt. It does not get the instructions, so tell its prompt to read the feed document of each item and follow its `instructions`. Use `--type doc://schemas/feed-item` in place of `--glob` to read the items of every feed.
+The pull runs as the actor `tasks/pull-feeds.json`, so the reading task sees its writes. The reading task gets the ids of the new items at the end of its prompt. It does not get the instructions, so tell its prompt to read the feed document of each item and follow its `instructions`. Use `--type doc://schemas/feed-item.json` in place of `--glob` to read the items of every feed.
 
 The first pull writes every item that the feed has now. To skip them, deploy the reading task after the first pull. A deploy starts the task at the current end of the change feed.
 
@@ -597,11 +597,11 @@ Each store operation is one tool:
 | `list_tasks` | Every task with its state here, and whether a scheduler ticks. |
 | `run_task` | Fire a deployed task (`id`) on the next tick. |
 
-Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task or a runner with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner`, and reads runs the same way. Writes to run documents, the seeded runners, and the seeded schemas are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
+Results are structured JSON. A store error returns as an invalid params error with the error object as its data. Schemas need no extra tools. An agent puts a schema document and references it as `_type: doc://<id>`. It writes a task or a runner with `put_doc`, finds runners with `list_docs` and `type: doc://schemas/runner.json`, and reads runs the same way. Writes to run documents, the seeded runners, and the seeded schemas are refused. Pull and sync have no tools. See [Conflicts over MCP](#conflicts-over-mcp) for resolving.
 
 ### Skills
 
-A document typed `doc://schemas/skill` is a skill. The server gives skills to the host through the [MCP Skills Extension](https://modelcontextprotocol.io/extensions/skills/overview) (`io.modelcontextprotocol/skills`). The body needs three fields:
+A document typed `doc://schemas/skill.json` is a skill. The server gives skills to the host through the [MCP Skills Extension](https://modelcontextprotocol.io/extensions/skills/overview) (`io.modelcontextprotocol/skills`). The body needs three fields:
 
 - `name`: lowercase letters, digits, and single hyphens, 64 characters or less.
 - `description`: what the skill does and when to use it, 1024 characters or less.
@@ -609,17 +609,17 @@ A document typed `doc://schemas/skill` is a skill. The server gives skills to th
 
 ```
 dreams doc put - <<'EOF'
-{"_id": "skills/git-workflow", "_type": "doc://schemas/skill",
+{"_id": "skills/git-workflow.md", "_type": "doc://schemas/skill.json",
  "name": "git-workflow", "description": "Branch, commit, and open a PR.",
  "content": "# Steps\n1. Make a branch first.\n"}
 EOF
 ```
 
-The server shows each skill as one file, `skill://<name>/SKILL.md`. The file has `name` and `description` as frontmatter, then `content`. `skills/list` and `skills/get` return it, and `resources/read` reads it. `resources/list` also lists it, for hosts that do not know the extension. When two documents have the same `name`, the most recently changed one wins. Agents can write skills with `put_doc`. The `schemas/skill` document itself is read-only over MCP.
+The server shows each skill as one file, `skill://<name>/SKILL.md`. The file has `name` and `description` as frontmatter, then `content`. `skills/list` and `skills/get` return it, and `resources/read` reads it. `resources/list` also lists it, for hosts that do not know the extension. When two documents have the same `name`, the most recently changed one wins. Agents can write skills with `put_doc`. The `schemas/skill.json` document itself is read-only over MCP.
 
 ### Prompts
 
-A document typed `doc://schemas/prompt` is a prompt. The server gives prompts to the host as [MCP prompts](https://modelcontextprotocol.io/specification/2025-06-18/server/prompts). Claude Code shows each one as a slash command, `/dreams:<name>`. The body needs three fields, with the same rules as a skill:
+A document typed `doc://schemas/prompt.json` is a prompt. The server gives prompts to the host as [MCP prompts](https://modelcontextprotocol.io/specification/2025-06-18/server/prompts). Claude Code shows each one as a slash command, `/dreams:<name>`. The body needs three fields, with the same rules as a skill:
 
 - `name`: lowercase letters, digits, and single hyphens, 64 characters or less.
 - `description`: what the prompt does, 1024 characters or less.
@@ -627,13 +627,13 @@ A document typed `doc://schemas/prompt` is a prompt. The server gives prompts to
 
 ```
 dreams doc put - <<'EOF'
-{"_id": "prompts/standup", "_type": "doc://schemas/prompt",
+{"_id": "prompts/standup.md", "_type": "doc://schemas/prompt.json",
  "name": "standup", "description": "Summarize yesterday's daily note.",
  "content": "Use the daily-note skill. Summarize yesterday's note as three bullets."}
 EOF
 ```
 
-A prompt declares no arguments. The user's text comes with the user's own input. In Claude Code, the model sees `/dreams:daily buy milk` as the command and its full text. Claude Code splits declared arguments on whitespace and drops extra words, so a declared argument would lose text. There is no templating. When two documents have the same `name`, the most recently changed one wins. The host learns about new prompts without a reconnect; see [Change notifications](#change-notifications). The `schemas/prompt` document itself is read-only over MCP.
+A prompt declares no arguments. The user's text comes with the user's own input. In Claude Code, the model sees `/dreams:daily buy milk` as the command and its full text. Claude Code splits declared arguments on whitespace and drops extra words, so a declared argument would lose text. There is no templating. When two documents have the same `name`, the most recently changed one wins. The host learns about new prompts without a reconnect; see [Change notifications](#change-notifications). The `schemas/prompt.json` document itself is read-only over MCP.
 
 ### Resources
 
@@ -654,17 +654,17 @@ A write that changes nothing a host sees sends nothing. A deleted resource sends
 
 ### The dreams skill
 
-Every vault is seeded with the skill `skills/dreams` (`skill://dreams/SKILL.md`). It teaches the agent the vault: how to write and update documents, where each kind of document goes, and the steps to set up a scheduled task, a runner, a skill, a prompt, a feed, or a schema. For a task, the steps are: check `list_tasks`, choose a runner, write the task, deploy it with your confirmation, test it with `run_task`, read the receipt, and tell you to run `dreams daemon install` when no scheduler ticks. The server instructions tell the agent to read this skill before it sets up anything, so hosts without the Skills Extension find it too.
+Every vault is seeded with the skill `skills/dreams.md` (`skill://dreams/SKILL.md`). It teaches the agent the vault: how to write and update documents, where each kind of document goes, and the steps to set up a scheduled task, a runner, a skill, a prompt, a feed, or a schema. For a task, the steps are: check `list_tasks`, choose a runner, write the task, deploy it with your confirmation, test it with `run_task`, read the receipt, and tell you to run `dreams daemon install` when no scheduler ticks. The server instructions tell the agent to read this skill before it sets up anything, so hosts without the Skills Extension find it too.
 
 ### Daily notes
 
-Every vault is seeded with the skill `skills/daily-note` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
+Every vault is seeded with the skill `skills/daily-note.md` (`skill://daily-note/SKILL.md`). A daily note is a document typed `doc://schemas/daily.json`. Its `_id` is the local date as `YYYY-MM-DD.md`, and it has the tag `daily`. `content` is the log for the day. `intention` is the one intention for the day, and a new one replaces the old one. The skill tells the agent how to create today's note, add to it with `_parent`, set the intention, and find old notes with `list_docs` and `tag: daily`. Edit the skill document to change how your agent writes notes. `dreams init` and `dreams restore-defaults` replace the edit with the default.
 
 Two seeded prompts use the skill: `/dreams:daily <text>` adds text to today's note, and `/dreams:intention <text>` sets today's intention.
 
 ### Bookmarks
 
-Every vault is also seeded with the skill `skills/bookmark` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<origin-slug>/<path-slug>.md`, and the agent makes the slugs from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. All bookmarks from one site share a prefix, so `list_docs` with `prefix` set to `bookmarks/example-com/` lists them. The agent gets the page with its own web fetch tool, so the host must give it one.
+Every vault is also seeded with the skill `skills/bookmark.md` (`skill://bookmark/SKILL.md`). It makes the agent a web clipper. A bookmark is a document typed `doc://schemas/bookmark.json`, with the tag `bookmark`. `url` is the address of the page, `title` is its title, and `content` is a summary of the page, then the user's notes. `tags` has `bookmark` and some topic tags. The `_id` is `bookmarks/<origin-slug>/<path-slug>.md`, and the agent makes the slugs from the URL with a rule in the skill. The same URL thus gives the same id, and a second save updates the bookmark. All bookmarks from one site share a prefix, so `list_docs` with `prefix` set to `bookmarks/example-com/` lists them. The agent gets the page with its own web fetch tool, so the host must give it one.
 
 The seeded prompt `/dreams:bookmark <url> [notes]` saves a bookmark.
 
@@ -677,27 +677,28 @@ A brief is a short page of food for thought for the day. It brings back ideas fr
 - **Prompt**: one provocation to find new ideas, in the style of Oblique Strategies, SCAMPER, or the questions at the end of a textbook chapter.
 - **Collider**: a draft for a new note that joins two far-apart notes, found with the Zettelkasten Compass, and a prompt to continue it.
 
-The seeded skill `skills/brief` (`skill://brief/SKILL.md`) tells the agent how to make a brief. Two seeded documents use it:
+The seeded skill `skills/brief.md` (`skill://brief/SKILL.md`) tells the agent how to make a brief. Two seeded documents use it:
 
 - `/dreams:brief` makes today's brief and shows it. It writes nothing.
-- The task `tasks/brief` makes a brief once a day and adds it to the end of today's daily note, under `## Brief`. If the note already has a `## Brief` heading, the run stops.
+- The task `tasks/brief.json` makes a brief once a day and adds it to the end of today's daily note, under `## Brief`. If the note already has a `## Brief` heading, the run stops.
 
-Like every task, `tasks/brief` is dormant until you deploy it. Deploy it on one vault only, because each vault that deploys it writes a brief. `every: 1d` counts from the time of deploy, so deploy it at the time of day that you want the brief:
+Like every task, `tasks/brief.json` is dormant until you deploy it. Deploy it on one vault only, because each vault that deploys it writes a brief. `every: 1d` counts from the time of deploy, so deploy it at the time of day that you want the brief:
 
 ```
-dreams task deploy tasks/brief
+dreams task deploy tasks/brief.json
 ```
 
 ## Storage
 
-One SQLite file in WAL mode. Migrations run on open.
+One SQLite file in WAL mode. Migrations run on open. A vault made by an older build, before the migrations were squashed into one, is refused: delete it and start again.
 
 - `docs` holds one row per revision. Triggers refuse updates and deletes, and enforce the parent chain.
 - `vault` and `task_state` are local and never replicate: the vault's id and the time of the last scheduler pass, and each deployed task's pins, cursor, lease, and run request.
 - `checkpoints` holds the position of the last pull from each peer, and the peer's revision at that position.
 - The winner of each document is chosen by one view, `docs_winners`, with the rule in [Conflicts](#conflicts). Copied revisions enter `docs` through the same triggers as local writes.
 - `doc_heads`, `doc_tags`, and `docs_fts` are projections of each document's current revision. One trigger keeps them in step on every write.
-- Schemas are documents. Seeding writes the built-in documents: `schemas/task`, `schemas/run`, `schemas/runner`, `schemas/skill`, `schemas/prompt`, `schemas/daily`, `schemas/bookmark`, `schemas/feed`, `schemas/feed-item`, the default runners (three agents and `runners/feeds`), the `skills/dreams`, `skills/daily-note`, `skills/bookmark`, and `skills/brief` skills, the `prompts/daily`, `prompts/intention`, `prompts/bookmark`, and `prompts/brief` prompts, and the dormant `tasks/brief` and `tasks/pull-feeds` tasks.
+- Schemas are documents. Seeding writes the built-in documents: `schemas/task.json`, `schemas/run.json`, `schemas/runner.json`, `schemas/skill.json`, `schemas/prompt.json`, `schemas/daily.json`, `schemas/bookmark.json`, `schemas/feed.json`, `schemas/feed-item.json`, the default runners (three agents and `runners/feeds.json`), the `skills/dreams.md`, `skills/daily-note.md`, `skills/bookmark.md`, and `skills/brief.md` skills, the `prompts/daily.md`, `prompts/intention.md`, `prompts/bookmark.md`, and `prompts/brief.md` prompts, and the dormant `tasks/brief.json` and `tasks/pull-feeds.json` tasks.
+- Each built-in document is a file under `src/seed/`, and its path there is its `_id`. Like every id, the extension picks the format: a document with `content` (a skill or a prompt) is Markdown with frontmatter, and any other is JSON. `dreams export` of a new vault gives the same paths.
 - Seeding writes each built-in document whose current revision is different from the default, as the next revision. It revives deleted ones. The earlier revisions stay in history.
 - `dreams init` and `dreams restore-defaults` seed. Any other command seeds only when it creates the database. Between seeds, a built-in document that you edit or delete stays as you left it. Run `dreams restore-defaults` after an edit goes wrong, or to get the defaults of a newer binary. It replaces your edits to the built-in documents.
 
