@@ -23,8 +23,8 @@ Follow these rules when you write:
 - Before you write a typed document, read its schema with `get_doc`, for example `schemas/task.json`. The schema gives the fields.
 
 To find documents:
-- `list_docs` filters by `type` (a `doc://` reference), `tag`, and `prefix` of `_id`. The newest changes come first.
-- `search_docs` searches `title`, `content`, and `tags`.
+- `search_docs` searches `title`, `content`, and `tags`. It filters by `type` (a `doc://` reference), `tag`, and `prefix` of `_id`.
+- `search_docs` with no `query` lists documents. The newest changes come first. Each result has `title`, `tags`, and the start of `content`. To read the full document, call `get_doc`.
 
 ## Where things go
 
@@ -45,7 +45,7 @@ These documents are read-only for you: the seeded schemas, the seeded runners (`
 A task wakes an agent on a schedule, with a prompt. A task document is a template. It runs on this vault only after the user deploys it.
 
 1. Call `list_tasks`. It shows each task, its state on this vault, and whether a scheduler runs. If a task that does the same work exists, change it. Do not make a second one.
-2. Choose a runner. Call `list_docs` with `type` set to `doc://schemas/runner.json`. Use `doc://runners/claude.json` if the user did not ask for a different agent. Write a new runner only when no runner fits (see "Write a runner").
+2. Choose a runner. Call `search_docs` with no `query` and `type` set to `doc://schemas/runner.json`. Use `doc://runners/claude.json` if the user did not ask for a different agent. Write a new runner only when no runner fits (see "Write a runner").
 3. Write the task with `put_doc`. The body has these fields:
    - `runner`: the `doc://` reference of the runner.
    - `every`: the interval, a number and one of `s`, `m`, `h`, `d`, `w`. For example `15m` or `1d`.
@@ -57,7 +57,7 @@ A task wakes an agent on a schedule, with a prompt. A task document is a templat
 5. Call `deploy_task` with the task id. The user sees the task, the runner command, the folder, and the prompt, and confirms. Tell the user what they will see before you call it.
    - If the user does not confirm, nothing runs. Ask what to change.
    - If the client cannot ask the user, the error gives a command. Give the user that command.
-6. Test the task. Call `run_task` with the task id. The scheduler fires it on its next tick, in a few seconds. Then call `list_docs` with `type` set to `doc://schemas/run.json` and `tag` set to the task id. Read the newest receipt:
+6. Test the task. Call `run_task` with the task id. The scheduler fires it on its next tick, in a few seconds. Then call `search_docs` with no `query`, `type` set to `doc://schemas/run.json`, and `tag` set to the task id. Call `get_doc` on the newest receipt and read it:
    - `error` is empty and `exit_code` is 0: the run worked. `content` is the agent's last message.
    - If not, read `error`. For example, a missing command means the runner's program is not installed. Fix the task or the runner, then deploy again.
 7. If `list_tasks` shows `scheduler.stale` as true, no task fires. Tell the user to run `dreams daemon install` in a terminal.

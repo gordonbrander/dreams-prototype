@@ -12,7 +12,7 @@ A brief is a short page of food for thought for one day. It brings back ideas fr
 1. Find the theme.
    - Find today's local date. Call `get_doc` with `href` set to the date plus `.md`, for example `2026-09-23.md`. See the daily-note skill.
    - If the note has an `intention`, use it as the theme.
-   - If not, call `changes` or `list_docs` to find the notes the user changed recently. Find one theme in them.
+   - If not, call `changes`, or `search_docs` with no `query`, to find the notes the user changed recently. Find one theme in them.
 2. Find notes. Call `search_docs` many times:
    - `search_docs` finds keywords, not meanings. A note must contain every word in the query. Use one or two words in each query.
    - Search for the words in the theme. Then search for synonyms and related words.

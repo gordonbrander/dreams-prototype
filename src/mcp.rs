@@ -40,7 +40,7 @@ use crate::markdown;
 use crate::prompt;
 use crate::resolve::{self, Conflict, Reply};
 use crate::skill::{self, Skill};
-use crate::store::{Changes, ConflictPage, History, ListQuery, Page, SearchPage, Store};
+use crate::store::{Changes, ConflictPage, DEFAULT_LIMIT, History, ListQuery, SearchPage, Store};
 use crate::task::{self, Deploy, TaskList, TaskState};
 
 /// How a host starts this server on the vault at `db`: the `command` and
@@ -212,9 +212,14 @@ pub struct HistoryParams {
     pub limit: Option<usize>,
 }
 
+/// The largest page `search_docs` returns. Bodies stay out of search
+/// results, but a big page is still a big tool result for an agent.
+const MCP_LIMIT_MAX: usize = 200;
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SearchParams {
-    /// Free text. Empty text lists documents with the filters instead.
+    /// Free text. Omit or leave empty to list the newest documents with the filters instead.
+    #[serde(default)]
     pub query: String,
     #[serde(flatten)]
     pub filter: ListQuery,
@@ -410,18 +415,15 @@ impl Vault {
         result.map(Json).map_err(to_mcp)
     }
 
-    #[tool(description = "List current documents, most recently modified first. Filter by type (a doc:// \
-        reference; without ?rev= it matches every pinned revision of that schema), tag, and/or `prefix` of _id. \
-        Page with `before` = previous page's `next`.")]
-    fn list_docs(&self, Parameters(q): Parameters<ListQuery>) -> Result<Json<Page>, McpError> {
-        self.lock()?.list(&q).map(Json).map_err(to_mcp)
-    }
-
     #[tool(description = "Full-text search over title, content and tags of current documents, best match first. \
-        Each result has the document's metadata, title, and `content_matches`: a snippet of the best-matching \
-        field with matched terms in **. Call get_doc for the full document. Optional type, tag, and prefix filters. \
-        An empty query lists instead, with no content_matches; page it with `before` = previous page's `next`.")]
-    fn search_docs(&self, Parameters(p): Parameters<SearchParams>) -> Result<Json<SearchPage>, McpError> {
+        Each result has the document's metadata, title, tags, and `content_matches`: a snippet of the best-matching \
+        field with matched terms in **. Call get_doc for the full document. Optional filters: type (a doc:// \
+        reference; without ?rev= it matches every pinned revision of that schema), tag, and `prefix` of _id. \
+        Omit the query to list current documents, most recently modified first, with the first 150 characters \
+        of `content` as content_matches; page the list with `before` = previous page's `next`. \
+        `limit` is 1..=200, default 50.")]
+    fn search_docs(&self, Parameters(mut p): Parameters<SearchParams>) -> Result<Json<SearchPage>, McpError> {
+        p.filter.limit = Some(p.filter.limit.unwrap_or(DEFAULT_LIMIT).min(MCP_LIMIT_MAX));
         self.lock()?.search(&p.query, &p.filter).map(Json).map_err(to_mcp)
     }
 
@@ -460,7 +462,8 @@ impl Vault {
     #[tool(description = "Fire a deployed task on the scheduler's next tick, at the revisions the person \
         deployed, whatever its schedule says. Use it to test a task after a deploy. Nothing runs in this call, \
         and nothing runs when no scheduler ticks. When the run ends, its receipt is the newest document from \
-        list_docs with type doc://schemas/run.json and tag = the task id: read `error`, `exit_code`, and `content`.")]
+        search_docs with no query, type doc://schemas/run.json, and tag = the task id. Call get_doc on it and \
+        read `error`, `exit_code`, and `content`.")]
     fn run_task(&self, Parameters(p): Parameters<TaskParams>) -> Result<Json<TaskState>, McpError> {
         task::request_run(&mut *self.lock()?, &p.id).map(Json).map_err(to_mcp)
     }
@@ -514,7 +517,7 @@ impl ServerHandler for Vault {
                  the steps. Documents have _id, _rev, optional _type, and free-form bodies with blessed fields \
                  title, content, tags. Updates must name the current _rev as _parent. A schema is a document \
                  whose body is a JSON Schema, by convention under schemas/. _type is doc://<id> of a schema and \
-                 is pinned to doc://<id>?rev=<rev> at write; list_docs with type=doc://<id> matches every pinned \
+                 is pinned to doc://<id>?rev=<rev> at write; search_docs with type=doc://<id> matches every pinned \
                  revision. A scheduled task (typed doc://schemas/task.json) runs on this vault only after deploy_task, \
                  which asks the person to confirm the exact task and runner revisions; an edit runs only after the \
                  next deploy. Run receipts, seeded runners, and seeded schemas are read-only over MCP. Skills \
@@ -829,6 +832,21 @@ mod tests {
 
     fn resolve(vault: &Vault, args: Value) -> Result<Doc, McpError> {
         vault.resolve_doc_conflicts(Parameters(serde_json::from_value(args).unwrap())).map(|Json(d)| d)
+    }
+
+    #[test]
+    fn search_docs_lists_without_a_query_and_caps_the_page() {
+        let vault = Vault::new(Store::open_in_memory().unwrap());
+        for i in 0..=MCP_LIMIT_MAX {
+            let doc = json!({"_id": format!("n{i}"), "body": {"title": "t", "tags": ["n"]}});
+            vault.put_doc(Parameters(serde_json::from_value(doc).unwrap())).unwrap();
+        }
+        let search = |args: Value| vault.search_docs(Parameters(serde_json::from_value(args).unwrap())).unwrap().0;
+
+        let page = search(json!({"tag": "n", "limit": 400}));
+        assert_eq!(page.results.len(), MCP_LIMIT_MAX);
+        assert!(page.next.is_some());
+        assert_eq!(search(json!({"tag": "n"})).results.len(), DEFAULT_LIMIT);
     }
 
     #[test]

@@ -376,10 +376,10 @@ fn search_sees_only_current_revisions() {
     assert!(
         s.search("second", &ListQuery { tag: Some("blue".into()), ..Default::default() }).unwrap().results.is_empty()
     );
-    // empty query lists, with no matches
+    // empty query lists, with the start of content as matches
     let listed = s.search("   ", &ListQuery::default()).unwrap();
-    assert_eq!(listed.results.len(), 2);
-    assert!(listed.results.iter().all(|r| r.content_matches.is_none() && r.title.is_some()));
+    assert_eq!(hit_ids(&listed), vec!["a", "b"]);
+    assert_eq!(listed.results[0].content_matches.as_deref(), Some("second draft"));
 }
 
 #[test]
@@ -394,14 +394,39 @@ fn search_results_carry_metadata_and_matches() {
     assert_eq!(hit.created_at, a.created_at);
     assert_eq!(hit.title.as_deref(), Some("Alpha"));
     assert_eq!(hit.content_matches.as_deref(), Some("the **first** draft"));
+    assert_eq!(hit.tags, vec!["blue"]);
 
     let page = s.search("alpha", &ListQuery::default()).unwrap();
     assert_eq!(page.results[0].content_matches.as_deref(), Some("**Alpha**"));
 
     let json = serde_json::to_value(&page.results[0]).unwrap();
-    for key in ["content", "tags", "_seq", "_conflicts", "_parent"] {
+    for key in ["content", "_seq", "_conflicts", "_parent"] {
         assert!(json.get(key).is_none(), "{key} in {json}");
     }
+}
+
+#[test]
+fn empty_search_lists_with_tags_and_a_content_preview() {
+    let mut s = store();
+    let long = "word ".repeat(100);
+    s.put(input(json!({"_id": "long", "content": long, "tags": ["red"], "extra": "x".repeat(10_000)}))).unwrap();
+    s.put(input(json!({"_id": "short", "content": "just a line"}))).unwrap();
+    s.put(input(json!({"_id": "emoji", "content": "🌙".repeat(300)}))).unwrap();
+
+    let page = s.search("", &ListQuery::default()).unwrap();
+    assert_eq!(hit_ids(&page), vec!["emoji", "short", "long"]);
+    let [emoji, short, long] = &page.results[..] else { panic!("three results") };
+
+    let preview = long.content_matches.as_deref().unwrap();
+    assert!(preview.ends_with('…'));
+    assert!(preview.chars().count() <= dreams::store::PREVIEW_CHARS);
+    assert_eq!(long.tags, vec!["red"]);
+    assert_eq!(short.content_matches.as_deref(), Some("just a line"));
+    assert!(short.tags.is_empty());
+    assert_eq!(emoji.content_matches.as_deref().unwrap().chars().count(), dreams::store::PREVIEW_CHARS);
+
+    let json = serde_json::to_value(long).unwrap();
+    assert!(json.get("extra").is_none() && json.get("content").is_none(), "{json}");
 }
 
 #[test]

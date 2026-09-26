@@ -39,7 +39,7 @@ Examples:
 4. Call `get_doc` with `href` set to the id.
 5. If the document is not found, create it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark.json`, and no `_parent`. Use this body: `{"title": "<title>", "url": "<url>", "content": "<content>", "tags": ["bookmark", ...]}`.
    - `content` is the summary. If the user gave notes, add `\n\n## Notes\n\n` and then the notes.
-   - `tags` is `bookmark` and one to five topic tags. Write tags in lowercase, with `-` between words. Use tags that other bookmarks use when they fit. To see them, call `list_docs` with `tag` set to `bookmark`.
+   - `tags` is `bookmark` and one to five topic tags. Write tags in lowercase, with `-` between words. Use tags that other bookmarks use when they fit. To see them, call `search_docs` with no `query` and `tag` set to `bookmark`.
 6. If the document is found, update it. Call `put_doc` with `_id` set to the id, `_type` set to `doc://schemas/bookmark.json`, and `_parent` set to its `_rev`. Send the full body:
    - Set `title` and `url` to the new values.
    - In `content`, replace the summary with the new summary. Keep the `## Notes` section. Add the new notes to the end of it, with one empty line between notes.
@@ -52,6 +52,6 @@ Examples:
 ## Find bookmarks
 
 - To find the bookmark for a URL, make the id from the URL. Then call `get_doc` with `href` set to the id.
-- To list bookmarks, call `list_docs` with `tag` set to `bookmark`. The newest changes come first.
-- To list the bookmarks from one site, make the origin slug from its URL. Then call `list_docs` with `prefix` set to `bookmarks/<origin-slug>/`.
+- To list bookmarks, call `search_docs` with no `query` and `tag` set to `bookmark`. The newest changes come first.
+- To list the bookmarks from one site, make the origin slug from its URL. Then call `search_docs` with no `query` and `prefix` set to `bookmarks/<origin-slug>/`.
 - To find bookmarks about a subject, call `search_docs`. It searches `title`, `content`, and `tags`. It does not search `url`.
